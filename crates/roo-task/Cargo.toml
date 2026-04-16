@@ -9,10 +9,20 @@ description = "Task engine for Roo Code Rust"
 [dependencies]
 roo-types = { path = "../roo-types" }
 roo-task-persistence = { path = "../roo-task-persistence" }
+roo-provider = { path = "../roo-provider" }
+roo-tools = { path = "../roo-tools" }
+roo-tools-fs = { path = "../roo-tools-fs" }
+roo-tools-search = { path = "../roo-tools-search" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

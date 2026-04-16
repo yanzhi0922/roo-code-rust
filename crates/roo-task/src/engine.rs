@@ -4,7 +4,7 @@
 //! state management, loop control, event emission, streaming state, and
 //! result computation.
 //!
-//! Source: `src/core/task/Task.ts` — Task class
+//! Source: `src/core/task/Task.ts` 鈥?Task class
 
 use crate::config::validate_config;
 use crate::events::TaskEventEmitter;
@@ -32,7 +32,7 @@ use crate::types::{
 /// - [`StreamingState`] for API streaming state
 /// - [`TaskResult`] for result aggregation
 ///
-/// The actual agent loop (API call → parse response → tool execution → loop)
+/// The actual agent loop (API call 鈫?parse response 鈫?tool execution 鈫?loop)
 /// is coordinated at the application layer using these components.
 pub struct TaskEngine {
     config: TaskConfig,
@@ -42,27 +42,27 @@ pub struct TaskEngine {
     result: TaskResult,
     /// API conversation history (messages sent to/from the API).
     ///
-    /// Source: `src/core/task/Task.ts` — `apiConversationHistory`
+    /// Source: `src/core/task/Task.ts` 鈥?`apiConversationHistory`
     api_conversation_history: Vec<roo_types::api::ApiMessage>,
     /// UI-facing conversation messages (ClineMessages).
     ///
-    /// Source: `src/core/task/Task.ts` — `clineMessages`
+    /// Source: `src/core/task/Task.ts` 鈥?`clineMessages`
     cline_messages: Vec<roo_types::message::ClineMessage>,
     /// Whether the task has been initialized.
     ///
-    /// Source: `src/core/task/Task.ts` — `isInitialized`
+    /// Source: `src/core/task/Task.ts` 鈥?`isInitialized`
     is_initialized: bool,
     /// Whether the task has been abandoned (for delegation).
     ///
-    /// Source: `src/core/task/Task.ts` — `abandoned`
+    /// Source: `src/core/task/Task.ts` 鈥?`abandoned`
     abandoned: bool,
     /// Whether the task is paused.
     ///
-    /// Source: `src/core/task/Task.ts` — `isPaused`
+    /// Source: `src/core/task/Task.ts` 鈥?`isPaused`
     is_paused: bool,
     /// Abort reason, if any.
     ///
-    /// Source: `src/core/task/Task.ts` — `abortReason`
+    /// Source: `src/core/task/Task.ts` 鈥?`abortReason`
     abort_reason: Option<String>,
 }
 
@@ -125,7 +125,7 @@ impl TaskEngine {
 
     /// Get a reference to the streaming state.
     ///
-    /// Source: `src/core/task/Task.ts` — streaming-related properties
+    /// Source: `src/core/task/Task.ts` 鈥?streaming-related properties
     pub fn streaming(&self) -> &StreamingState {
         &self.streaming
     }
@@ -137,7 +137,7 @@ impl TaskEngine {
 
     /// Get a reference to the API conversation history.
     ///
-    /// Source: `src/core/task/Task.ts` — `apiConversationHistory`
+    /// Source: `src/core/task/Task.ts` 鈥?`apiConversationHistory`
     pub fn api_conversation_history(&self) -> &[roo_types::api::ApiMessage] {
         &self.api_conversation_history
     }
@@ -149,7 +149,7 @@ impl TaskEngine {
 
     /// Add a message to the API conversation history.
     ///
-    /// Source: `src/core/task/Task.ts` — `addToApiConversationHistory`
+    /// Source: `src/core/task/Task.ts` 鈥?`addToApiConversationHistory`
     pub fn add_api_message(&mut self, message: roo_types::api::ApiMessage) {
         self.api_conversation_history.push(message);
     }
@@ -166,7 +166,7 @@ impl TaskEngine {
 
     /// Get a reference to the cline messages (UI-facing messages).
     ///
-    /// Source: `src/core/task/Task.ts` — `clineMessages`
+    /// Source: `src/core/task/Task.ts` 鈥?`clineMessages`
     pub fn cline_messages(&self) -> &[roo_types::message::ClineMessage] {
         &self.cline_messages
     }
@@ -247,7 +247,7 @@ impl TaskEngine {
 
     /// Abort the task with a specific reason.
     ///
-    /// Source: `src/core/task/Task.ts` — `abortReason` can be various values
+    /// Source: `src/core/task/Task.ts` 鈥?`abortReason` can be various values
     /// like "user_cancelled", "rate_limit_hit", "max_tokens_exceeded", etc.
     pub fn abort_with_reason(&mut self, reason: &str) -> Result<TaskState, TaskError> {
         self.loop_control.cancel();
@@ -319,7 +319,7 @@ impl TaskEngine {
 
     /// Prepare for a new API request by resetting streaming state.
     ///
-    /// Source: `src/core/task/Task.ts` — streaming state reset block in
+    /// Source: `src/core/task/Task.ts` 鈥?streaming state reset block in
     /// `recursivelyMakeClineRequests`
     pub fn prepare_for_new_api_request(&mut self) {
         self.streaming.reset_for_new_request();
@@ -329,7 +329,7 @@ impl TaskEngine {
     ///
     /// Returns the delay in milliseconds.
     ///
-    /// Source: `src/core/task/Task.ts` — `MAX_EXPONENTIAL_BACKOFF_SECONDS`
+    /// Source: `src/core/task/Task.ts` 鈥?`MAX_EXPONENTIAL_BACKOFF_SECONDS`
     pub fn calculate_backoff_delay(retry_attempt: u32) -> u64 {
         let base_delay = 1000u64; // 1 second base
         let delay = base_delay * 2u64.pow(retry_attempt);
@@ -341,7 +341,7 @@ impl TaskEngine {
     /// Clears ask states, resets abort/streaming flags, and prepares for
     /// the next API call.
     ///
-    /// Source: `src/core/task/Task.ts` — `resumeAfterDelegation`
+    /// Source: `src/core/task/Task.ts` 鈥?`resumeAfterDelegation`
     pub fn resume_after_delegation(&mut self) -> Result<TaskState, TaskError> {
         // Reset abort and streaming state
         self.loop_control.reset_turn();
@@ -362,7 +362,7 @@ impl TaskEngine {
 
     /// Check whether the task is paused.
     ///
-    /// Source: `src/core/task/Task.ts` — `isPaused`
+    /// Source: `src/core/task/Task.ts` 鈥?`isPaused`
     pub fn is_paused(&self) -> bool {
         self.is_paused
     }
@@ -375,6 +375,25 @@ impl TaskEngine {
             self.result.status = TaskState::Completed;
         }
         self.result
+    }
+
+    /// Build a result snapshot without consuming the engine.
+    ///
+    /// This is useful for the agent loop which needs to return a result
+    /// while keeping the engine alive during execution.
+    pub fn build_result_snapshot(&self) -> TaskResult {
+        self.result.clone()
+    }
+
+    /// Complete the task if still running and return a result snapshot.
+    ///
+    /// Combines `complete()` (if needed) and `build_result_snapshot()`.
+    pub fn finalize_in_place(&mut self) -> TaskResult {
+        if self.state_machine.current() == TaskState::Running {
+            let _ = self.state_machine.complete();
+            self.result.status = TaskState::Completed;
+        }
+        self.result.clone()
     }
 }
 
@@ -731,7 +750,7 @@ mod tests {
 
         // Second mistake hits the limit (>= comparison)
         engine.record_tool_execution("tool1", false);
-        assert!(!engine.should_continue()); // 2 >= 2 → STOP
+        assert!(!engine.should_continue()); // 2 >= 2 鈫?STOP
     }
 
     // --- Cline messages tests ---

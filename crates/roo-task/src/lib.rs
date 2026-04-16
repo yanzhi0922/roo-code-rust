@@ -9,6 +9,10 @@
 //! - **Loop control**: [`LoopControl`] for iteration and mistake limits
 //! - **Engine**: [`TaskEngine`] orchestrating the full task lifecycle
 //! - **Config**: [`validate_config`], [`default_config`] for configuration management
+//! - **Stream parser**: [`StreamParser`] for parsing API streaming responses
+//! - **Tool dispatcher**: [`ToolDispatcher`] for routing tool calls to handlers
+//! - **Message builder**: [`MessageBuilder`] for constructing API messages
+//! - **Agent loop**: [`AgentLoop`] for the core agent execution loop
 
 // ---------------------------------------------------------------------------
 // Module declarations
@@ -20,6 +24,10 @@ pub mod events;
 pub mod loop_control;
 pub mod config;
 pub mod engine;
+pub mod stream_parser;
+pub mod tool_dispatcher;
+pub mod message_builder;
+pub mod agent_loop;
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -31,3 +39,7 @@ pub use events::{TaskEvent, TaskEventEmitter};
 pub use loop_control::LoopControl;
 pub use engine::TaskEngine;
 pub use config::{validate_config, default_config, DEFAULT_MAX_MISTAKES, DEFAULT_MODE};
+pub use stream_parser::{StreamParser, ParsedStreamContent, ParsedToolCall, StreamUsage};
+pub use tool_dispatcher::{ToolDispatcher, ToolExecutionResult, ToolContext, ToolHandler};
+pub use message_builder::MessageBuilder;
+pub use agent_loop::{AgentLoop, AgentLoopConfig};
