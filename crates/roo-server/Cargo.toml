@@ -1,0 +1,9 @@
+﻿[package]
+name = "roo-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "roo-server for Roo Code Rust"
+
+[dependencies]

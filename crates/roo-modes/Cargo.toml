@@ -1,0 +1,13 @@
+[package]
+name = "roo-modes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Higher-level mode operations for Roo Code"
+
+[dependencies]
+roo-types = { workspace = true }
+roo-tools = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "roo-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Configuration management for Roo Code Rust"
+
+[dependencies]
+dirs = "6"
+tokio = { workspace = true, features = ["fs"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["fs", "rt", "macros"] }
+tempfile = "3"

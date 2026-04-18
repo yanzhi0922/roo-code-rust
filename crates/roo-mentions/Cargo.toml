@@ -1,0 +1,19 @@
+[package]
+name = "roo-mentions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "@ mention parsing and processing for Roo Code Rust"
+
+[dependencies]
+tokio = { workspace = true, features = ["fs", "io-util"] }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+roo-command = { path = "../roo-command" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["fs", "rt", "macros"] }
+tempfile = "3"

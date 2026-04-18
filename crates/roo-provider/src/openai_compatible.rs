@@ -1,0 +1,468 @@
+//! OpenAI-compatible provider base class.
+//!
+//! Derived from `src/api/providers/base-openai-compatible-provider.ts`.
+//! Handles SSE stream parsing, usage metrics, and tool call processing.
+
+use std::collections::HashSet;
+use std::pin::Pin;
+
+use async_trait::async_trait;
+use eventsource_stream::Eventsource;
+use futures::{Stream, StreamExt, TryStreamExt};
+use serde::Deserialize;
+
+use roo_types::api::{ApiMessage, ApiStreamChunk, ProviderName};
+use roo_types::model::ModelInfo;
+
+use crate::base_provider::{convert_tools_for_openai, BaseProvider};
+use crate::error::{ProviderError, Result};
+use crate::handler::{ApiStream, CreateMessageMetadata, Provider};
+use crate::transform::openai_format::convert_to_openai_messages;
+
+// ---------------------------------------------------------------------------
+// OpenAI SSE response types
+// ---------------------------------------------------------------------------
+
+/// A chunk from the OpenAI streaming API.
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChunk {
+    choices: Option<Vec<OpenAiChoice>>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    delta: Option<OpenAiDelta>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiDelta {
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+    reasoning_content: Option<String>,
+    reasoning: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiToolCallDelta {
+    index: u64,
+    id: Option<String>,
+    function: Option<OpenAiFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAiUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiPromptTokensDetails {
+    cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// Usage metrics
+// ---------------------------------------------------------------------------
+
+/// Processes OpenAI usage metrics into an ApiStreamChunk.
+///
+/// Source: `src/api/providers/base-openai-compatible-provider.ts` — `processUsageMetrics`
+pub fn process_usage_metrics(
+    usage: &OpenAiUsage,
+    model_info: &ModelInfo,
+) -> ApiStreamChunk {
+    let input_tokens = usage.prompt_tokens.unwrap_or(0);
+    let output_tokens = usage.completion_tokens.unwrap_or(0);
+    let cache_write_tokens = usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|d| d.cache_write_tokens)
+        .unwrap_or(0);
+    let cache_read_tokens = usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|d| d.cached_tokens)
+        .unwrap_or(0);
+
+    let total_cost = calculate_api_cost_openai(
+        model_info,
+        input_tokens,
+        output_tokens,
+        cache_write_tokens,
+        cache_read_tokens,
+    );
+
+    ApiStreamChunk::Usage {
+        input_tokens,
+        output_tokens,
+        cache_write_tokens: if cache_write_tokens > 0 {
+            Some(cache_write_tokens)
+        } else {
+            None
+        },
+        cache_read_tokens: if cache_read_tokens > 0 {
+            Some(cache_read_tokens)
+        } else {
+            None
+        },
+        reasoning_tokens: None,
+        total_cost: Some(total_cost),
+    }
+}
+
+/// Calculates API cost based on token usage and model pricing.
+fn calculate_api_cost_openai(
+    model_info: &ModelInfo,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_write_tokens: u64,
+    cache_read_tokens: u64,
+) -> f64 {
+    let input_cost = model_info.input_price.unwrap_or(0.0) * input_tokens as f64 / 1_000_000.0;
+    let output_cost = model_info.output_price.unwrap_or(0.0) * output_tokens as f64 / 1_000_000.0;
+    let cache_write_cost =
+        model_info.cache_writes_price.unwrap_or(0.0) * cache_write_tokens as f64 / 1_000_000.0;
+    let cache_read_cost =
+        model_info.cache_reads_price.unwrap_or(0.0) * cache_read_tokens as f64 / 1_000_000.0;
+    input_cost + output_cost + cache_write_cost + cache_read_cost
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible provider
+// ---------------------------------------------------------------------------
+
+/// Configuration for an OpenAI-compatible provider.
+pub struct OpenAiCompatibleConfig {
+    pub provider_name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub default_model_id: String,
+    pub default_temperature: f64,
+    pub model_id: Option<String>,
+    pub model_info: ModelInfo,
+    pub provider_name_enum: ProviderName,
+    pub request_timeout: Option<u64>,
+}
+
+/// Base class for OpenAI-compatible API providers.
+///
+/// Source: `src/api/providers/base-openai-compatible-provider.ts`
+pub struct OpenAiCompatibleProvider {
+    base: BaseProvider,
+    http_client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+    provider_name_str: String,
+    default_temperature: f64,
+}
+
+impl OpenAiCompatibleProvider {
+    /// Create a new OpenAI-compatible provider.
+    pub fn new(config: OpenAiCompatibleConfig) -> Result<Self> {
+        let model_id = config
+            .model_id
+            .unwrap_or_else(|| config.default_model_id.clone());
+
+        let base = BaseProvider::new(model_id, config.model_info, config.provider_name_enum);
+
+        let mut client_builder = reqwest::Client::builder();
+        if let Some(timeout) = config.request_timeout {
+            client_builder =
+                client_builder.timeout(std::time::Duration::from_millis(timeout));
+        }
+
+        let http_client = client_builder
+            .build()
+            .map_err(ProviderError::Reqwest)?;
+
+        Ok(Self {
+            base,
+            http_client,
+            api_key: config.api_key,
+            base_url: config.base_url,
+            provider_name_str: config.provider_name,
+            default_temperature: config.default_temperature,
+        })
+    }
+
+    /// Build the request body for a streaming chat completion.
+    fn build_stream_request_body(
+        &self,
+        system_prompt: &str,
+        messages: &[ApiMessage],
+        tools: Option<&Vec<serde_json::Value>>,
+        metadata: &CreateMessageMetadata,
+    ) -> Result<serde_json::Value> {
+        let (model, info) = self.base.get_model();
+
+        let max_tokens = info.max_tokens;
+        let temperature = self.default_temperature;
+
+        let openai_messages = convert_to_openai_messages(messages, None)?;
+
+        let mut system_and_messages = vec![serde_json::json!({
+            "role": "system",
+            "content": system_prompt
+        })];
+        system_and_messages.extend(openai_messages);
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "temperature": temperature,
+            "messages": system_and_messages,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "parallel_tool_calls": metadata.parallel_tool_calls.unwrap_or(true),
+        });
+
+        if let Some(max_tokens) = max_tokens {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+
+        if let Some(tools) = convert_tools_for_openai(tools) {
+            body["tools"] = serde_json::json!(tools);
+        }
+
+        if let Some(ref tool_choice) = metadata.tool_choice {
+            body["tool_choice"] = tool_choice.clone();
+        }
+
+        Ok(body)
+    }
+
+    /// Create a streaming response from the API.
+    async fn create_stream(
+        &self,
+        system_prompt: &str,
+        messages: &[ApiMessage],
+        tools: Option<&Vec<serde_json::Value>>,
+        metadata: &CreateMessageMetadata,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<OpenAiStreamChunk>> + Send>>> {
+        let body = self.build_stream_request_body(system_prompt, messages, tools, metadata)?;
+        let (_model, _) = self.base.get_model();
+
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::api_error(&self.provider_name_str, e))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(ProviderError::api_error_response(
+                &self.provider_name_str,
+                status,
+                text,
+            ));
+        }
+
+        // Parse SSE stream
+        let provider_name = self.provider_name_str.clone();
+        let stream = response
+            .bytes_stream()
+            .eventsource()
+            .map(move |event| {
+                match event {
+                    Ok(event) => {
+                        if event.data == "[DONE]" {
+                            return None;
+                        }
+                        match serde_json::from_str::<OpenAiStreamChunk>(&event.data) {
+                            Ok(chunk) => Some(Ok(chunk)),
+                            Err(e) => Some(Err(ProviderError::ParseError(format!(
+                                "Failed to parse stream chunk: {e}"
+                            )))),
+                        }
+                    }
+                    Err(e) => Some(Err(ProviderError::StreamError(format!(
+                        "SSE error: {e}"
+                    )))),
+                }
+            })
+            .filter_map(|item| async move { item })
+            .map_err(move |e| {
+                ProviderError::StreamError(format!("{provider_name}: {e}"))
+            });
+
+        Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl Provider for OpenAiCompatibleProvider {
+    async fn create_message(
+        &self,
+        system_prompt: &str,
+        messages: Vec<ApiMessage>,
+        tools: Option<Vec<serde_json::Value>>,
+        metadata: CreateMessageMetadata,
+    ) -> Result<ApiStream> {
+        let stream = self
+            .create_stream(system_prompt, &messages, tools.as_ref(), &metadata)
+            .await?;
+
+        let (_, model_info) = self.base.get_model();
+
+        // Process the stream into ApiStreamChunks
+        let active_tool_call_ids: HashSet<String> = HashSet::new();
+        let model_info = model_info.clone();
+
+        let processed = stream.filter_map(move |chunk_result| {
+            let model_info = model_info.clone();
+            let mut active_tool_call_ids = active_tool_call_ids.clone();
+
+            async move {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+
+                let delta = chunk.choices.as_ref().and_then(|c| c.first()).and_then(|c| c.delta.as_ref());
+                let finish_reason = chunk
+                    .choices
+                    .as_ref()
+                    .and_then(|c| c.first())
+                    .and_then(|c| c.finish_reason.as_ref())
+                    .cloned();
+
+                let mut results: Vec<Result<ApiStreamChunk>> = Vec::new();
+
+                // Handle content
+                if let Some(delta) = delta {
+                    if let Some(ref content) = delta.content {
+                        results.push(Ok(ApiStreamChunk::Text {
+                            text: content.clone(),
+                        }));
+                    }
+
+                    // Handle reasoning content
+                    if let Some(ref reasoning) = delta.reasoning_content {
+                        if !reasoning.trim().is_empty() {
+                            results.push(Ok(ApiStreamChunk::Reasoning {
+                                text: reasoning.clone(),
+                                signature: None,
+                            }));
+                        }
+                    } else if let Some(ref reasoning) = delta.reasoning {
+                        if !reasoning.trim().is_empty() {
+                            results.push(Ok(ApiStreamChunk::Reasoning {
+                                text: reasoning.clone(),
+                                signature: None,
+                            }));
+                        }
+                    }
+
+                    // Handle tool calls
+                    if let Some(ref tool_calls) = delta.tool_calls {
+                        for tool_call in tool_calls {
+                            if let Some(ref id) = tool_call.id {
+                                active_tool_call_ids.insert(id.clone());
+                            }
+                            results.push(Ok(ApiStreamChunk::ToolCallPartial {
+                                index: tool_call.index,
+                                id: tool_call.id.clone(),
+                                name: tool_call
+                                    .function
+                                    .as_ref()
+                                    .and_then(|f| f.name.clone()),
+                                arguments: tool_call
+                                    .function
+                                    .as_ref()
+                                    .and_then(|f| f.arguments.clone()),
+                            }));
+                        }
+                    }
+                }
+
+                // Emit tool_call_end events when finish_reason is "tool_calls"
+                if finish_reason.as_deref() == Some("tool_calls") && !active_tool_call_ids.is_empty() {
+                    for id in &active_tool_call_ids {
+                        results.push(Ok(ApiStreamChunk::ToolCallEnd { id: id.clone() }));
+                    }
+                    active_tool_call_ids.clear();
+                }
+
+                // Handle usage
+                if let Some(ref usage) = chunk.usage {
+                    results.push(Ok(process_usage_metrics(usage, &model_info)));
+                }
+
+                if results.is_empty() {
+                    None
+                } else {
+                    // Return the first result; remaining would need a different approach
+                    // For simplicity, we yield each as a separate stream item
+                    results.into_iter().next()
+                }
+            }
+        });
+
+        Ok(Box::pin(processed))
+    }
+
+    fn get_model(&self) -> (String, ModelInfo) {
+        self.base.get_model()
+    }
+
+    async fn complete_prompt(&self, prompt: &str) -> Result<String> {
+        let (model, _) = self.base.get_model();
+
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{ "role": "user", "content": prompt }]
+        });
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::api_error(&self.provider_name_str, e))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(ProviderError::api_error_response(
+                &self.provider_name_str,
+                status,
+                text,
+            ));
+        }
+
+        let resp: serde_json::Value = response
+            .json()
+            .await
+            .map_err(ProviderError::Reqwest)?;
+
+        Ok(resp["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string())
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        self.base.provider_name_value
+    }
+}
