@@ -1,4 +1,4 @@
-//! AWS Bedrock provider handler.
+﻿//! AWS Bedrock provider handler.
 //!
 //! Uses the Bedrock Converse API with AWS SigV4 signing.
 //! Supports cross-region inference and custom model IDs.
@@ -38,8 +38,8 @@ impl AwsBedrockHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(200000),
-                supports_images: true,
+                context_window: 200000,
+                supports_images: Some(true),
                 supports_prompt_cache: true,
                 input_price: Some(3.0),
                 output_price: Some(15.0),

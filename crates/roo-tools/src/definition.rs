@@ -1,4 +1,4 @@
-//! Tool definitions in OpenAI Function Calling format.
+﻿//! Tool definitions in OpenAI Function Calling format.
 //!
 //! Corresponds to `src/core/prompts/tools/native-tools/*.ts`.
 

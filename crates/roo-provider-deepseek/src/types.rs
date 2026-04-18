@@ -25,15 +25,15 @@ impl DeepSeekConfig {
     pub fn from_settings(settings: &ProviderSettings) -> Option<Self> {
         let api_key = settings.api_key.clone()?;
         let base_url = settings
-            .deepseek_base_url
+            .deep_seek_base_url
             .clone()
             .unwrap_or_else(|| Self::DEFAULT_BASE_URL.to_string());
 
         Some(Self {
             api_key,
             base_url,
-            model_id: settings.model_id.clone(),
-            temperature: settings.model_temperature,
+            model_id: settings.api_model_id.clone(),
+            temperature: settings.model_temperature.flatten(),
             request_timeout: settings.request_timeout,
         })
     }

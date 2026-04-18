@@ -26,9 +26,9 @@ impl VscodeLmConfig {
     pub fn from_settings(settings: &ProviderSettings) -> Option<Self> {
         // VS Code LM is always available if we're running in VS Code
         Some(Self {
-            model_selector: settings.vscode_lm_model_selector.clone(),
-            model_id: settings.model_id.clone(),
-            temperature: settings.model_temperature,
+            model_selector: settings.vs_code_lm_model_selector.clone(),
+            model_id: settings.api_model_id.clone(),
+            temperature: settings.model_temperature.flatten(),
             request_timeout: settings.request_timeout,
         })
     }

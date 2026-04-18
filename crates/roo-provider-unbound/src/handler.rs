@@ -1,4 +1,4 @@
-//! Unbound provider handler.
+﻿//! Unbound provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via Unbound.
 //! Supports custom metadata headers and cache token tracking.
@@ -30,7 +30,7 @@ impl UnboundHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(4096),
-                max_input_tokens: Some(128000),
+                context_window: 128000,
                 supports_prompt_cache: false,
                 input_price: Some(0.0),
                 output_price: Some(0.0),

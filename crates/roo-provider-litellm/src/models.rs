@@ -1,4 +1,4 @@
-//! LiteLLM model definitions.
+﻿//! LiteLLM model definitions.
 //!
 //! These are static fallback models. In production, models are fetched
 //! dynamically from the LiteLLM server's `/v1/model/info` endpoint.
@@ -17,8 +17,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "gpt-4o".to_string(),
         ModelInfo {
             max_tokens: Some(4096),
-            max_input_tokens: Some(128000),
-            supports_images: true,
+            context_window: 128000,
+            supports_images: Some(true),
             supports_prompt_cache: false,
             input_price: Some(2.50),
             output_price: Some(10.0),
@@ -31,8 +31,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "claude-3-5-sonnet-20241022".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(3.0),
             output_price: Some(15.0),
@@ -47,8 +47,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "deepseek-chat".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(65536),
-            supports_images: false,
+            context_window: 65536,
+            supports_images: Some(false),
             supports_prompt_cache: true,
             input_price: Some(0.27),
             output_price: Some(1.10),
@@ -61,8 +61,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "gemini-2.5-pro".to_string(),
         ModelInfo {
             max_tokens: Some(16384),
-            max_input_tokens: Some(1048576),
-            supports_images: true,
+            context_window: 1048576,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(1.25),
             output_price: Some(10.0),

@@ -41,7 +41,7 @@ impl LiteLlmConfig {
             api_key,
             base_url,
             model_id: settings.litellm_model_id.clone(),
-            temperature: settings.model_temperature,
+            temperature: settings.model_temperature.flatten(),
             use_prompt_cache: false,
             request_timeout: settings.request_timeout,
         })

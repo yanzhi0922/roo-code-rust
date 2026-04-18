@@ -1,4 +1,4 @@
-//! LiteLLM provider handler.
+﻿//! LiteLLM provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via LiteLLM proxy.
 //! Supports prompt caching, GPT-5 detection, and Gemini model handling.
@@ -30,7 +30,7 @@ impl LiteLlmHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(4096),
-                max_input_tokens: Some(128000),
+                context_window: 128000,
                 supports_prompt_cache: false,
                 input_price: Some(2.50),
                 output_price: Some(10.0),

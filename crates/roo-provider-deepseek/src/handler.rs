@@ -1,4 +1,4 @@
-//! DeepSeek provider handler.
+﻿//! DeepSeek provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API.
 //! Supports extended thinking mode via `deepseek-reasoner`.
@@ -27,7 +27,7 @@ impl DeepSeekHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(65536),
+                context_window: 65536,
                 supports_prompt_cache: true,
                 input_price: Some(0.27),
                 output_price: Some(1.10),
@@ -141,7 +141,7 @@ mod tests {
     fn test_reasoner_has_thinking_enabled() {
         let all_models = models::models();
         let reasoner = all_models.get("deepseek-reasoner").expect("reasoner should exist");
-        assert_eq!(reasoner.thinking, Some(true));
+        assert_eq!(reasoner.supports_reasoning_budget, Some(true));
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
     fn test_config_from_settings() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("sk-test".to_string());
-        settings.model_id = Some("deepseek-reasoner".to_string());
+        settings.api_model_id = Some("deepseek-reasoner".to_string());
 
         let config = DeepSeekConfig::from_settings(&settings).unwrap();
         assert_eq!(config.api_key, "sk-test");
@@ -228,7 +228,7 @@ mod tests {
     fn test_config_from_settings_custom_base_url() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("sk-test".to_string());
-        settings.deepseek_base_url = Some("https://custom.deepseek.api".to_string());
+        settings.deep_seek_base_url = Some("https://custom.deepseek.api".to_string());
 
         let config = DeepSeekConfig::from_settings(&settings).unwrap();
         assert_eq!(config.base_url, "https://custom.deepseek.api");

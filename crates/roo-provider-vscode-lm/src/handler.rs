@@ -1,4 +1,4 @@
-//! VS Code Language Model API provider handler.
+﻿//! VS Code Language Model API provider handler.
 //!
 //! This provider uses the VS Code Language Model API to interact with
 //! language models registered in VS Code (e.g., GitHub Copilot models).
@@ -45,7 +45,7 @@ impl VscodeLmHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(4096),
-                max_input_tokens: Some(128000),
+                context_window: 128000,
                 supports_prompt_cache: false,
                 input_price: Some(0.0),
                 output_price: Some(0.0),

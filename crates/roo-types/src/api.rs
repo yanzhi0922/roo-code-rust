@@ -262,38 +262,67 @@ pub enum MessageRole {
 
 /// All supported AI provider names.
 ///
-/// Source: `src/api/index.ts` — `buildApiHandler` switch cases
+/// Source: `packages/types/src/provider-settings.ts` — `providerNames`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum ProviderName {
+    #[serde(rename = "anthropic")]
     Anthropic,
+    #[serde(rename = "openai")]
     Openai,
+    #[serde(rename = "openai-native")]
     OpenaiNative,
+    #[serde(rename = "openai-codex")]
     OpenaiCodex,
+    #[serde(rename = "gemini")]
     Gemini,
+    #[serde(rename = "gemini-cli")]
+    GeminiCli,
+    #[serde(rename = "vertex")]
     Vertex,
+    #[serde(rename = "bedrock")]
     Bedrock,
-    Azure,
+    #[serde(rename = "openrouter")]
     OpenRouter,
+    #[serde(rename = "ollama")]
     Ollama,
+    #[serde(rename = "lmstudio")]
     LmStudio,
+    #[serde(rename = "deepseek")]
     DeepSeek,
+    #[serde(rename = "xai")]
     Xai,
+    #[serde(rename = "minimax")]
     MiniMax,
+    #[serde(rename = "moonshot")]
     Moonshot,
-    Qwen,
+    #[serde(rename = "qwen-code")]
+    QwenCode,
+    #[serde(rename = "zai")]
     Zai,
+    #[serde(rename = "mistral")]
     Mistral,
+    #[serde(rename = "fireworks")]
     Fireworks,
+    #[serde(rename = "sambanova")]
     SambaNova,
+    #[serde(rename = "baseten")]
     Baseten,
+    #[serde(rename = "vscode-lm")]
     VscodeLm,
+    #[serde(rename = "poe")]
     Poe,
+    #[serde(rename = "litellm")]
     LiteLlm,
+    #[serde(rename = "requesty")]
     Requesty,
+    #[serde(rename = "unbound")]
     Unbound,
+    #[serde(rename = "roo")]
     Roo,
-    Vercel,
+    #[serde(rename = "vercel-ai-gateway")]
+    VercelAiGateway,
+    #[serde(rename = "fake-ai")]
+    FakeAi,
 }
 
 impl ProviderName {
@@ -305,9 +334,9 @@ impl ProviderName {
             Self::OpenaiNative => "openai-native",
             Self::OpenaiCodex => "openai-codex",
             Self::Gemini => "gemini",
+            Self::GeminiCli => "gemini-cli",
             Self::Vertex => "vertex",
             Self::Bedrock => "bedrock",
-            Self::Azure => "azure",
             Self::OpenRouter => "openrouter",
             Self::Ollama => "ollama",
             Self::LmStudio => "lmstudio",
@@ -315,7 +344,7 @@ impl ProviderName {
             Self::Xai => "xai",
             Self::MiniMax => "minimax",
             Self::Moonshot => "moonshot",
-            Self::Qwen => "qwen",
+            Self::QwenCode => "qwen-code",
             Self::Zai => "zai",
             Self::Mistral => "mistral",
             Self::Fireworks => "fireworks",
@@ -327,7 +356,8 @@ impl ProviderName {
             Self::Requesty => "requesty",
             Self::Unbound => "unbound",
             Self::Roo => "roo",
-            Self::Vercel => "vercel",
+            Self::VercelAiGateway => "vercel-ai-gateway",
+            Self::FakeAi => "fake-ai",
         }
     }
 }

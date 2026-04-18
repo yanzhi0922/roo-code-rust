@@ -29,7 +29,7 @@ impl ZaiHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(16_384),
-                max_input_tokens: Some(200_000),
+                context_window: 200_000,
                 supports_prompt_cache: true,
                 input_price: Some(0.6),
                 output_price: Some(2.2),
@@ -142,14 +142,14 @@ mod tests {
     fn test_glm47_has_thinking_enabled() {
         let all_models = models::models();
         let glm47 = all_models.get("glm-4.7").expect("glm-4.7 should exist");
-        assert_eq!(glm47.thinking, Some(true));
+        assert_eq!(glm47.supports_reasoning_budget, Some(true));
     }
 
     #[test]
     fn test_glm5_has_thinking_enabled() {
         let all_models = models::models();
         let glm5 = all_models.get("glm-5").expect("glm-5 should exist");
-        assert_eq!(glm5.thinking, Some(true));
+        assert_eq!(glm5.supports_reasoning_budget, Some(true));
     }
 
     #[test]
@@ -259,9 +259,9 @@ mod tests {
     fn test_vision_models_support_images() {
         let all_models = models::models();
         let glm45v = all_models.get("glm-4.5v").expect("glm-4.5v should exist");
-        assert!(glm45v.supports_images);
+        assert!(glm45v.supports_images.unwrap_or(false));
         let glm46v = all_models.get("glm-4.6v").expect("glm-4.6v should exist");
-        assert!(glm46v.supports_images);
+        assert!(glm46v.supports_images.unwrap_or(false));
     }
 
     #[test]

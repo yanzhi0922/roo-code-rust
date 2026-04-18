@@ -29,7 +29,7 @@ impl FireworksHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(16_384),
-                max_input_tokens: Some(262_144),
+                context_window: 262_144,
                 input_price: Some(0.6),
                 output_price: Some(2.5),
                 description: Some("Fireworks model (unknown variant)".to_string()),
@@ -275,6 +275,6 @@ mod tests {
         let thinking = all_models
             .get("accounts/fireworks/models/kimi-k2-thinking")
             .expect("kimi-k2-thinking should exist");
-        assert_eq!(thinking.thinking, Some(true));
+        assert_eq!(thinking.supports_reasoning_budget, Some(true));
     }
 }

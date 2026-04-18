@@ -25,7 +25,7 @@ impl OpenRouterConfig {
     pub fn from_settings(settings: &ProviderSettings) -> Option<Self> {
         let api_key = settings.api_key.clone()?;
         let base_url = settings
-            .openrouter_base_url
+            .open_router_base_url
             .clone()
             .unwrap_or_else(|| Self::DEFAULT_BASE_URL.to_string());
 
@@ -33,10 +33,10 @@ impl OpenRouterConfig {
             api_key,
             base_url,
             model_id: settings
-                .openrouter_model_id
+                .open_router_model_id
                 .clone()
-                .or(settings.model_id.clone()),
-            temperature: settings.model_temperature,
+                .or(settings.api_model_id.clone()),
+            temperature: settings.model_temperature.flatten(),
             request_timeout: settings.request_timeout,
         })
     }

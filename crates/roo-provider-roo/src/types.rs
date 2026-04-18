@@ -39,8 +39,8 @@ impl RooConfig {
                 .roo_base_url
                 .clone()
                 .or_else(|| Some(Self::DEFAULT_BASE_URL.to_string())),
-            model_id: settings.model_id.clone(),
-            temperature: settings.model_temperature,
+            model_id: settings.api_model_id.clone(),
+            temperature: settings.model_temperature.flatten(),
             request_timeout: settings.request_timeout,
         })
     }

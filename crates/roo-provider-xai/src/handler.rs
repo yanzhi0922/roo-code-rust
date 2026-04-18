@@ -26,8 +26,8 @@ impl XaiHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(16384),
-                max_input_tokens: Some(131072),
-                supports_images: true,
+                context_window: 131072,
+                supports_images: Some(true),
                 input_price: Some(3.0),
                 output_price: Some(15.0),
                 description: Some("xAI model (unknown variant)".to_string()),
@@ -205,7 +205,7 @@ mod tests {
     fn test_config_from_settings() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("xai-test".to_string());
-        settings.model_id = Some("grok-3-fast".to_string());
+        settings.api_model_id = Some("grok-3-fast".to_string());
 
         let config = XaiConfig::from_settings(&settings).unwrap();
         assert_eq!(config.api_key, "xai-test");
@@ -238,14 +238,14 @@ mod tests {
     fn test_mini_model_has_thinking() {
         let all_models = models::models();
         let mini = all_models.get("grok-3-mini").expect("grok-3-mini should exist");
-        assert_eq!(mini.thinking, Some(true));
+        assert_eq!(mini.supports_reasoning_budget, Some(true));
     }
 
     #[test]
     fn test_grok3_supports_images() {
         let all_models = models::models();
         let grok3 = all_models.get("grok-3").expect("grok-3 should exist");
-        assert!(grok3.supports_images);
+        assert!(grok3.supports_images.unwrap_or(false));
     }
 
     #[test]

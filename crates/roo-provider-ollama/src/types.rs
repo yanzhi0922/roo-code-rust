@@ -31,8 +31,8 @@ impl OllamaConfig {
 
         Self {
             base_url,
-            model_id: settings.model_id.clone(),
-            temperature: settings.model_temperature,
+            model_id: settings.api_model_id.clone(),
+            temperature: settings.model_temperature.flatten(),
             request_timeout: settings.request_timeout,
             api_options: settings.ollama_api_options.clone(),
         }

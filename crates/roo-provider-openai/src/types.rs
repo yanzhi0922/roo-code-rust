@@ -29,20 +29,27 @@ impl OpenAiConfig {
     pub fn from_settings(settings: &ProviderSettings) -> Option<Self> {
         let api_key = settings.api_key.clone()?;
         let base_url = settings
-            .openai_base_url
+            .open_ai_base_url
             .clone()
             .unwrap_or_else(|| Self::DEFAULT_BASE_URL.to_string());
 
         Some(Self {
             api_key,
             base_url,
-            org_id: settings.openai_org_id.clone(),
-            model_id: settings.model_id.clone(),
-            temperature: settings.model_temperature,
+            org_id: settings.open_ai_org_id.clone(),
+            model_id: settings.api_model_id.clone(),
+            temperature: settings.model_temperature.flatten(),
             reasoning_effort: settings
                 .model_reasoning_effort
                 .clone()
-                .or(settings.reasoning_effort.clone()),
+                .or_else(|| {
+                    settings.reasoning_effort.map(|v| {
+                        serde_json::to_string(&v)
+                            .unwrap_or_default()
+                            .trim_matches('"')
+                            .to_string()
+                    })
+                }),
             request_timeout: settings.request_timeout,
         })
     }

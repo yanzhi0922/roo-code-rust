@@ -1,4 +1,4 @@
-//! Unbound model definitions.
+﻿//! Unbound model definitions.
 
 use std::collections::HashMap;
 use roo_types::model::ModelInfo;
@@ -14,8 +14,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "default".to_string(),
         ModelInfo {
             max_tokens: Some(4096),
-            max_input_tokens: Some(128000),
-            supports_images: false,
+            context_window: 128000,
+            supports_images: Some(false),
             supports_prompt_cache: false,
             input_price: Some(0.0),
             output_price: Some(0.0),

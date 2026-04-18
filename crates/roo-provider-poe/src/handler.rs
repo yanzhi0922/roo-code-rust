@@ -1,4 +1,4 @@
-//! Poe provider handler.
+﻿//! Poe provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via Poe.
 //! Supports reasoning budget/effort for models that support extended thinking.
@@ -34,7 +34,7 @@ impl PoeHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(4096),
-                max_input_tokens: Some(128000),
+                context_window: 128000,
                 supports_prompt_cache: false,
                 input_price: Some(0.0),
                 output_price: Some(0.0),
@@ -299,7 +299,7 @@ mod tests {
     fn test_all_models_support_images() {
         for (id, info) in models::models() {
             assert!(
-                info.supports_images,
+                info.supports_images.unwrap_or(false),
                 "Poe model '{}' should support images",
                 id
             );

@@ -1,4 +1,4 @@
-//! AWS Bedrock model definitions.
+﻿//! AWS Bedrock model definitions.
 
 use std::collections::HashMap;
 use roo_types::model::ModelInfo;
@@ -14,8 +14,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "anthropic.claude-sonnet-4-20250514-v1:0".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(3.0),
             output_price: Some(15.0),
@@ -30,8 +30,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "anthropic.claude-opus-4-20250514-v1:0".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(15.0),
             output_price: Some(75.0),
@@ -46,8 +46,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "anthropic.claude-3-7-sonnet-20250219-v1:0".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(3.0),
             output_price: Some(15.0),
@@ -62,8 +62,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "anthropic.claude-3-5-sonnet-20241022-v2:0".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(3.0),
             output_price: Some(15.0),
@@ -78,8 +78,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "anthropic.claude-3-5-haiku-20241022-v1:0".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(0.80),
             output_price: Some(4.0),
@@ -94,8 +94,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "us.amazon.nova-pro-v1:0".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(300000),
-            supports_images: true,
+            context_window: 300000,
+            supports_images: Some(true),
             input_price: Some(0.80),
             output_price: Some(3.20),
             description: Some("Amazon Nova Pro on Bedrock".to_string()),
@@ -107,8 +107,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "us.amazon.nova-lite-v1:0".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(300000),
-            supports_images: true,
+            context_window: 300000,
+            supports_images: Some(true),
             input_price: Some(0.06),
             output_price: Some(0.24),
             description: Some("Amazon Nova Lite on Bedrock".to_string()),

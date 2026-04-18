@@ -29,7 +29,7 @@ impl QwenHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(65_536),
-                max_input_tokens: Some(1_000_000),
+                context_window: 1_000_000,
                 input_price: Some(0.0),
                 output_price: Some(0.0),
                 description: Some("Qwen model (unknown variant)".to_string()),
@@ -44,7 +44,7 @@ impl QwenHandler {
             default_temperature: config.temperature.unwrap_or(DEFAULT_TEMPERATURE),
             model_id: Some(model_id),
             model_info,
-            provider_name_enum: ProviderName::Qwen,
+            provider_name_enum: ProviderName::QwenCode,
             request_timeout: config.request_timeout,
         };
 
@@ -97,7 +97,7 @@ impl Provider for QwenHandler {
     }
 
     fn provider_name(&self) -> ProviderName {
-        ProviderName::Qwen
+        ProviderName::QwenCode
     }
 }
 
@@ -218,7 +218,7 @@ mod tests {
             request_timeout: None,
         };
         let handler = QwenHandler::new(config).unwrap();
-        assert_eq!(handler.provider_name(), ProviderName::Qwen);
+        assert_eq!(handler.provider_name(), ProviderName::QwenCode);
     }
 
     #[test]
@@ -274,7 +274,7 @@ mod tests {
         let all_models = models::models();
         for (id, info) in &all_models {
             assert!(
-                info.max_input_tokens.unwrap_or(0) >= 1_000_000,
+                info.context_window >= 1_000_000,
                 "Model '{}' should have at least 1M context window",
                 id
             );

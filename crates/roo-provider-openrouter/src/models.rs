@@ -1,4 +1,4 @@
-//! OpenRouter model definitions.
+﻿//! OpenRouter model definitions.
 //!
 //! OpenRouter provides access to many models through a unified API.
 //! We define a subset of popular models with their pricing.
@@ -17,8 +17,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "anthropic/claude-sonnet-4".to_string(),
         ModelInfo {
             max_tokens: Some(16384),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(3.0),
             output_price: Some(15.0),
@@ -33,8 +33,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "anthropic/claude-3.5-sonnet".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(3.0),
             output_price: Some(15.0),
@@ -49,8 +49,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "openai/gpt-4o".to_string(),
         ModelInfo {
             max_tokens: Some(16384),
-            max_input_tokens: Some(128000),
-            supports_images: true,
+            context_window: 128000,
+            supports_images: Some(true),
             input_price: Some(2.5),
             output_price: Some(10.0),
             description: Some("OpenAI GPT-4o via OpenRouter".to_string()),
@@ -62,8 +62,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "google/gemini-2.5-pro-preview".to_string(),
         ModelInfo {
             max_tokens: Some(65536),
-            max_input_tokens: Some(1048576),
-            supports_images: true,
+            context_window: 1048576,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(1.25),
             output_price: Some(10.0),
@@ -76,7 +76,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "deepseek/deepseek-chat".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(65536),
+            context_window: 65536,
             supports_prompt_cache: true,
             input_price: Some(0.27),
             output_price: Some(1.10),
@@ -89,7 +89,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "meta-llama/llama-3.3-70b-instruct".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(131072),
+            context_window: 131072,
             input_price: Some(0.39),
             output_price: Some(0.39),
             description: Some("Meta Llama 3.3 70B Instruct via OpenRouter".to_string()),

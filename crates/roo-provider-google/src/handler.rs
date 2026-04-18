@@ -1,4 +1,4 @@
-//! Google Gemini provider handler.
+﻿//! Google Gemini provider handler.
 //!
 //! Uses the Gemini generateContent API with SSE streaming.
 //! Converts messages from Anthropic format to Gemini format.
@@ -42,8 +42,8 @@ impl GoogleHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(65536),
-                max_input_tokens: Some(1048576),
-                supports_images: true,
+                context_window: 1048576,
+                supports_images: Some(true),
                 supports_prompt_cache: true,
                 input_price: Some(1.25),
                 output_price: Some(10.0),
@@ -494,7 +494,7 @@ mod tests {
     fn test_config_from_settings() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.google_api_key = Some("test-key".to_string());
-        settings.model_id = Some("gemini-2.5-flash".to_string());
+        settings.api_model_id = Some("gemini-2.5-flash".to_string());
 
         let config = GoogleConfig::from_settings(&settings).unwrap();
         assert_eq!(config.api_key, "test-key");
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn test_all_models_support_images() {
         for (id, info) in models::models() {
-            assert!(info.supports_images, "Model '{}' should support images", id);
+            assert!(info.supports_images.unwrap_or(false), "Model '{}' should support images", id);
         }
     }
 
@@ -533,7 +533,7 @@ mod tests {
     fn test_pro_model_has_thinking() {
         let all_models = models::models();
         let pro = all_models.get("gemini-2.5-pro").expect("gemini-2.5-pro should exist");
-        assert_eq!(pro.thinking, Some(true));
+        assert_eq!(pro.supports_reasoning_budget, Some(true));
     }
 
     #[test]

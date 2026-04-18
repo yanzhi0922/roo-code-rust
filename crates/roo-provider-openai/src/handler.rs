@@ -32,8 +32,8 @@ impl OpenAiHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(16384),
-                max_input_tokens: Some(128000),
-                supports_images: true,
+                context_window: 128000,
+                supports_images: Some(true),
                 input_price: Some(2.5),
                 output_price: Some(10.0),
                 description: Some("OpenAI model (unknown variant)".to_string()),
@@ -226,7 +226,7 @@ mod tests {
     fn test_config_from_settings() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("sk-test".to_string());
-        settings.model_id = Some("gpt-4o-mini".to_string());
+        settings.api_model_id = Some("gpt-4o-mini".to_string());
 
         let config = OpenAiConfig::from_settings(&settings).unwrap();
         assert_eq!(config.api_key, "sk-test");
@@ -237,7 +237,7 @@ mod tests {
     fn test_config_from_settings_with_org() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("sk-test".to_string());
-        settings.openai_org_id = Some("org-123".to_string());
+        settings.open_ai_org_id = Some("org-123".to_string());
 
         let config = OpenAiConfig::from_settings(&settings).unwrap();
         assert_eq!(config.org_id, Some("org-123".to_string()));
@@ -270,7 +270,7 @@ mod tests {
     fn test_gpt4o_supports_images() {
         let all_models = models::models();
         let gpt4o = all_models.get("gpt-4o").expect("gpt-4o should exist");
-        assert!(gpt4o.supports_images);
+        assert!(gpt4o.supports_images.unwrap_or(false));
     }
 
     #[test]

@@ -15,7 +15,9 @@ use roo_condense::{
 };
 use roo_provider::handler::{CreateMessageMetadata, Provider};
 use roo_types::api::{ApiMessage, ContentBlock};
-use roo_types::context_management::ANTHROPIC_DEFAULT_MAX_TOKENS;
+
+/// Default max tokens for Anthropic models when not specified.
+const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 8192;
 
 use crate::token::estimate_token_count;
 use crate::truncation::truncate_conversation;

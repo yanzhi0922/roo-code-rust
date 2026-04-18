@@ -1,4 +1,4 @@
-//! Requesty provider handler.
+﻿//! Requesty provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via Requesty router.
 //! Supports trace_id and mode tracking for observability.
@@ -30,7 +30,7 @@ impl RequestyHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(200000),
+                context_window: 200000,
                 supports_prompt_cache: true,
                 input_price: Some(3.0),
                 output_price: Some(15.0),

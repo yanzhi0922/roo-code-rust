@@ -35,8 +35,8 @@ impl VercelConfig {
             model_id: settings
                 .vercel_model_id
                 .clone()
-                .or(settings.model_id.clone()),
-            temperature: settings.model_temperature,
+                .or(settings.api_model_id.clone()),
+            temperature: settings.model_temperature.flatten(),
             request_timeout: settings.request_timeout,
         })
     }

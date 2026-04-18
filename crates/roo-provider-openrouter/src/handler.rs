@@ -34,8 +34,8 @@ impl OpenRouterHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(128000),
-                supports_images: true,
+                context_window: 128000,
+                supports_images: Some(true),
                 description: Some("OpenRouter model (unknown variant)".to_string()),
                 ..Default::default()
             });
@@ -297,7 +297,7 @@ mod tests {
     fn test_config_from_settings() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("sk-or-test".to_string());
-        settings.openrouter_model_id = Some("openai/gpt-4o".to_string());
+        settings.open_router_model_id = Some("openai/gpt-4o".to_string());
 
         let config = OpenRouterConfig::from_settings(&settings).unwrap();
         assert_eq!(config.api_key, "sk-or-test");
@@ -308,7 +308,7 @@ mod tests {
     fn test_config_from_settings_custom_base_url() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("sk-or-test".to_string());
-        settings.openrouter_base_url = Some("https://custom.openrouter.api".to_string());
+        settings.open_router_base_url = Some("https://custom.openrouter.api".to_string());
 
         let config = OpenRouterConfig::from_settings(&settings).unwrap();
         assert_eq!(config.base_url, "https://custom.openrouter.api");
@@ -346,7 +346,7 @@ mod tests {
         let claude = all_models
             .get("anthropic/claude-sonnet-4")
             .expect("claude model should exist");
-        assert!(claude.supports_images);
+        assert!(claude.supports_images.unwrap_or(false));
     }
 
     #[test]
@@ -383,6 +383,6 @@ mod tests {
         let gemini = all_models
             .get("google/gemini-2.5-pro-preview")
             .expect("gemini model should exist");
-        assert!(gemini.max_input_tokens.unwrap() > 500000);
+        assert!(gemini.context_window > 500000);
     }
 }

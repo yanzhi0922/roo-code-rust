@@ -32,8 +32,8 @@ impl XaiConfig {
         Some(Self {
             api_key,
             base_url,
-            model_id: settings.model_id.clone(),
-            temperature: settings.model_temperature,
+            model_id: settings.api_model_id.clone(),
+            temperature: settings.model_temperature.flatten(),
             request_timeout: settings.request_timeout,
         })
     }

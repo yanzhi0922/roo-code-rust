@@ -29,7 +29,7 @@ impl MistralHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(131_072),
+                context_window: 131_072,
                 input_price: Some(0.3),
                 output_price: Some(0.9),
                 description: Some("Mistral model (unknown variant)".to_string()),
@@ -254,16 +254,16 @@ mod tests {
     fn test_codestral_has_large_context() {
         let all_models = models::models();
         let codestral = all_models.get("codestral-latest").expect("codestral-latest should exist");
-        assert_eq!(codestral.max_input_tokens, Some(256_000));
+        assert_eq!(codestral.context_window, 256_000);
     }
 
     #[test]
     fn test_vision_models_support_images() {
         let all_models = models::models();
         let pixtral = all_models.get("pixtral-large-latest").expect("pixtral should exist");
-        assert!(pixtral.supports_images);
+        assert!(pixtral.supports_images.unwrap_or(false));
         let magistral = all_models.get("magistral-medium-latest").expect("magistral should exist");
-        assert!(magistral.supports_images);
+        assert!(magistral.supports_images.unwrap_or(false));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! AWS Bedrock-specific configuration types.
+﻿//! AWS Bedrock-specific configuration types.
 
 use roo_types::provider_settings::ProviderSettings;
 
@@ -50,9 +50,9 @@ impl AwsBedrockConfig {
             model_id: settings
                 .aws_bedrock_custom_model_id
                 .clone()
-                .or(settings.model_id.clone()),
+                .or(settings.api_model_id.clone()),
             use_cross_region_inference: settings.aws_use_cross_region_inference.unwrap_or(false),
-            endpoint_url: settings.aws_bedrock_endpoint_url.clone(),
+            endpoint_url: settings.aws_bedrock_endpoint.clone(),
             request_timeout: settings.request_timeout,
         })
     }

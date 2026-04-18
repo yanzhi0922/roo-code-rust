@@ -29,7 +29,7 @@ impl MoonshotHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(16_384),
-                max_input_tokens: Some(262_144),
+                context_window: 262_144,
                 supports_prompt_cache: true,
                 input_price: Some(0.6),
                 output_price: Some(2.5),
@@ -142,7 +142,7 @@ mod tests {
     fn test_kimi_k2_thinking_has_thinking_enabled() {
         let all_models = models::models();
         let thinking = all_models.get("kimi-k2-thinking").expect("kimi-k2-thinking should exist");
-        assert_eq!(thinking.thinking, Some(true));
+        assert_eq!(thinking.supports_reasoning_budget, Some(true));
     }
 
     #[test]
@@ -277,7 +277,7 @@ mod tests {
     fn test_kimi_k2_context_window() {
         let all_models = models::models();
         let model = all_models.get("kimi-k2-0905-preview").expect("kimi-k2-0905-preview should exist");
-        assert_eq!(model.max_input_tokens, Some(262_144));
+        assert_eq!(model.context_window, 262_144);
     }
 
     #[test]

@@ -29,7 +29,7 @@ impl SambaNovaHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(131_072),
+                context_window: 131_072,
                 input_price: Some(0.6),
                 output_price: Some(1.2),
                 description: Some("SambaNova model (unknown variant)".to_string()),
@@ -141,7 +141,7 @@ mod tests {
     fn test_deepseek_r1_has_thinking_enabled() {
         let all_models = models::models();
         let r1 = all_models.get("DeepSeek-R1").expect("DeepSeek-R1 should exist");
-        assert_eq!(r1.thinking, Some(true));
+        assert_eq!(r1.supports_reasoning_budget, Some(true));
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
     fn test_from_settings_with_custom_url() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("test-key".to_string());
-        settings.sambanova_base_url = Some("https://custom.sambanova.api/v1".to_string());
+        settings.samba_nova_base_url = Some("https://custom.sambanova.api/v1".to_string());
         let handler = SambaNovaHandler::from_settings(&settings).unwrap();
         let (model_id, _) = handler.get_model();
         assert_eq!(model_id, models::DEFAULT_MODEL_ID);
@@ -263,7 +263,7 @@ mod tests {
         let model = all_models
             .get("Llama-4-Maverick-17B-128E-Instruct")
             .expect("Llama-4-Maverick should exist");
-        assert!(model.supports_images);
+        assert!(model.supports_images.unwrap_or(false));
     }
 
     #[test]

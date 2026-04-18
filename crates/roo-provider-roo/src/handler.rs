@@ -1,4 +1,4 @@
-//! Roo Code Cloud provider handler.
+﻿//! Roo Code Cloud provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via Roo Code Cloud.
 //! Supports session token authentication, dynamic model loading,
@@ -35,7 +35,7 @@ impl RooHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(200000),
+                context_window: 200000,
                 supports_prompt_cache: true,
                 input_price: Some(3.0),
                 output_price: Some(15.0),
@@ -274,7 +274,7 @@ mod tests {
     fn test_all_models_support_images() {
         for (id, info) in models::models() {
             assert!(
-                info.supports_images,
+                info.supports_images.unwrap_or(false),
                 "Roo model '{}' should support images",
                 id
             );

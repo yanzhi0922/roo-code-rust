@@ -37,8 +37,8 @@ impl AnthropicConfig {
         Some(Self {
             api_key,
             base_url,
-            model_id: settings.model_id.clone(),
-            temperature: settings.model_temperature,
+            model_id: settings.api_model_id.clone(),
+            temperature: settings.model_temperature.flatten(),
             use_extended_thinking: settings.anthropic_use_extended_thinking,
             max_thinking_tokens: settings.model_max_thinking_tokens,
             request_timeout: settings.request_timeout,

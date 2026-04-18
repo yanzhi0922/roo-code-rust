@@ -1,4 +1,4 @@
-//! Requesty model definitions.
+﻿//! Requesty model definitions.
 
 use std::collections::HashMap;
 use roo_types::model::ModelInfo;
@@ -14,8 +14,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "claude-3-5-sonnet-20241022".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: true,
+            context_window: 200000,
+            supports_images: Some(true),
             supports_prompt_cache: true,
             input_price: Some(3.0),
             output_price: Some(15.0),
@@ -30,8 +30,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "gpt-4o".to_string(),
         ModelInfo {
             max_tokens: Some(4096),
-            max_input_tokens: Some(128000),
-            supports_images: true,
+            context_window: 128000,
+            supports_images: Some(true),
             supports_prompt_cache: false,
             input_price: Some(2.50),
             output_price: Some(10.0),

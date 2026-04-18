@@ -1,4 +1,4 @@
-//! Ollama model definitions.
+﻿//! Ollama model definitions.
 //!
 //! Ollama supports many local models. We define popular defaults.
 
@@ -16,8 +16,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "llama3.2".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(131072),
-            supports_images: true,
+            context_window: 131072,
+            supports_images: Some(true),
             description: Some("Meta Llama 3.2 via Ollama".to_string()),
             ..Default::default()
         },
@@ -27,7 +27,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "llama3.1".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(131072),
+            context_window: 131072,
             description: Some("Meta Llama 3.1 via Ollama".to_string()),
             ..Default::default()
         },
@@ -37,7 +37,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "codellama".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(16384),
+            context_window: 16384,
             description: Some("Code Llama via Ollama".to_string()),
             ..Default::default()
         },
@@ -47,7 +47,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "mistral".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(32768),
+            context_window: 32768,
             description: Some("Mistral via Ollama".to_string()),
             ..Default::default()
         },
@@ -57,7 +57,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "deepseek-coder-v2".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(131072),
+            context_window: 131072,
             description: Some("DeepSeek Coder V2 via Ollama".to_string()),
             ..Default::default()
         },
@@ -67,8 +67,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "qwen2.5-coder".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(131072),
-            supports_images: false,
+            context_window: 131072,
+            supports_images: Some(false),
             description: Some("Qwen 2.5 Coder via Ollama".to_string()),
             ..Default::default()
         },

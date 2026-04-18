@@ -1,4 +1,4 @@
-//! VS Code Language Model API model definitions.
+﻿//! VS Code Language Model API model definitions.
 
 use std::collections::HashMap;
 use roo_types::model::ModelInfo;
@@ -18,8 +18,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "vscode-lm-default".to_string(),
         ModelInfo {
             max_tokens: Some(4096),
-            max_input_tokens: Some(128000),
-            supports_images: false,
+            context_window: 128000,
+            supports_images: Some(false),
             supports_prompt_cache: false,
             input_price: Some(0.0),
             output_price: Some(0.0),
@@ -34,8 +34,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "copilot-gpt-4o".to_string(),
         ModelInfo {
             max_tokens: Some(4096),
-            max_input_tokens: Some(128000),
-            supports_images: false,
+            context_window: 128000,
+            supports_images: Some(false),
             supports_prompt_cache: false,
             input_price: Some(0.0),
             output_price: Some(0.0),
@@ -48,8 +48,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "copilot-claude-3.5-sonnet".to_string(),
         ModelInfo {
             max_tokens: Some(8192),
-            max_input_tokens: Some(200000),
-            supports_images: false,
+            context_window: 200000,
+            supports_images: Some(false),
             supports_prompt_cache: false,
             input_price: Some(0.0),
             output_price: Some(0.0),

@@ -1,4 +1,4 @@
-//! Build the complete tools array for native protocol requests.
+﻿//! Build the complete tools array for native protocol requests.
 //!
 //! Corresponds to `src/core/task/build-tools.ts`.
 

@@ -27,7 +27,7 @@ impl OllamaHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(131072),
+                context_window: 131072,
                 description: Some("Ollama model (unknown variant)".to_string()),
                 ..Default::default()
             });
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn test_config_from_settings() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
-        settings.model_id = Some("codellama".to_string());
+        settings.api_model_id = Some("codellama".to_string());
 
         let config = OllamaConfig::from_settings(&settings);
         assert_eq!(config.model_id, Some("codellama".to_string()));
@@ -235,7 +235,7 @@ mod tests {
     fn test_llama_supports_images() {
         let all_models = models::models();
         let llama = all_models.get("llama3.2").expect("llama3.2 should exist");
-        assert!(llama.supports_images);
+        assert!(llama.supports_images.unwrap_or(false));
     }
 
     #[test]

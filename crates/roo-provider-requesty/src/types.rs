@@ -36,7 +36,7 @@ impl RequestyConfig {
             api_key,
             base_url,
             model_id: settings.requesty_model_id.clone(),
-            temperature: settings.model_temperature,
+            temperature: settings.model_temperature.flatten(),
             request_timeout: settings.request_timeout,
         })
     }

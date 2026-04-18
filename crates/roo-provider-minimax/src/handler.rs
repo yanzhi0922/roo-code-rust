@@ -32,7 +32,7 @@ impl MiniMaxHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(16_384),
-                max_input_tokens: Some(204_800),
+                context_window: 204_800,
                 supports_prompt_cache: true,
                 input_price: Some(0.3),
                 output_price: Some(1.2),
@@ -258,7 +258,7 @@ mod tests {
     fn test_from_settings_with_group_id() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.minimax_api_key = Some("test-key".to_string());
-        settings.minimax_group_id = Some("group-456".to_string());
+        settings.minimax_base_url = Some("group-456".to_string());
         let handler = MiniMaxHandler::from_settings(&settings).unwrap();
         let (model_id, _) = handler.get_model();
         assert_eq!(model_id, models::DEFAULT_MODEL_ID);

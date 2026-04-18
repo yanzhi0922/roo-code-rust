@@ -14,8 +14,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "qwen3-coder-plus".to_string(),
         ModelInfo {
             max_tokens: Some(65_536),
-            max_input_tokens: Some(1_000_000),
-            supports_images: false,
+            context_window: 1_000_000,
+            supports_images: Some(false),
             supports_prompt_cache: false,
             input_price: Some(0.0),
             output_price: Some(0.0),
@@ -34,8 +34,8 @@ pub fn models() -> HashMap<String, ModelInfo> {
         "qwen3-coder-flash".to_string(),
         ModelInfo {
             max_tokens: Some(65_536),
-            max_input_tokens: Some(1_000_000),
-            supports_images: false,
+            context_window: 1_000_000,
+            supports_images: Some(false),
             supports_prompt_cache: false,
             input_price: Some(0.0),
             output_price: Some(0.0),

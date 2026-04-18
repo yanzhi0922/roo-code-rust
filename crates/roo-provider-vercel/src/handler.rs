@@ -1,4 +1,4 @@
-//! Vercel AI Gateway provider handler.
+﻿//! Vercel AI Gateway provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via Vercel AI Gateway.
 //! Supports prompt caching and has a default temperature of 0.5.
@@ -37,7 +37,7 @@ impl VercelHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(4096),
-                max_input_tokens: Some(128000),
+                context_window: 128000,
                 supports_prompt_cache: false,
                 input_price: Some(2.50),
                 output_price: Some(10.0),
@@ -57,7 +57,7 @@ impl VercelHandler {
             default_temperature: config.temperature.unwrap_or(DEFAULT_TEMPERATURE),
             model_id: Some(model_id),
             model_info,
-            provider_name_enum: ProviderName::Vercel,
+            provider_name_enum: ProviderName::VercelAiGateway,
             request_timeout: config.request_timeout,
         };
 
@@ -116,7 +116,7 @@ impl Provider for VercelHandler {
     }
 
     fn provider_name(&self) -> ProviderName {
-        ProviderName::Vercel
+        ProviderName::VercelAiGateway
     }
 }
 
@@ -223,7 +223,7 @@ mod tests {
             request_timeout: None,
         };
         let handler = VercelHandler::new(config).unwrap();
-        assert_eq!(handler.provider_name(), ProviderName::Vercel);
+        assert_eq!(handler.provider_name(), ProviderName::VercelAiGateway);
     }
 
     #[test]
@@ -276,7 +276,7 @@ mod tests {
     fn test_all_models_support_images() {
         for (id, info) in models::models() {
             assert!(
-                info.supports_images,
+                info.supports_images.unwrap_or(false),
                 "Vercel model '{}' should support images",
                 id
             );

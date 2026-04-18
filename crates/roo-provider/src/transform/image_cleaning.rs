@@ -1,4 +1,4 @@
-//! Removes image blocks from messages when the provider doesn't support images.
+﻿//! Removes image blocks from messages when the provider doesn't support images.
 //!
 //! Derived from `src/api/transform/image-cleaning.ts`.
 
@@ -10,7 +10,7 @@ use roo_types::model::ModelInfo;
 /// Source: `src/api/transform/image-cleaning.ts` — `maybeRemoveImageBlocks`
 pub fn maybe_remove_image_blocks(messages: Vec<ApiMessage>, model_info: &ModelInfo) -> Vec<ApiMessage> {
     // Check model capability ONCE instead of for every message
-    let supports_images = model_info.supports_images;
+    let supports_images = model_info.supports_images.unwrap_or(false);
 
     messages
         .into_iter()
@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn test_removes_images_when_not_supported() {
         let model_info = ModelInfo {
-            supports_images: false,
+            supports_images: Some(false),
             ..Default::default()
         };
 
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn test_keeps_images_when_supported() {
         let model_info = ModelInfo {
-            supports_images: true,
+            supports_images: Some(true),
             ..Default::default()
         };
 

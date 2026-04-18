@@ -29,7 +29,7 @@ impl BasetenHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(16_384),
-                max_input_tokens: Some(200_000),
+                context_window: 200_000,
                 input_price: Some(0.6),
                 output_price: Some(2.2),
                 description: Some("Baseten model (unknown variant)".to_string()),
@@ -143,7 +143,7 @@ mod tests {
         let r1 = all_models
             .get("deepseek-ai/DeepSeek-R1")
             .expect("DeepSeek-R1 should exist");
-        assert_eq!(r1.thinking, Some(true));
+        assert_eq!(r1.supports_reasoning_budget, Some(true));
     }
 
     #[test]

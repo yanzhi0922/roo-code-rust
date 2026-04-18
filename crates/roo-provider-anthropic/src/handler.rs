@@ -1,4 +1,4 @@
-//! Anthropic provider handler.
+﻿//! Anthropic provider handler.
 //!
 //! Implements the Provider trait for the Anthropic Messages API.
 //! Handles SSE streaming with Anthropic-specific event types:
@@ -46,8 +46,8 @@ impl AnthropicHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                max_input_tokens: Some(200000),
-                supports_images: true,
+                context_window: 200000,
+                supports_images: Some(true),
                 supports_prompt_cache: true,
                 input_price: Some(3.0),
                 output_price: Some(15.0),
@@ -67,7 +67,7 @@ impl AnthropicHandler {
         let use_extended_thinking = config
             .use_extended_thinking
             .unwrap_or(false)
-            && model_info.thinking.unwrap_or(false);
+            && model_info.supports_reasoning_budget.unwrap_or(false);
 
         Ok(Self {
             http_client,
@@ -681,7 +681,7 @@ mod tests {
     fn test_config_from_settings() {
         let mut settings = roo_types::provider_settings::ProviderSettings::default();
         settings.api_key = Some("sk-ant-test".to_string());
-        settings.model_id = Some("claude-3-5-haiku-20241022".to_string());
+        settings.api_model_id = Some("claude-3-5-haiku-20241022".to_string());
 
         let config = AnthropicConfig::from_settings(&settings).unwrap();
         assert_eq!(config.api_key, "sk-ant-test");
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn test_all_models_support_images() {
         for (id, info) in models::models() {
-            assert!(info.supports_images, "Model '{}' should support images", id);
+            assert!(info.supports_images.unwrap_or(false), "Model '{}' should support images", id);
         }
     }
 
@@ -720,7 +720,7 @@ mod tests {
         let sonnet4 = all_models
             .get("claude-sonnet-4-20250514")
             .expect("claude-sonnet-4 should exist");
-        assert_eq!(sonnet4.thinking, Some(true));
+        assert_eq!(sonnet4.supports_reasoning_budget, Some(true));
     }
 
     #[test]
