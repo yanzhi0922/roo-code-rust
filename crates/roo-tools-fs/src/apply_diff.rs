@@ -158,11 +158,66 @@ pub fn apply_diff_blocks(
         }
     }
 
+    // L5.3: Post-apply verification
+    if applied > 0 {
+        if let Err(verify_warning) = verify_diff_result(&content) {
+            warnings.push(verify_warning);
+        }
+    }
+
     Ok(DiffApplyResult {
         path: String::new(), // Caller sets this
         blocks_applied: applied,
         warnings,
     })
+}
+
+/// Verify the result of a diff application.
+///
+/// Checks for common issues:
+/// - Inconsistent indentation (mixed tabs and spaces in the same line)
+/// - Trailing whitespace issues
+/// - Unbalanced braces (rough heuristic)
+/// - Empty search blocks left behind
+fn verify_diff_result(content: &str) -> Result<(), String> {
+    let mut issues = Vec::new();
+
+    // Check for unbalanced braces (rough heuristic)
+    let open_braces = content.chars().filter(|c| *c == '{').count();
+    let close_braces = content.chars().filter(|c| *c == '}').count();
+    if open_braces != close_braces {
+        issues.push(format!(
+            "Unbalanced braces: {} opening vs {} closing",
+            open_braces, close_braces
+        ));
+    }
+
+    // Check for leftover diff markers
+    if content.contains("<<<<<<< SEARCH") || content.contains(">>>>>>> REPLACE") || content.contains("=======") {
+        issues.push("Leftover diff markers found in result".to_string());
+    }
+
+    // Check for lines with mixed tab/space indentation
+    for (i, line) in content.lines().enumerate() {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.is_empty() {
+            continue;
+        }
+        let indent: String = line[..line.len() - trimmed_start.len()].to_string();
+        if indent.contains('\t') && indent.contains(' ') {
+            issues.push(format!(
+                "Line {}: mixed tabs and spaces in indentation",
+                i + 1
+            ));
+            break; // Only report first occurrence
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Verification warnings: {}", issues.join("; ")))
+    }
 }
 
 #[cfg(test)]
@@ -456,5 +511,53 @@ bar
         let result = apply_diff_blocks(original, &blocks).unwrap();
         assert_eq!(result.blocks_applied, 1);
         assert!(result.warnings.is_empty());
+    }
+
+    // --- L5.3: Verification tests ---
+
+    #[test]
+    fn test_verify_balanced_content() {
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        assert!(verify_diff_result(content).is_ok());
+    }
+
+    #[test]
+    fn test_verify_unbalanced_braces() {
+        let content = "fn main() {\n    println!(\"hello\");\n";
+        let result = verify_diff_result(content);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unbalanced braces"));
+    }
+
+    #[test]
+    fn test_verify_leftover_markers() {
+        let content = "fn main() {\n<<<<<<< SEARCH\n    code\n}\n";
+        let result = verify_diff_result(content);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Leftover diff markers"));
+    }
+
+    #[test]
+    fn test_verify_mixed_indentation() {
+        let content = "fn main() {\n\t    println!(\"mixed\");\n}\n";
+        let result = verify_diff_result(content);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("mixed tabs and spaces"));
+    }
+
+    #[test]
+    fn test_verify_clean_content() {
+        let content = "struct Foo {\n    bar: i32,\n}\n";
+        assert!(verify_diff_result(content).is_ok());
+    }
+
+    #[test]
+    fn test_apply_diff_with_verification_warning() {
+        let original = "fn main() {";
+        let blocks = vec![("fn main() {".to_string(), "fn main() {\n    // added\n".to_string())];
+        let result = apply_diff_blocks(original, &blocks).unwrap();
+        assert_eq!(result.blocks_applied, 1);
+        // Should have a warning about unbalanced braces
+        assert!(!result.warnings.is_empty());
     }
 }

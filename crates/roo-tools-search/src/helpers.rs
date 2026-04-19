@@ -141,11 +141,15 @@ mod tests {
                 file_path: "src/main.rs".to_string(),
                 line_number: 10,
                 line_content: "fn main() {".to_string(),
+                context_before: vec![],
+                context_after: vec![],
             },
             crate::types::FileMatch {
                 file_path: "src/lib.rs".to_string(),
                 line_number: 5,
                 line_content: "pub mod foo;".to_string(),
+                context_before: vec![],
+                context_after: vec![],
             },
         ];
         let result = format_search_results(&matches);

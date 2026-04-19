@@ -19,6 +19,9 @@ roo-tools-misc = { path = "../roo-tools-misc" }
 roo-tools-mode = { path = "../roo-tools-mode" }
 roo-mcp = { path = "../roo-mcp" }
 roo-terminal = { path = "../roo-terminal" }
+roo-auto-approval = { path = "../roo-auto-approval" }
+roo-context = { path = "../roo-context" }
+roo-checkpoint = { path = "../roo-checkpoint" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,6 +31,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

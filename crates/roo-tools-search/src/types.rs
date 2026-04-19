@@ -19,6 +19,12 @@ pub struct FileMatch {
     pub file_path: String,
     pub line_number: usize,
     pub line_content: String,
+    /// Context lines before the match (L5.2 enhancement).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_before: Vec<String>,
+    /// Context lines after the match (L5.2 enhancement).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_after: Vec<String>,
 }
 
 /// Result of a list_files operation.

@@ -263,10 +263,32 @@ impl ToolHandler for ReadFileHandler {
             None => return ToolExecutionResult::error("Missing required parameter: path"),
         };
 
-        let read_params = roo_types::tool::ReadFileParams {
+        // Parse mode
+        let mode = params.get("mode").and_then(|v| v.as_str()).and_then(|m| {
+            match m {
+                "slice" => Some(roo_types::tool_params::ReadFileMode::Slice),
+                "indentation" => Some(roo_types::tool_params::ReadFileMode::Indentation),
+                _ => None,
+            }
+        });
+
+        // Parse indentation params if present
+        let indentation = params.get("indentation").and_then(|v| {
+            Some(roo_types::tool_params::IndentationParams {
+                anchor_line: v.get("anchorLine").or_else(|| v.get("anchor_line")).and_then(|v2| v2.as_u64()),
+                max_levels: v.get("maxLevels").or_else(|| v.get("max_levels")).and_then(|v2| v2.as_u64()),
+                include_siblings: v.get("includeSiblings").or_else(|| v.get("include_siblings")).and_then(|v2| v2.as_bool()),
+                include_header: v.get("includeHeader").or_else(|| v.get("include_header")).and_then(|v2| v2.as_bool()),
+                max_lines: v.get("maxLines").or_else(|| v.get("max_lines")).and_then(|v2| v2.as_u64()),
+            })
+        });
+
+        let read_params = roo_types::tool_params::ReadFileParams {
             path,
+            mode,
             offset: params.get("offset").and_then(|v| v.as_u64()),
             limit: params.get("limit").and_then(|v| v.as_u64()),
+            indentation,
         };
 
         match roo_tools_fs::process_read_file(&read_params, &context.cwd) {
@@ -679,6 +701,8 @@ fn search_in_dir(
                                 file_path: relative_str.to_string(),
                                 line_number: i + 1,
                                 line_content: line.to_string(),
+                                context_before: vec![],
+                                context_after: vec![],
                             });
                         }
                     }

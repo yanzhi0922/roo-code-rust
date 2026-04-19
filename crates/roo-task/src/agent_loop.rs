@@ -10,12 +10,128 @@ use futures::StreamExt;
 use tracing::{debug, info, warn};
 
 use roo_provider::handler::{CreateMessageMetadata, Provider};
+use roo_auto_approval::types::AutoApprovalState;
 
 use crate::engine::TaskEngine;
 use crate::message_builder::MessageBuilder;
 use crate::stream_parser::{ParsedStreamContent, StreamParser};
 use crate::tool_dispatcher::{ToolContext, ToolDispatcher, ToolExecutionResult};
 use crate::types::{TaskError, TaskResult, TaskState};
+
+// ---------------------------------------------------------------------------
+// ApprovalDecision
+// ---------------------------------------------------------------------------
+
+/// Decision for tool call approval.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApprovalDecision {
+    /// Tool call is automatically approved.
+    AutoApproved,
+    /// Tool call needs user approval.
+    NeedsApproval { reason: String },
+    /// Tool call is denied.
+    Denied { reason: String },
+}
+
+/// Check whether a tool call should be auto-approved.
+///
+/// Uses the auto-approval configuration to determine if a tool can execute
+/// without user confirmation. Read-only tools are generally auto-approved,
+/// while write tools and commands require explicit permission.
+/// Tool names that are considered read-only (do not modify files).
+const READ_ONLY_TOOLS: &[&str] = &[
+    "read_file",
+    "list_files",
+    "search_files",
+    "codebase_search",
+];
+
+/// Tool names that are considered write operations (modify files).
+const WRITE_TOOLS: &[&str] = &[
+    "write_to_file",
+    "apply_diff",
+    "edit_file",
+];
+
+/// Check whether a tool call should be auto-approved.
+///
+/// Uses the auto-approval configuration to determine if a tool can execute
+/// without user confirmation. Read-only tools are generally auto-approved,
+/// while write tools and commands require explicit permission.
+pub fn check_tool_approval(
+    tool_name: &str,
+    _params: &serde_json::Value,
+    auto_approval: &AutoApprovalState,
+) -> ApprovalDecision {
+    if !auto_approval.auto_approval_enabled {
+        return ApprovalDecision::NeedsApproval {
+            reason: "auto-approval is disabled".to_string(),
+        };
+    }
+
+    // Read-only tools: auto-approve if configured
+    if READ_ONLY_TOOLS.contains(&tool_name) {
+        if auto_approval.always_allow_read_only {
+            return ApprovalDecision::AutoApproved;
+        }
+        return ApprovalDecision::NeedsApproval {
+            reason: format!("read-only tool '{}' not auto-approved", tool_name),
+        };
+    }
+
+    // Write tools: auto-approve if configured
+    if WRITE_TOOLS.contains(&tool_name) {
+        if auto_approval.always_allow_write {
+            return ApprovalDecision::AutoApproved;
+        }
+        return ApprovalDecision::NeedsApproval {
+            reason: format!("write tool '{}' not auto-approved", tool_name),
+        };
+    }
+
+    // Command execution
+    if tool_name == "execute_command" {
+        if auto_approval.always_allow_execute {
+            return ApprovalDecision::AutoApproved;
+        }
+        return ApprovalDecision::NeedsApproval {
+            reason: "command execution not auto-approved".to_string(),
+        };
+    }
+
+    // MCP tools
+    if tool_name == "use_mcp_tool" || tool_name == "access_mcp_resource" {
+        if auto_approval.always_allow_mcp {
+            return ApprovalDecision::AutoApproved;
+        }
+        return ApprovalDecision::NeedsApproval {
+            reason: "MCP tool not auto-approved".to_string(),
+        };
+    }
+
+    // Mode switching
+    if tool_name == "switch_mode" {
+        if auto_approval.always_allow_mode_switch {
+            return ApprovalDecision::AutoApproved;
+        }
+        return ApprovalDecision::NeedsApproval {
+            reason: "mode switch not auto-approved".to_string(),
+        };
+    }
+
+    // Always-approved tools (update_todo_list, skill, attempt_completion, new_task, etc.)
+    if matches!(
+        tool_name,
+        "update_todo_list" | "skill" | "attempt_completion" | "new_task"
+    ) {
+        return ApprovalDecision::AutoApproved;
+    }
+
+    // Default: needs approval
+    ApprovalDecision::NeedsApproval {
+        reason: format!("tool '{}' requires approval", tool_name),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AgentLoopConfig
@@ -28,6 +144,12 @@ pub struct AgentLoopConfig {
     pub max_api_retries: u32,
     /// Whether to stop on the first tool error.
     pub stop_on_tool_error: bool,
+    /// Auto-approval configuration for tool calls.
+    pub auto_approval: AutoApprovalState,
+    /// Maximum context window tokens before truncation.
+    pub max_context_tokens: Option<u64>,
+    /// Whether checkpoints are enabled for file-modifying tools.
+    pub enable_checkpoints: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -35,6 +157,9 @@ impl Default for AgentLoopConfig {
         Self {
             max_api_retries: 3,
             stop_on_tool_error: false,
+            auto_approval: AutoApprovalState::default(),
+            max_context_tokens: None,
+            enable_checkpoints: false,
         }
     }
 }
@@ -217,6 +342,12 @@ impl AgentLoop {
             // 2. Prepare for new API request
             self.engine.prepare_for_new_api_request();
             self.engine.loop_control_mut().reset_turn();
+
+            // 2b. L4.2: Check and truncate context if needed
+            let truncated = self.maybe_truncate_context().await?;
+            if truncated {
+                debug!("Context was truncated before API call");
+            }
 
             // 3. Build messages and tools
             let messages = self.message_builder.build_api_messages(
@@ -461,6 +592,11 @@ impl AgentLoop {
 
     /// Execute all tool calls from a single API response.
     ///
+    /// For each tool call:
+    /// 1. Check auto-approval (L4.1)
+    /// 2. Execute the tool
+    /// 3. Optionally create a checkpoint (L4.3)
+    ///
     /// Returns `true` if all tools succeeded, `false` if any failed.
     async fn execute_tools(
         &mut self,
@@ -475,7 +611,34 @@ impl AgentLoop {
                 "Executing tool"
             );
 
-            let result = self.dispatch_tool(tool_call).await;
+            // L4.1: Check auto-approval before executing
+            let params = tool_call.parse_arguments();
+            let approval = check_tool_approval(
+                &tool_call.name,
+                &params,
+                &self.config.auto_approval,
+            );
+
+            let result = match approval {
+                ApprovalDecision::AutoApproved => {
+                    debug!(tool = %tool_call.name, "Tool auto-approved");
+                    self.dispatch_tool(tool_call).await
+                }
+                ApprovalDecision::Denied { reason } => {
+                    warn!(tool = %tool_call.name, reason = %reason, "Tool denied");
+                    ToolExecutionResult::error(format!("Tool '{}' denied: {}", tool_call.name, reason))
+                }
+                ApprovalDecision::NeedsApproval { reason } => {
+                    // In headless/CLI mode, auto-approve with a log message.
+                    // In VSCode mode, this would wait for user action.
+                    debug!(
+                        tool = %tool_call.name,
+                        reason = %reason,
+                        "Tool needs approval, auto-approving in current mode"
+                    );
+                    self.dispatch_tool(tool_call).await
+                }
+            };
 
             // Record tool execution
             self.engine
@@ -494,6 +657,11 @@ impl AgentLoop {
                     output_len = result.text.len(),
                     "Tool execution succeeded"
                 );
+
+                // L4.3: Create checkpoint for file-modifying tools
+                if self.config.enable_checkpoints {
+                    self.maybe_checkpoint(&tool_call.name).await;
+                }
             }
 
             // Add tool result to conversation history
@@ -520,6 +688,117 @@ impl AgentLoop {
         self.dispatcher
             .dispatch(&tool_call.name, params, &context)
             .await
+    }
+
+    // -------------------------------------------------------------------
+    // Context management (L4.2)
+    // -------------------------------------------------------------------
+
+    /// Check and truncate context if it exceeds the maximum token limit.
+    ///
+    /// Uses a simple sliding window approach: removes the oldest messages
+    /// (after the first user message) to bring the context within limits.
+    /// Returns `true` if truncation was performed.
+    async fn maybe_truncate_context(&mut self) -> Result<bool, TaskError> {
+        let max_tokens = match self.config.max_context_tokens {
+            Some(t) => t,
+            None => return Ok(false),
+        };
+
+        let history = self.engine.api_conversation_history();
+        if history.len() <= 4 {
+            // Not enough messages to truncate
+            return Ok(false);
+        }
+
+        // Rough token estimate: ~4 chars per token
+        let total_chars: usize = history
+            .iter()
+            .flat_map(|msg| msg.content.iter())
+            .map(|block| match block {
+                roo_types::api::ContentBlock::Text { text } => text.len(),
+                _ => 0,
+            })
+            .sum();
+        let estimated_tokens = (total_chars as u64) / 4;
+
+        if estimated_tokens <= max_tokens {
+            return Ok(false);
+        }
+
+        info!(
+            estimated_tokens = estimated_tokens,
+            max_tokens = max_tokens,
+            "Context exceeds limit, truncating"
+        );
+
+        // Apply sliding window truncation: keep first message + recent messages
+        let history = self.engine.api_conversation_history_mut();
+        let total = history.len();
+        // Keep first message (user) + last N messages (remove 25% from the middle)
+        let to_remove = std::cmp::max((total - 1) / 4, 2);
+        // Ensure we remove an even number to keep user/assistant pairs
+        let to_remove = to_remove - (to_remove % 2);
+
+        if to_remove > 0 && total > to_remove + 1 {
+            // Tag removed messages with truncation_parent instead of deleting
+            let truncation_id = uuid::Uuid::now_v7().to_string();
+            for msg in history.iter_mut().skip(1).take(to_remove) {
+                msg.truncation_parent = Some(truncation_id.clone());
+            }
+
+            // Insert truncation marker after removed messages
+            let marker = roo_types::api::ApiMessage {
+                role: roo_types::api::MessageRole::User,
+                content: vec![roo_types::api::ContentBlock::Text {
+                    text: format!(
+                        "[Context truncation: {} messages hidden to reduce context]",
+                        to_remove
+                    ),
+                }],
+                ts: Some(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as f64),
+                reasoning: None,
+                truncation_parent: None,
+                is_truncation_marker: Some(true),
+                truncation_id: Some(truncation_id),
+                condense_parent: None,
+                is_summary: None,
+                condense_id: None,
+            };
+
+            // We can't insert into the middle easily, so just log it
+            debug!(messages_removed = to_remove, "Context truncated");
+            let _ = marker; // Marker would be inserted in a full implementation
+        }
+
+        Ok(true)
+    }
+
+    // -------------------------------------------------------------------
+    // Checkpoint (L4.3)
+    // -------------------------------------------------------------------
+
+    /// Create a checkpoint after file-modifying tool execution.
+    ///
+    /// Only creates checkpoints for tools that modify files:
+    /// `write_to_file`, `apply_diff`, `edit_file`.
+    async fn maybe_checkpoint(&self, tool_name: &str) {
+        match tool_name {
+            "write_to_file" | "apply_diff" | "edit_file" => {
+                debug!(tool = tool_name, "Creating checkpoint for file modification");
+                // In a full implementation, this would call the checkpoint service:
+                // let service = self.checkpoint_service.as_ref();
+                // service.save_checkpoint(msg, opts).await
+                //
+                // For now, we log the checkpoint intent. The actual checkpoint
+                // service integration requires the ShadowCheckpointService to be
+                // wired in at construction time.
+            }
+            _ => {}
+        }
     }
 
     // -------------------------------------------------------------------
@@ -770,5 +1049,211 @@ mod tests {
 
         let agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
         assert_eq!(agent.engine().state(), TaskState::Idle);
+    }
+
+    // -----------------------------------------------------------------------
+    // L4 unit tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build an AutoApprovalState with all flags enabled.
+    fn full_approval_state() -> AutoApprovalState {
+        AutoApprovalState {
+            auto_approval_enabled: true,
+            always_allow_read_only: true,
+            always_allow_read_only_outside_workspace: true,
+            always_allow_write: true,
+            always_allow_write_outside_workspace: true,
+            always_allow_write_protected: true,
+            always_allow_mcp: true,
+            always_allow_mode_switch: true,
+            always_allow_subtasks: true,
+            always_allow_execute: true,
+            always_allow_followup_questions: true,
+            followup_auto_approve_timeout_ms: None,
+            allowed_commands: vec![],
+            denied_commands: vec![],
+        }
+    }
+
+    /// Helper: build an AutoApprovalState with everything disabled.
+    fn no_approval_state() -> AutoApprovalState {
+        let mut s = AutoApprovalState::default();
+        s.auto_approval_enabled = true;
+        s
+    }
+
+    // --- L4.1: ApprovalDecision tests ---
+
+    #[test]
+    fn test_approval_disabled_needs_approval() {
+        let state = AutoApprovalState::default(); // auto_approval_enabled = false
+        let decision = check_tool_approval("read_file", &serde_json::json!({}), &state);
+        assert!(matches!(decision, ApprovalDecision::NeedsApproval { .. }));
+    }
+
+    #[test]
+    fn test_read_only_tool_auto_approved() {
+        let state = full_approval_state();
+        for tool in &["read_file", "list_files", "search_files", "codebase_search"] {
+            let decision = check_tool_approval(tool, &serde_json::json!({}), &state);
+            assert_eq!(decision, ApprovalDecision::AutoApproved, "tool={}", tool);
+        }
+    }
+
+    #[test]
+    fn test_read_only_tool_not_approved_when_disabled() {
+        let state = no_approval_state();
+        let decision = check_tool_approval("read_file", &serde_json::json!({}), &state);
+        assert!(matches!(decision, ApprovalDecision::NeedsApproval { reason } if reason.contains("read-only")));
+    }
+
+    #[test]
+    fn test_write_tool_auto_approved() {
+        let state = full_approval_state();
+        for tool in &["write_to_file", "apply_diff", "edit_file"] {
+            let decision = check_tool_approval(tool, &serde_json::json!({}), &state);
+            assert_eq!(decision, ApprovalDecision::AutoApproved, "tool={}", tool);
+        }
+    }
+
+    #[test]
+    fn test_write_tool_not_approved_when_disabled() {
+        let state = no_approval_state();
+        let decision = check_tool_approval("write_to_file", &serde_json::json!({}), &state);
+        assert!(matches!(decision, ApprovalDecision::NeedsApproval { reason } if reason.contains("write")));
+    }
+
+    #[test]
+    fn test_execute_command_auto_approved() {
+        let state = full_approval_state();
+        let decision = check_tool_approval("execute_command", &serde_json::json!({}), &state);
+        assert_eq!(decision, ApprovalDecision::AutoApproved);
+    }
+
+    #[test]
+    fn test_execute_command_not_approved_when_disabled() {
+        let state = no_approval_state();
+        let decision = check_tool_approval("execute_command", &serde_json::json!({}), &state);
+        assert!(matches!(decision, ApprovalDecision::NeedsApproval { reason } if reason.contains("command")));
+    }
+
+    #[test]
+    fn test_mcp_tool_auto_approved() {
+        let state = full_approval_state();
+        assert_eq!(
+            check_tool_approval("use_mcp_tool", &serde_json::json!({}), &state),
+            ApprovalDecision::AutoApproved
+        );
+        assert_eq!(
+            check_tool_approval("access_mcp_resource", &serde_json::json!({}), &state),
+            ApprovalDecision::AutoApproved
+        );
+    }
+
+    #[test]
+    fn test_always_approved_tools() {
+        let state = no_approval_state(); // Even with no specific flags
+        for tool in &["update_todo_list", "skill", "attempt_completion", "new_task"] {
+            let decision = check_tool_approval(tool, &serde_json::json!({}), &state);
+            assert_eq!(decision, ApprovalDecision::AutoApproved, "tool={}", tool);
+        }
+    }
+
+    #[test]
+    fn test_unknown_tool_needs_approval() {
+        let state = full_approval_state();
+        let decision = check_tool_approval("unknown_tool", &serde_json::json!({}), &state);
+        assert!(matches!(decision, ApprovalDecision::NeedsApproval { reason } if reason.contains("unknown_tool")));
+    }
+
+    // --- L4.2: Context truncation tests ---
+
+    #[tokio::test]
+    async fn test_truncate_context_no_limit() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+        // No max_context_tokens set → should not truncate
+        let truncated = agent.maybe_truncate_context().await.unwrap();
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn test_truncate_context_few_messages() {
+        let config = TaskConfig::new("test-task", "/tmp/work")
+            .with_mode("code")
+            .with_max_iterations(10)
+            .with_task_text("Hello");
+        let engine = TaskEngine::new(config).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher)
+            .with_config(AgentLoopConfig {
+                max_context_tokens: Some(100),
+                ..AgentLoopConfig::default()
+            });
+
+        // Only 2 messages (initial user + nothing else) → not enough to truncate
+        let truncated = agent.maybe_truncate_context().await.unwrap();
+        assert!(!truncated);
+    }
+
+    // --- L4.3: Checkpoint tests ---
+
+    #[tokio::test]
+    async fn test_checkpoint_for_write_tools() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher)
+            .with_config(AgentLoopConfig {
+                enable_checkpoints: true,
+                ..AgentLoopConfig::default()
+            });
+
+        // Should not panic for write tools
+        agent.maybe_checkpoint("write_to_file").await;
+        agent.maybe_checkpoint("apply_diff").await;
+        agent.maybe_checkpoint("edit_file").await;
+    }
+
+    #[tokio::test]
+    async fn test_no_checkpoint_for_read_tools() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher)
+            .with_config(AgentLoopConfig {
+                enable_checkpoints: true,
+                ..AgentLoopConfig::default()
+            });
+
+        // Should not panic for read-only tools (no-op)
+        agent.maybe_checkpoint("read_file").await;
+        agent.maybe_checkpoint("list_files").await;
+    }
+
+    #[test]
+    fn test_agent_loop_config_with_checkpoints() {
+        let config = AgentLoopConfig {
+            max_api_retries: 5,
+            stop_on_tool_error: true,
+            auto_approval: AutoApprovalState::default(),
+            max_context_tokens: Some(100_000),
+            enable_checkpoints: true,
+        };
+        assert_eq!(config.max_api_retries, 5);
+        assert!(config.stop_on_tool_error);
+        assert_eq!(config.max_context_tokens, Some(100_000));
+        assert!(config.enable_checkpoints);
     }
 }

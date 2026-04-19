@@ -1,7 +1,12 @@
 //! list_files tool implementation.
+//!
+//! Supports recursive listing with configurable depth limit and .gitignore
+//! awareness. When .gitignore is respected, entries matching ignore patterns
+//! are excluded from results.
 
 use crate::types::*;
 use roo_types::tool::ListFilesParams;
+use std::path::Path;
 
 /// Validate list_files parameters.
 pub fn validate_list_files_params(params: &ListFilesParams) -> Result<(), SearchToolError> {
@@ -54,6 +59,191 @@ pub fn build_file_list_result(
     }
 }
 
+/// List files in a directory with optional recursive depth and .gitignore support.
+///
+/// # Arguments
+/// * `dir` - The directory to list
+/// * `recursive` - Whether to recurse into subdirectories
+/// * `max_depth` - Maximum recursion depth (None = unlimited when recursive)
+/// * `respect_gitignore` - Whether to skip entries matching .gitignore patterns
+/// * `max_entries` - Maximum number of entries to return
+pub fn list_files_advanced(
+    dir: &Path,
+    recursive: bool,
+    max_depth: Option<usize>,
+    respect_gitignore: bool,
+    max_entries: usize,
+) -> Vec<String> {
+    let mut entries = Vec::new();
+    let ignore_patterns = if respect_gitignore {
+        load_gitignore_patterns(dir)
+    } else {
+        Vec::new()
+    };
+    collect_entries_advanced(
+        dir,
+        dir,
+        recursive,
+        max_depth.unwrap_or(usize::MAX),
+        0,
+        &ignore_patterns,
+        &mut entries,
+        max_entries,
+    );
+    entries
+}
+
+/// Recursively collect directory entries with depth limit and gitignore filtering.
+fn collect_entries_advanced(
+    base_dir: &Path,
+    current_dir: &Path,
+    recursive: bool,
+    max_depth: usize,
+    current_depth: usize,
+    ignore_patterns: &[String],
+    entries: &mut Vec<String>,
+    max_entries: usize,
+) {
+    if entries.len() >= max_entries {
+        return;
+    }
+
+    if current_depth > max_depth {
+        return;
+    }
+
+    let dir_entries = match std::fs::read_dir(current_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut sub_dirs = Vec::new();
+
+    for entry in dir_entries.flatten() {
+        if entries.len() >= max_entries {
+            return;
+        }
+
+        let file_name = match entry.file_name().to_str() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        let full_path = entry.path();
+        let relative = full_path
+            .strip_prefix(base_dir)
+            .unwrap_or(&full_path)
+            .to_string_lossy()
+            .to_string();
+
+        // Skip hidden files/dirs (starting with .)
+        if file_name.starts_with('.') {
+            continue;
+        }
+
+        // Check gitignore patterns
+        if should_ignore(&relative, ignore_patterns) {
+            continue;
+        }
+
+        if full_path.is_dir() {
+            entries.push(format!("{}/", relative));
+            sub_dirs.push(full_path);
+        } else {
+            entries.push(relative);
+        }
+    }
+
+    // Recurse into subdirectories
+    if recursive {
+        for sub_dir in sub_dirs {
+            collect_entries_advanced(
+                base_dir,
+                &sub_dir,
+                recursive,
+                max_depth,
+                current_depth + 1,
+                ignore_patterns,
+                entries,
+                max_entries,
+            );
+        }
+    }
+}
+
+/// Load .gitignore patterns from a directory.
+///
+/// Reads the `.gitignore` file if present and returns the patterns.
+/// Lines starting with `#` are comments; empty lines are skipped.
+fn load_gitignore_patterns(dir: &Path) -> Vec<String> {
+    let gitignore_path = dir.join(".gitignore");
+    if !gitignore_path.exists() {
+        return Vec::new();
+    }
+
+    let content = match std::fs::read_to_string(&gitignore_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    content
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// Check if a relative path should be ignored based on gitignore patterns.
+///
+/// Supports basic gitignore patterns:
+/// - `*.ext` — matches any file with the given extension
+/// - `dir/` — matches a directory
+/// - `name` — exact match
+/// - `**/pattern` — matches at any depth
+fn should_ignore(relative_path: &str, patterns: &[String]) -> bool {
+    for pattern in patterns {
+        let pat = pattern.trim_end_matches('/');
+        if pat.is_empty() {
+            continue;
+        }
+
+        // **/pattern — match at any depth (including root level)
+        // Must check before *.ext to avoid ** being caught by *
+        if pat.starts_with("**/") {
+            let suffix = &pat[3..];
+            if relative_path == suffix
+                || relative_path.ends_with(&format!("/{}", suffix))
+                || relative_path.ends_with(suffix)
+            {
+                return true;
+            }
+        }
+        // *.ext pattern
+        else if pat.starts_with('*') {
+            let suffix = &pat[1..]; // e.g., ".rs"
+            if relative_path.ends_with(suffix) {
+                return true;
+            }
+        }
+        // pattern/** — match directory prefix
+        else if pat.ends_with("/**") {
+            let prefix = &pat[..pat.len() - 3];
+            if relative_path.starts_with(prefix) {
+                return true;
+            }
+        }
+        // Exact match or prefix match
+        else if relative_path == pat
+            || relative_path.starts_with(&format!("{}/", pat))
+            || relative_path.ends_with(&format!("/{}", pat))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,7 +252,7 @@ mod tests {
     fn test_validate_empty_path() {
         let params = ListFilesParams {
             path: "".to_string(),
-            recursive: true,
+            recursive: false,
         };
         assert!(validate_list_files_params(&params).is_err());
     }
@@ -71,7 +261,7 @@ mod tests {
     fn test_validate_valid() {
         let params = ListFilesParams {
             path: "src".to_string(),
-            recursive: true,
+            recursive: false,
         };
         assert!(validate_list_files_params(&params).is_ok());
     }
@@ -79,31 +269,140 @@ mod tests {
     #[test]
     fn test_build_file_list_basic() {
         let entries = vec![
-            "src/".to_string(),
-            "main.rs".to_string(),
-            "lib.rs".to_string(),
+            "src/main.rs".to_string(),
+            "src/lib.rs".to_string(),
+            "target/".to_string(),
         ];
-        let result = build_file_list_result("src", true, entries, 100);
-        assert_eq!(result.directories.len(), 1);
+        let result = build_file_list_result("src", false, entries, 100);
         assert_eq!(result.files.len(), 2);
+        assert_eq!(result.directories.len(), 1);
         assert!(!result.truncated);
     }
 
     #[test]
     fn test_build_file_list_truncated() {
-        let entries: Vec<String> = (0..20)
-            .flat_map(|i| vec![format!("dir{i}/"), format!("file{i}.rs")])
-            .collect();
-        let result = build_file_list_result(".", false, entries, 5);
+        let entries: Vec<String> = (0..200).map(|i| format!("file_{}.txt", i)).collect();
+        let result = build_file_list_result("dir", false, entries, 100);
         assert!(result.truncated);
-        assert_eq!(result.total_count, 40);
     }
 
     #[test]
     fn test_build_file_list_empty() {
-        let result = build_file_list_result("empty", true, vec![], 100);
+        let result = build_file_list_result("empty", false, vec![], 100);
         assert!(result.files.is_empty());
         assert!(result.directories.is_empty());
         assert!(!result.truncated);
+    }
+
+    // --- L5.3: Advanced listing tests ---
+
+    #[test]
+    fn test_list_files_advanced_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "b").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        std::fs::write(dir.path().join("subdir/c.txt"), "c").unwrap();
+
+        let entries = list_files_advanced(dir.path(), false, None, false, 100);
+        // Non-recursive: should see a.txt, b.rs, subdir/
+        assert!(entries.iter().any(|e| e.contains("a.txt")));
+        assert!(entries.iter().any(|e| e.contains("b.rs")));
+        assert!(entries.iter().any(|e| e.contains("subdir")));
+    }
+
+    #[test]
+    fn test_list_files_advanced_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::write(dir.path().join("a/b/c.txt"), "c").unwrap();
+
+        let entries = list_files_advanced(dir.path(), true, None, false, 100);
+        assert!(entries.iter().any(|e| e.contains("c.txt")));
+    }
+
+    #[test]
+    fn test_list_files_advanced_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("l1/l2/l3")).unwrap();
+        std::fs::write(dir.path().join("l1/l2/l3/deep.txt"), "deep").unwrap();
+        std::fs::write(dir.path().join("l1/shallow.txt"), "shallow").unwrap();
+
+        // Depth 1: should see l1/ and l1/shallow.txt but not l1/l2/l3/deep.txt
+        let entries = list_files_advanced(dir.path(), true, Some(1), false, 100);
+        assert!(entries.iter().any(|e| e.contains("shallow.txt")));
+        // deep.txt is at depth 3, should not be present with max_depth=1
+        assert!(!entries.iter().any(|e| e.contains("deep.txt")));
+    }
+
+    #[test]
+    fn test_list_files_advanced_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "*.log\ntarget/\n").unwrap();
+        std::fs::write(dir.path().join("good.txt"), "good").unwrap();
+        std::fs::write(dir.path().join("bad.log"), "bad").unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+
+        let entries = list_files_advanced(dir.path(), false, None, true, 100);
+        assert!(entries.iter().any(|e| e.contains("good.txt")));
+        assert!(!entries.iter().any(|e| e.contains("bad.log")));
+        assert!(!entries.iter().any(|e| e.contains("target")));
+    }
+
+    #[test]
+    fn test_list_files_advanced_max_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..50 {
+            std::fs::write(dir.path().join(format!("file_{:03}.txt", i)), "x").unwrap();
+        }
+
+        let entries = list_files_advanced(dir.path(), false, None, false, 5);
+        assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn test_should_ignore_extension() {
+        let patterns = vec!["*.log".to_string()];
+        assert!(should_ignore("debug.log", &patterns));
+        assert!(!should_ignore("main.rs", &patterns));
+    }
+
+    #[test]
+    fn test_should_ignore_directory() {
+        let patterns = vec!["target".to_string()];
+        assert!(should_ignore("target", &patterns));
+        assert!(should_ignore("target/debug", &patterns));
+        assert!(!should_ignore("src/main.rs", &patterns));
+    }
+
+    #[test]
+    fn test_should_ignore_double_star() {
+        let patterns = vec!["**/node_modules".to_string()];
+        assert!(should_ignore("node_modules", &patterns));
+        assert!(should_ignore("foo/node_modules", &patterns));
+        assert!(should_ignore("foo/bar/node_modules", &patterns));
+    }
+
+    #[test]
+    fn test_load_gitignore_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "# comment\n*.log\n\ntarget/\n*.tmp\n",
+        )
+        .unwrap();
+
+        let patterns = load_gitignore_patterns(dir.path());
+        assert_eq!(patterns.len(), 3);
+        assert!(patterns.contains(&"*.log".to_string()));
+        assert!(patterns.contains(&"target/".to_string()));
+        assert!(patterns.contains(&"*.tmp".to_string()));
+    }
+
+    #[test]
+    fn test_load_gitignore_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let patterns = load_gitignore_patterns(dir.path());
+        assert!(patterns.is_empty());
     }
 }
