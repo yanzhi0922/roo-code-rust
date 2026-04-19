@@ -289,25 +289,50 @@ impl AnthropicHandler {
 }
 
 /// Convert a tool definition to Anthropic format.
+///
+/// Handles two input formats:
+/// 1. **OpenAI format**: `{ "type": "function", "function": { "name", "description", "parameters" } }`
+/// 2. **Direct format** (from `ToolDefinition` serde): `{ "name", "description", "parameters" }`
+///
+/// Both are converted to Anthropic's `{ "name", "description", "input_schema" }` format.
 fn convert_tool_for_anthropic(tool: &Value) -> Value {
     let tool_type = tool.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    if tool_type != "function" {
-        return tool.clone();
+
+    // OpenAI function-calling format
+    if tool_type == "function" {
+        let function = tool.get("function").cloned().unwrap_or(json!({}));
+        let name = function.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let description = function
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        let parameters = function.get("parameters").cloned().unwrap_or(json!({}));
+
+        return json!({
+            "name": name,
+            "description": description,
+            "input_schema": parameters,
+        });
     }
 
-    let function = tool.get("function").cloned().unwrap_or(json!({}));
-    let name = function.get("name").and_then(|n| n.as_str()).unwrap_or("");
-    let description = function
-        .get("description")
-        .and_then(|d| d.as_str())
-        .unwrap_or("");
-    let parameters = function.get("parameters").cloned().unwrap_or(json!({}));
+    // Direct format (ToolDefinition serde output): { name, description, parameters }
+    if tool.get("name").is_some() && tool.get("parameters").is_some() {
+        let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let description = tool
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        let parameters = tool.get("parameters").cloned().unwrap_or(json!({}));
 
-    json!({
-        "name": name,
-        "description": description,
-        "input_schema": parameters,
-    })
+        return json!({
+            "name": name,
+            "description": description,
+            "input_schema": parameters,
+        });
+    }
+
+    // Fallback: return as-is
+    tool.clone()
 }
 
 /// Convert ApiMessages to Anthropic message format.
