@@ -6,13 +6,19 @@
 //! - `BaseProvider` — common functionality for all providers
 //! - `OpenAiCompatibleProvider` — base for OpenAI-compatible APIs (SSE streaming)
 //! - Transform layer for converting between Anthropic, OpenAI, and Gemini formats
+//! - `cost` — API cost calculation utilities
+//! - `metrics` — API request metrics aggregation
+//! - `fetcher` — Model fetching and caching
 //!
 //! Individual provider implementations live in their own crates
 //! (e.g., `roo-provider-anthropic`, `roo-provider-openai`).
 
 pub mod base_provider;
+pub mod cost;
 pub mod error;
+pub mod fetcher;
 pub mod handler;
+pub mod metrics;
 pub mod openai_compatible;
 pub mod transform;
 

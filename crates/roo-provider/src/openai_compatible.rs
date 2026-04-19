@@ -121,6 +121,7 @@ pub fn process_usage_metrics(
 }
 
 /// Calculates API cost based on token usage and model pricing.
+/// Delegates to the shared cost module.
 fn calculate_api_cost_openai(
     model_info: &ModelInfo,
     input_tokens: u64,
@@ -128,13 +129,13 @@ fn calculate_api_cost_openai(
     cache_write_tokens: u64,
     cache_read_tokens: u64,
 ) -> f64 {
-    let input_cost = model_info.input_price.unwrap_or(0.0) * input_tokens as f64 / 1_000_000.0;
-    let output_cost = model_info.output_price.unwrap_or(0.0) * output_tokens as f64 / 1_000_000.0;
-    let cache_write_cost =
-        model_info.cache_writes_price.unwrap_or(0.0) * cache_write_tokens as f64 / 1_000_000.0;
-    let cache_read_cost =
-        model_info.cache_reads_price.unwrap_or(0.0) * cache_read_tokens as f64 / 1_000_000.0;
-    input_cost + output_cost + cache_write_cost + cache_read_cost
+    crate::cost::calculate_api_cost(
+        model_info,
+        input_tokens,
+        output_tokens,
+        if cache_write_tokens > 0 { Some(cache_write_tokens) } else { None },
+        if cache_read_tokens > 0 { Some(cache_read_tokens) } else { None },
+    )
 }
 
 // ---------------------------------------------------------------------------
