@@ -1,9 +1,19 @@
-﻿[package]
+[package]
 name = "roo-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "roo-server for Roo Code Rust"
+description = "JSON-RPC server for Roo Code Rust — handles IPC communication"
 
 [dependencies]
+roo-types = { path = "../roo-types" }
+roo-jsonrpc = { path = "../roo-jsonrpc" }
+roo-app = { path = "../roo-app" }
+roo-modes = { path = "../roo-modes" }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
