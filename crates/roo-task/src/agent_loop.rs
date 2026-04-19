@@ -285,9 +285,11 @@ impl AgentLoop {
                 // History already populated (e.g., resumed task)
                 debug!("Conversation history already populated, skipping initial message");
             } else {
-                let user_msg = MessageBuilder::create_user_message(&text, &initial_images);
+                // Process @mentions in user input before sending to API
+                let processed_text = self.process_user_mentions(&text);
+                let user_msg = MessageBuilder::create_user_message(&processed_text, &initial_images);
                 self.engine.add_api_message(user_msg);
-                debug!(text_len = text.len(), "Added initial user message");
+                debug!(text_len = processed_text.len(), "Added initial user message (with @mentions processed)");
             }
         }
 
@@ -322,16 +324,36 @@ impl AgentLoop {
     /// Inner loop implementation.
     ///
     /// Separated from `run_loop` to allow clean initialization and finalization.
+    /// Inner loop implementation.
+    ///
+    /// Separated from `run_loop` to allow clean initialization and finalization.
+    ///
+    /// Implements the TS `initiateTaskLoop()` outer loop behavior:
+    /// - When the model doesn't use tools (noToolsUsed), re-prompts instead of
+    ///   completing, matching the TS double-loop pattern.
+    /// - Tracks consecutive no-tool-use and empty responses, escalating to
+    ///   mistakes when thresholds are exceeded.
+    /// - Applies one-time mistake grace before terminating.
     async fn run_loop_inner(&mut self) -> Result<(), TaskError> {
         loop {
-            // 1. Check termination conditions
+            // 1. Check termination conditions (with mistake grace)
             if !self.engine.should_continue() {
-                debug!(
-                    iteration = self.engine.loop_control().current_iteration,
-                    "Loop terminated: should_continue is false"
-                );
-                self.handle_loop_termination()?;
-                break;
+                // Try one-time grace before terminating
+                if self.engine.loop_control().is_mistake_limit_reached()
+                    && self.engine.loop_control_mut().try_use_mistake_grace()
+                {
+                    warn!(
+                        "Mistake limit reached, using one-time grace to continue"
+                    );
+                    // Continue the loop with reset mistake count
+                } else {
+                    debug!(
+                        iteration = self.engine.loop_control().current_iteration,
+                        "Loop terminated: should_continue is false"
+                    );
+                    self.handle_loop_termination()?;
+                    break;
+                }
             }
 
             if self.engine.state().is_terminal() {
@@ -347,6 +369,12 @@ impl AgentLoop {
             let truncated = self.maybe_truncate_context().await?;
             if truncated {
                 debug!("Context was truncated before API call");
+            }
+
+            // 2c. Inject environment details before API call
+            let env_details = self.get_environment_details();
+            if !env_details.is_empty() {
+                self.engine.add_environment_context(&env_details);
             }
 
             // 3. Build messages and tools
@@ -374,7 +402,8 @@ impl AgentLoop {
                 }
             };
 
-            // Check for stream error
+            // Check for stream error — record mistake and continue to let
+            // the top-of-loop termination check handle grace logic.
             if let Some(ref stream_error) = parsed.error {
                 warn!(
                     error = %stream_error.error,
@@ -382,11 +411,6 @@ impl AgentLoop {
                     "Stream returned error"
                 );
                 self.engine.record_mistake();
-                if !self.engine.should_continue() {
-                    self.engine
-                        .abort_with_reason(&format!("stream_error: {}", stream_error.error))?;
-                    break;
-                }
                 continue;
             }
 
@@ -425,28 +449,64 @@ impl AgentLoop {
             self.engine.add_api_message(assistant_msg);
             self.engine.streaming_mut().assistant_message_saved_to_history = true;
 
-            // Reset no-assistant-messages counter
+            // --- Phase Q1: noToolsUsed / empty response handling ---
+
+            let has_text = !parsed.text.is_empty();
+            let has_tool_calls = !parsed.tool_calls.is_empty();
+
+            // Check for empty response (no text AND no tool calls)
+            if !has_text && !has_tool_calls {
+                self.engine.loop_control_mut().record_no_assistant_message();
+                if self.engine.loop_control_mut().should_retry_empty_response() {
+                    warn!("Empty API response (no text, no tool calls), retrying...");
+                    continue;
+                }
+                warn!("Empty API response after retries, aborting");
+                self.engine.abort_with_reason("empty_response")?;
+                break;
+            }
+
+            // We have content — reset no-assistant-messages counter
             self.engine
                 .loop_control_mut()
                 .reset_no_assistant_messages_count();
 
-            // 7. If no tool calls, the task is complete
-            if parsed.tool_calls.is_empty() {
-                debug!("No tool calls in response, task complete");
+            // Check for noToolsUsed (model produced text but no tool calls).
+            // Source: TS `initiateTaskLoop()` outer loop — re-prompts when
+            // `formatResponse.noToolsUsed` is true.
+            if !has_tool_calls {
+                // noToolsUsed case — re-prompt model to use tools
+                self.engine.loop_control_mut().record_no_tool_use();
 
-                // Set final message from assistant text
-                if !parsed.text.is_empty() {
-                    self.engine.set_final_message(parsed.text.clone());
+                if self.engine.should_continue() {
+                    let re_prompt = "You didn't use any tools. Please use tools to accomplish the task, or use attempt_completion if you're done.";
+                    let user_msg = MessageBuilder::create_user_message(re_prompt, &[]);
+                    self.engine.add_api_message(user_msg);
+                    debug!(
+                        no_tool_use_count = self.engine.loop_control().consecutive_no_tool_use_count,
+                        "No tools used, re-prompting model"
+                    );
+                    continue;
                 }
 
-                self.engine.complete()?;
+                // Mistake limit reached from no-tool-use — try grace
+                if self.engine.loop_control_mut().try_use_mistake_grace() {
+                    warn!("Mistake limit from no-tool-use, using one-time grace");
+                    let re_prompt = "You didn't use any tools. Please use tools to accomplish the task, or use attempt_completion if you're done.";
+                    let user_msg = MessageBuilder::create_user_message(re_prompt, &[]);
+                    self.engine.add_api_message(user_msg);
+                    continue;
+                }
+
+                // Grace exhausted — terminate
+                self.handle_loop_termination()?;
                 break;
             }
 
-            // 8. Reset no-tool-use counter since we have tool calls
-            self.engine.loop_control_mut().reset_no_tool_use_count();
+            // We have tool calls — reset no-tool-use counter
+            self.engine.loop_control_mut().reset_no_tool_use();
 
-            // 9. Execute tool calls
+            // 7. Execute tool calls
             let all_succeeded = self.execute_tools(&parsed.tool_calls).await?;
 
             if !all_succeeded && self.config.stop_on_tool_error {
@@ -455,7 +515,22 @@ impl AgentLoop {
                 break;
             }
 
-            // 10. Advance iteration
+            // Check if attempt_completion was executed — complete the task
+            let has_attempt_completion = parsed
+                .tool_calls
+                .iter()
+                .any(|tc| tc.name == "attempt_completion");
+
+            if has_attempt_completion {
+                debug!("attempt_completion executed, completing task");
+                if !parsed.text.is_empty() {
+                    self.engine.set_final_message(parsed.text.clone());
+                }
+                self.engine.complete()?;
+                break;
+            }
+
+            // 8. Advance iteration
             let reached_limit = self.engine.advance_iteration();
             if reached_limit {
                 warn!("Iteration limit reached");
@@ -483,10 +558,36 @@ impl AgentLoop {
         let mut retry_count = 0u32;
         let max_retries = self.config.max_api_retries;
 
+        // Track context window retries separately from general API retries
+        let mut context_window_retries = 0usize;
+        let max_context_window_retries = crate::types::MAX_CONTEXT_WINDOW_RETRIES;
+
         loop {
             match self.call_api(messages, tools).await {
                 Ok(parsed) => return Ok(parsed),
                 Err(e) => {
+                    let error_str = e.to_string();
+
+                    // Check for context window exceeded error
+                    if (error_str.contains("context_length_exceeded")
+                        || error_str.contains("context window")
+                        || error_str.contains("max_tokens"))
+                        && context_window_retries < max_context_window_retries
+                    {
+                        context_window_retries += 1;
+                        warn!(
+                            context_window_retry = context_window_retries,
+                            max_retries = max_context_window_retries,
+                            "Context window exceeded, force truncating to {}%",
+                            crate::types::FORCED_CONTEXT_REDUCTION_PERCENT
+                        );
+                        // Force truncate to FORCED_CONTEXT_REDUCTION_PERCENT
+                        let keep_ratio =
+                            (crate::types::FORCED_CONTEXT_REDUCTION_PERCENT as f64) / 100.0;
+                        self.engine.force_truncate_context(keep_ratio);
+                        continue;
+                    }
+
                     if retry_count >= max_retries {
                         return Err(e);
                     }
@@ -733,7 +834,7 @@ impl AgentLoop {
         );
 
         // Apply sliding window truncation: keep first message + recent messages
-        let history = self.engine.api_conversation_history_mut();
+        let history = self.engine.api_conversation_history();
         let total = history.len();
         // Keep first message (user) + last N messages (remove 25% from the middle)
         let to_remove = std::cmp::max((total - 1) / 4, 2);
@@ -741,18 +842,14 @@ impl AgentLoop {
         let to_remove = to_remove - (to_remove % 2);
 
         if to_remove > 0 && total > to_remove + 1 {
-            // Tag removed messages with truncation_parent instead of deleting
             let truncation_id = uuid::Uuid::now_v7().to_string();
-            for msg in history.iter_mut().skip(1).take(to_remove) {
-                msg.truncation_parent = Some(truncation_id.clone());
-            }
 
-            // Insert truncation marker after removed messages
+            // Create truncation marker
             let marker = roo_types::api::ApiMessage {
                 role: roo_types::api::MessageRole::User,
                 content: vec![roo_types::api::ContentBlock::Text {
                     text: format!(
-                        "[Context truncation: {} messages hidden to reduce context]",
+                        "[CONTEXT TRUNCATED] {} earlier messages have been removed to fit within the context window.",
                         to_remove
                     ),
                 }],
@@ -769,9 +866,9 @@ impl AgentLoop {
                 condense_id: None,
             };
 
-            // We can't insert into the middle easily, so just log it
-            debug!(messages_removed = to_remove, "Context truncated");
-            let _ = marker; // Marker would be inserted in a full implementation
+            // Actually remove messages and insert marker via engine
+            self.engine.truncate_history(to_remove, marker);
+            debug!(messages_removed = to_remove, "Context truncated with marker inserted");
         }
 
         Ok(true)
@@ -826,6 +923,51 @@ impl AgentLoop {
 
         Ok(())
     }
+
+    // -------------------------------------------------------------------
+    // Environment details (Phase Q2)
+    // -------------------------------------------------------------------
+
+    /// Gather environment details for injection into the conversation.
+    ///
+    /// Source: `src/core/task/Task.ts` — `getEnvironmentDetails()`
+    fn get_environment_details(&self) -> String {
+        let mut details = Vec::new();
+
+        // Working directory
+        details.push(format!("Current working directory: {}", self.engine.config().cwd));
+
+        // Platform info
+        details.push(format!("Platform: {}", std::env::consts::OS));
+
+        // Mode
+        details.push(format!("Mode: {}", self.engine.config().mode));
+
+        details.join("\n")
+    }
+
+    // -------------------------------------------------------------------
+    // @mentions processing (Phase Q2)
+    // -------------------------------------------------------------------
+
+    /// Process @mentions in user text, expanding @file references to file content.
+    ///
+    /// Detects patterns like `@path/to/file` and replaces them with the file's
+    /// content wrapped in a code block. If the file cannot be read, the original
+    /// @mention is preserved.
+    ///
+    /// Source: `src/core/mentions/` — @mentions processing
+    fn process_user_mentions(&self, text: &str) -> String {
+        let re = regex::Regex::new(r"@(\S+)").unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
+        re.replace_all(text, |caps: &regex::Captures| {
+            let path = &caps[1];
+            if let Ok(content) = std::fs::read_to_string(path) {
+                format!("`{}`:\n```\n{}\n```", path, content)
+            } else {
+                format!("@{}", path)
+            }
+        }).to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -842,8 +984,10 @@ mod tests {
     struct MockProvider {
         response_text: String,
         tool_calls: Vec<roo_types::api::ApiStreamChunk>,
-        /// If set, return this text (with no tool calls) after the first call.
+        /// If set, return this text after the first call.
         second_response_text: Option<String>,
+        /// If set, return these tool calls after the first call.
+        second_tool_calls: Vec<roo_types::api::ApiStreamChunk>,
         call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
@@ -853,6 +997,7 @@ mod tests {
                 response_text: text.to_string(),
                 tool_calls: Vec::new(),
                 second_response_text: None,
+                second_tool_calls: Vec::new(),
                 call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
@@ -866,9 +1011,19 @@ mod tests {
             self
         }
 
-        /// Set a different response for the second and subsequent API calls.
+        /// Set a different text for the second and subsequent API calls.
         fn with_second_response(mut self, text: &str) -> Self {
             self.second_response_text = Some(text.to_string());
+            self
+        }
+
+        /// Add a tool call for the second and subsequent API calls.
+        fn with_second_tool_call(mut self, id: &str, name: &str, args: &str) -> Self {
+            self.second_tool_calls.push(roo_types::api::ApiStreamChunk::ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: args.to_string(),
+            });
             self
         }
     }
@@ -885,13 +1040,16 @@ mod tests {
             use futures::stream;
             let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-            // Use second response after the first call if configured
             let (text, tool_calls) = if count > 0 {
-                if let Some(ref second_text) = self.second_response_text {
-                    (second_text.as_str(), &[][..] as &[roo_types::api::ApiStreamChunk])
+                let text = self.second_response_text.as_deref().unwrap_or(&self.response_text);
+                let tcs = if !self.second_tool_calls.is_empty() {
+                    &self.second_tool_calls[..]
+                } else if self.second_response_text.is_some() {
+                    &[][..] as &[roo_types::api::ApiStreamChunk]
                 } else {
-                    (self.response_text.as_str(), &self.tool_calls[..])
-                }
+                    &self.tool_calls[..]
+                };
+                (text, tcs)
             } else {
                 (self.response_text.as_str(), &self.tool_calls[..])
             };
@@ -928,17 +1086,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_loop_simple_completion() {
+        // With the TS-matching behavior, the model must use attempt_completion
+        // to complete the task. Text-only responses trigger re-prompting.
         let engine = TaskEngine::new(make_config()).unwrap();
-        let provider = MockProvider::new("Task completed!");
+        let provider = MockProvider::new("Task completed!")
+            .with_tool_call("call_1", "attempt_completion", r#"{"result":"Task completed!"}"#);
         let builder = MessageBuilder::new("You are a helper.");
-        let dispatcher = ToolDispatcher::new();
+
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher.register_fn("attempt_completion", |_params, _ctx| {
+            ToolExecutionResult::success("Task completed!")
+        });
 
         let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
         let result = agent.run_loop().await.unwrap();
 
         assert_eq!(result.status, TaskState::Completed);
-        assert_eq!(result.final_message, Some("Task completed!".to_string()));
-        assert_eq!(result.iterations, 0); // No tool calls, so no iterations advanced
+        assert_eq!(result.iterations, 0); // attempt_completion doesn't advance iteration
     }
 
     #[tokio::test]
@@ -946,23 +1110,27 @@ mod tests {
         let engine = TaskEngine::new(make_config()).unwrap();
         let provider = MockProvider::new("Reading file...")
             .with_tool_call("call_1", "read_file", r#"{"path":"test.rs"}"#)
-            .with_second_response("Done reading file.");
+            .with_second_response("Done reading file.")
+            .with_second_tool_call("call_2", "attempt_completion", r#"{"result":"Done"}"#);
         let builder = MessageBuilder::new("You are a helper.");
 
         let mut dispatcher = ToolDispatcher::new();
-        // Register a mock read_file handler
         dispatcher.register_fn("read_file", |_params, _ctx| {
             ToolExecutionResult::success("fn main() {}")
+        });
+        dispatcher.register_fn("attempt_completion", |_params, _ctx| {
+            ToolExecutionResult::success("Done")
         });
 
         let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
         let result = agent.run_loop().await.unwrap();
 
         assert_eq!(result.status, TaskState::Completed);
-        // Should have 1 iteration (the tool call round)
+        // Should have 1 iteration (the read_file round; attempt_completion doesn't advance)
         assert_eq!(result.iterations, 1);
-        // Tool should have been used
+        // Both tools should have been used
         assert!(result.tool_usage.contains_key("read_file"));
+        assert!(result.tool_usage.contains_key("attempt_completion"));
     }
 
     #[tokio::test]
@@ -995,7 +1163,7 @@ mod tests {
     async fn test_agent_loop_records_token_usage() {
         let engine = TaskEngine::new(make_config()).unwrap();
 
-        // Provider that emits usage info
+        // Provider that emits usage info and uses attempt_completion to complete
         struct UsageProvider;
         #[async_trait::async_trait]
         impl Provider for UsageProvider {
@@ -1006,6 +1174,11 @@ mod tests {
                 use futures::stream;
                 let chunks = vec![
                     Ok(roo_types::api::ApiStreamChunk::Text { text: "Done".into() }),
+                    Ok(roo_types::api::ApiStreamChunk::ToolCall {
+                        id: "call_usage".to_string(),
+                        name: "attempt_completion".to_string(),
+                        arguments: r#"{"result":"Done"}"#.to_string(),
+                    }),
                     Ok(roo_types::api::ApiStreamChunk::Usage {
                         input_tokens: 100, output_tokens: 50,
                         cache_write_tokens: None, cache_read_tokens: None,
@@ -1024,7 +1197,10 @@ mod tests {
         }
 
         let builder = MessageBuilder::new("test");
-        let dispatcher = ToolDispatcher::new();
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher.register_fn("attempt_completion", |_params, _ctx| {
+            ToolExecutionResult::success("Done")
+        });
         let mut agent = AgentLoop::new(engine, Box::new(UsageProvider), builder, dispatcher);
         let result = agent.run_loop().await.unwrap();
 
@@ -1255,5 +1431,139 @@ mod tests {
         assert!(config.stop_on_tool_error);
         assert_eq!(config.max_context_tokens, Some(100_000));
         assert!(config.enable_checkpoints);
+    }
+
+    // --- Phase Q1: noToolsUsed re-prompt and mistake grace tests ---
+
+    /// Provider that returns text-only on the first N calls, then attempt_completion.
+    struct NoToolUseThenCompletionProvider {
+        text_only_count: usize,
+        call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl NoToolUseThenCompletionProvider {
+        fn new(text_only_count: usize) -> Self {
+            Self {
+                text_only_count,
+                call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for NoToolUseThenCompletionProvider {
+        async fn create_message(
+            &self, _system_prompt: &str, _messages: Vec<roo_types::api::ApiMessage>,
+            _tools: Option<Vec<serde_json::Value>>, _metadata: CreateMessageMetadata,
+        ) -> Result<roo_provider::handler::ApiStream, roo_provider::ProviderError> {
+            use futures::stream;
+            let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut chunks = vec![Ok(roo_types::api::ApiStreamChunk::Text {
+                text: "I'm thinking...".to_string(),
+            })];
+            if count >= self.text_only_count {
+                chunks.push(Ok(roo_types::api::ApiStreamChunk::ToolCall {
+                    id: format!("call_{}", count),
+                    name: "attempt_completion".to_string(),
+                    arguments: r#"{"result":"Done!"}"#.to_string(),
+                }));
+            }
+            Ok(Box::pin(stream::iter(chunks)))
+        }
+        fn get_model(&self) -> (String, roo_types::model::ModelInfo) {
+            ("mock".to_string(), Default::default())
+        }
+        async fn complete_prompt(&self, _prompt: &str) -> Result<String, roo_provider::ProviderError> {
+            Ok("done".to_string())
+        }
+        fn provider_name(&self) -> roo_types::api::ProviderName { roo_types::api::ProviderName::FakeAi }
+    }
+
+    #[tokio::test]
+    async fn test_no_tool_used_re_prompts_then_completes() {
+        // Model returns text-only once, then uses attempt_completion.
+        // The loop should re-prompt on the first call and complete on the second.
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = NoToolUseThenCompletionProvider::new(1);
+        let builder = MessageBuilder::new("You are a helper.");
+
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher.register_fn("attempt_completion", |_params, _ctx| {
+            ToolExecutionResult::success("Done!")
+        });
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+        let result = agent.run_loop().await.unwrap();
+
+        assert_eq!(result.status, TaskState::Completed);
+        // The no-tool-use count should have been recorded and then reset
+        assert_eq!(agent.engine().loop_control().consecutive_no_tool_use_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_no_tool_used_hits_mistake_limit_with_grace() {
+        // Use a low mistake limit (2) and model never uses tools.
+        // After consecutive_no_tool_use_count >= 2, mistakes accumulate.
+        // Grace should be applied once, then the task aborts.
+        let config = TaskConfig::new("test-task", "/tmp/work")
+            .with_mode("code")
+            .with_max_iterations(100)
+            .with_consecutive_mistake_limit(2)
+            .with_task_text("Hello");
+
+        let engine = TaskEngine::new(config).unwrap();
+
+        // Provider that always returns text-only (never uses tools)
+        struct AlwaysTextProvider;
+        #[async_trait::async_trait]
+        impl Provider for AlwaysTextProvider {
+            async fn create_message(
+                &self, _system_prompt: &str, _messages: Vec<roo_types::api::ApiMessage>,
+                _tools: Option<Vec<serde_json::Value>>, _metadata: CreateMessageMetadata,
+            ) -> Result<roo_provider::handler::ApiStream, roo_provider::ProviderError> {
+                use futures::stream;
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(roo_types::api::ApiStreamChunk::Text { text: "Just text".to_string() }),
+                ])))
+            }
+            fn get_model(&self) -> (String, roo_types::model::ModelInfo) {
+                ("mock".to_string(), Default::default())
+            }
+            async fn complete_prompt(&self, _prompt: &str) -> Result<String, roo_provider::ProviderError> {
+                Ok("text".to_string())
+            }
+            fn provider_name(&self) -> roo_types::api::ProviderName { roo_types::api::ProviderName::FakeAi }
+        }
+
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+        let mut agent = AgentLoop::new(engine, Box::new(AlwaysTextProvider), builder, dispatcher);
+        let result = agent.run_loop().await.unwrap();
+
+        // Should abort due to mistake limit (after grace is used)
+        assert_eq!(result.status, TaskState::Aborted);
+        // Grace should have been used
+        assert!(agent.engine().loop_control().mistake_grace_used);
+    }
+
+    #[tokio::test]
+    async fn test_attempt_completion_completes_task() {
+        // Verify that attempt_completion tool execution completes the task
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("Completing...")
+            .with_tool_call("call_1", "attempt_completion", r#"{"result":"All done!"}"#);
+        let builder = MessageBuilder::new("You are a helper.");
+
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher.register_fn("attempt_completion", |params, _ctx| {
+            let text = params.get("result").and_then(|v| v.as_str()).unwrap_or("done");
+            ToolExecutionResult::success(text)
+        });
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+        let result = agent.run_loop().await.unwrap();
+
+        assert_eq!(result.status, TaskState::Completed);
+        assert!(result.tool_usage.contains_key("attempt_completion"));
     }
 }

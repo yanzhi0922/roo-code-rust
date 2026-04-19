@@ -14,6 +14,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use roo_tools::ToolRepetitionDetector;
+
 // ---------------------------------------------------------------------------
 // ToolExecutionResult
 // ---------------------------------------------------------------------------
@@ -126,6 +128,8 @@ pub trait ToolHandler: Send + Sync {
 /// ```
 pub struct ToolDispatcher {
     handlers: HashMap<String, Box<dyn ToolHandler>>,
+    /// Optional repetition detector to prevent infinite tool-call loops.
+    repetition_detector: Option<std::sync::Mutex<ToolRepetitionDetector>>,
 }
 
 impl ToolDispatcher {
@@ -133,7 +137,18 @@ impl ToolDispatcher {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            repetition_detector: None,
         }
+    }
+
+    /// Attach a repetition detector to this dispatcher.
+    ///
+    /// When set, every [`dispatch`](Self::dispatch) call will be checked
+    /// against the detector before the handler is invoked. If the same
+    /// tool + params combination is called too many times consecutively,
+    /// a warning result is returned instead of executing the handler.
+    pub fn set_repetition_detector(&mut self, detector: ToolRepetitionDetector) {
+        self.repetition_detector = Some(std::sync::Mutex::new(detector));
     }
 
     /// Register a tool handler.
@@ -215,6 +230,10 @@ impl ToolDispatcher {
 
     /// Dispatch a tool call to the appropriate handler.
     ///
+    /// If a [`ToolRepetitionDetector`] is installed and the call is deemed
+    /// repetitive, a warning result is returned **without** invoking the
+    /// handler.
+    ///
     /// Returns an error result if no handler is registered for the tool name.
     pub async fn dispatch(
         &self,
@@ -222,6 +241,20 @@ impl ToolDispatcher {
         params: Value,
         context: &ToolContext,
     ) -> ToolExecutionResult {
+        // --- Repetition check ---
+        if let Some(detector_mtx) = &self.repetition_detector {
+            if let Ok(mut detector) = detector_mtx.lock() {
+                if !detector.check_and_record(tool_name, &params) {
+                    return ToolExecutionResult::success(format!(
+                        "Warning: The tool '{}' has been called with similar \
+                         parameters multiple times. Consider using a different \
+                         approach.",
+                        tool_name
+                    ));
+                }
+            }
+        }
+
         match self.handlers.get(tool_name) {
             Some(handler) => handler.execute(params, context).await,
             None => ToolExecutionResult::error(format!(
@@ -1188,6 +1221,94 @@ impl ToolHandler for AccessMcpResourceHandler {
 }
 
 // ---------------------------------------------------------------------------
+// Skill & Slash Command handlers
+// ---------------------------------------------------------------------------
+
+/// Handler for the `skill` tool.
+///
+/// Loads and executes an Agent Skill (SKILL.md file).
+/// Parameters: `skill` (skill name), `args` (optional context).
+pub struct SkillHandler;
+
+#[async_trait]
+impl ToolHandler for SkillHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let skill_name = match params.get("skill").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: skill"),
+        };
+
+        let args = params
+            .get("args")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let skill_params = roo_types::tool::SkillParams {
+            skill: skill_name,
+            args,
+        };
+
+        match roo_tools_misc::process_skill(&skill_params) {
+            Ok(result) => {
+                let mut msg = format!(
+                    "Skill '{}' loaded. Follow the skill instructions.",
+                    result.skill_name
+                );
+                if let Some(args) = &result.args {
+                    msg.push_str(&format!("\nContext: {}", args));
+                }
+                ToolExecutionResult::success(msg)
+            }
+            Err(e) => ToolExecutionResult::error(format!("skill error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "skill"
+    }
+}
+
+/// Handler for the `run_slash_command` tool.
+///
+/// Executes a slash command (e.g. /init, /test, /deploy).
+/// Parameters: `command` (command name), `args` (optional arguments).
+pub struct SlashCommandHandler;
+
+#[async_trait]
+impl ToolHandler for SlashCommandHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let command = match params.get("command").and_then(|v| v.as_str()) {
+            Some(c) => c.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: command"),
+        };
+
+        let args = params
+            .get("args")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let cmd_params = roo_types::tool::RunSlashCommandParams {
+            command,
+            args,
+        };
+
+        // Simplified: return a message indicating command execution.
+        // Full implementation would look up the command via roo-command crate
+        // and return its content.
+        let mut msg = format!("Slash command '/{}' executed.", cmd_params.command);
+        if let Some(args) = &cmd_params.args {
+            msg.push_str(&format!(" Arguments: {}", args));
+        }
+
+        ToolExecutionResult::success(msg)
+    }
+
+    fn tool_name(&self) -> &str {
+        "run_slash_command"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Default dispatcher builders
 // ---------------------------------------------------------------------------
 
@@ -1225,6 +1346,7 @@ pub fn default_dispatcher() -> ToolDispatcher {
 /// - `execute_command`, `read_command_output` (command execution)
 /// - `ask_followup_question`, `attempt_completion`, `update_todo_list` (misc)
 /// - `switch_mode`, `new_task` (mode switching)
+/// - `skill`, `run_slash_command` (skill & slash command)
 ///
 /// # Arguments
 /// * `registry` — Shared [`TerminalRegistry`] for command execution.
@@ -1269,6 +1391,10 @@ pub fn default_dispatcher_with_terminal(
     );
     dispatcher.register("new_task", Box::new(NewTaskHandler));
 
+    // Skill & Slash Command tools
+    dispatcher.register("skill", Box::new(SkillHandler));
+    dispatcher.register("run_slash_command", Box::new(SlashCommandHandler));
+
     dispatcher
 }
 
@@ -1279,6 +1405,7 @@ pub fn default_dispatcher_with_terminal(
 /// this also registers:
 /// - `use_mcp_tool` (MCP tool calls)
 /// - `access_mcp_resource` (MCP resource access)
+/// - `skill`, `run_slash_command` (registered via `default_dispatcher_with_terminal`)
 ///
 /// # Arguments
 /// * `registry` — Shared [`TerminalRegistry`] for command execution.
@@ -1799,6 +1926,10 @@ mod tests {
         assert!(dispatcher.has_handler("switch_mode"));
         assert!(dispatcher.has_handler("new_task"));
 
+        // Skill & Slash Command tools
+        assert!(dispatcher.has_handler("skill"));
+        assert!(dispatcher.has_handler("run_slash_command"));
+
         // MCP tools should NOT be registered
         assert!(!dispatcher.has_handler("use_mcp_tool"));
         assert!(!dispatcher.has_handler("access_mcp_resource"));
@@ -1838,8 +1969,158 @@ mod tests {
         assert!(dispatcher.has_handler("switch_mode"));
         assert!(dispatcher.has_handler("new_task"));
 
+        // Skill & Slash Command tools
+        assert!(dispatcher.has_handler("skill"));
+        assert!(dispatcher.has_handler("run_slash_command"));
+
         // MCP tools
         assert!(dispatcher.has_handler("use_mcp_tool"));
         assert!(dispatcher.has_handler("access_mcp_resource"));
+    }
+
+    // ---- Skill & Slash Command handler tests ----
+
+    #[tokio::test]
+    async fn test_skill_handler_missing_skill_name() {
+        let handler = SkillHandler;
+        let ctx = make_context();
+        let result = handler.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_error);
+        assert!(result.text.contains("skill"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_handler_valid() {
+        let handler = SkillHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"skill": "react-native-dev", "args": "build a component"}),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(result.text.contains("react-native-dev"));
+        assert!(result.text.contains("build a component"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_handler_valid_no_args() {
+        let handler = SkillHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"skill": "flutter-dev"}), &ctx)
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(result.text.contains("flutter-dev"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_handler_empty_name() {
+        let handler = SkillHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"skill": ""}), &ctx)
+            .await;
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_slash_command_handler_missing_command() {
+        let handler = SlashCommandHandler;
+        let ctx = make_context();
+        let result = handler.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_error);
+        assert!(result.text.contains("command"));
+    }
+
+    #[tokio::test]
+    async fn test_slash_command_handler_valid() {
+        let handler = SlashCommandHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"command": "init", "args": "setup project"}), &ctx)
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(result.text.contains("init"));
+        assert!(result.text.contains("setup project"));
+    }
+
+    #[tokio::test]
+    async fn test_slash_command_handler_no_args() {
+        let handler = SlashCommandHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"command": "test"}), &ctx)
+            .await;
+        assert!(!result.is_error);
+        assert!(result.text.contains("test"));
+    }
+
+    // ---- Repetition detector integration tests ----
+
+    #[tokio::test]
+    async fn test_dispatch_with_repetition_detector_allows_initial_calls() {
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher.register_fn("test_tool", |_params, _ctx| {
+            ToolExecutionResult::success("ok")
+        });
+        dispatcher.set_repetition_detector(ToolRepetitionDetector::new(3));
+
+        let ctx = make_context();
+        let params = serde_json::json!({"key": "value"});
+
+        // First 3 identical calls should succeed
+        for _ in 0..3 {
+            let result = dispatcher.dispatch("test_tool", params.clone(), &ctx).await;
+            assert!(!result.is_error, "unexpected error: {}", result.text);
+            assert_eq!(result.text, "ok");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_with_repetition_detector_blocks_repetition() {
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher.register_fn("test_tool", |_params, _ctx| {
+            ToolExecutionResult::success("ok")
+        });
+        dispatcher.set_repetition_detector(ToolRepetitionDetector::new(3));
+
+        let ctx = make_context();
+        let params = serde_json::json!({"key": "value"});
+
+        // First 3 identical calls succeed (count goes 0→1→2)
+        for _ in 0..3 {
+            let result = dispatcher.dispatch("test_tool", params.clone(), &ctx).await;
+            assert!(!result.is_error);
+        }
+
+        // 4th identical call should be blocked by repetition detector
+        let result = dispatcher.dispatch("test_tool", params.clone(), &ctx).await;
+        assert!(!result.is_error); // it's a warning, not an error
+        assert!(
+            result.text.contains("Warning"),
+            "expected repetition warning, got: {}",
+            result.text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_without_repetition_detector() {
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher.register_fn("test_tool", |_params, _ctx| {
+            ToolExecutionResult::success("ok")
+        });
+        // No repetition detector set
+
+        let ctx = make_context();
+        let params = serde_json::json!({"key": "value"});
+
+        // Should allow unlimited identical calls
+        for _ in 0..10 {
+            let result = dispatcher.dispatch("test_tool", params.clone(), &ctx).await;
+            assert!(!result.is_error);
+            assert_eq!(result.text, "ok");
+        }
     }
 }

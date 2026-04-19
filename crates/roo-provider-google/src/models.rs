@@ -4,25 +4,322 @@ use std::collections::HashMap;
 use roo_types::model::{ModelInfo, ModelTier, ReasoningEffortExtended};
 
 /// Default Gemini model ID.
-pub const DEFAULT_MODEL_ID: &str = "gemini-2.5-pro";
+pub const DEFAULT_MODEL_ID: &str = "gemini-3.1-pro-preview";
 
 /// Returns the supported Google Gemini models.
 pub fn models() -> HashMap<String, ModelInfo> {
     let mut m = HashMap::new();
 
+    // --- Gemini 3.x ---
+    m.insert(
+        "gemini-3.1-pro-preview".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_536),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            supports_reasoning_effort: Some(serde_json::json!(["low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Low),
+            supports_temperature: Some(true),
+            default_temperature: Some(1.0),
+            input_price: Some(4.0),
+            output_price: Some(18.0),
+            cache_reads_price: Some(0.4),
+            cache_writes_price: Some(4.5),
+            description: Some("Google Gemini 3.1 Pro Preview".to_string()),
+            tiers: Some(vec![
+                ModelTier {
+                    name: None,
+                    context_window: 200_000,
+                    input_price: Some(2.0),
+                    output_price: Some(12.0),
+                    cache_reads_price: Some(0.2),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: None,
+                    context_window: u64::MAX,
+                    input_price: Some(4.0),
+                    output_price: Some(18.0),
+                    cache_reads_price: Some(0.4),
+                    cache_writes_price: None,
+                },
+            ]),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gemini-3.1-pro-preview-customtools".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_536),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            supports_reasoning_effort: Some(serde_json::json!(["low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Low),
+            supports_temperature: Some(true),
+            default_temperature: Some(1.0),
+            input_price: Some(4.0),
+            output_price: Some(18.0),
+            cache_reads_price: Some(0.4),
+            cache_writes_price: Some(4.5),
+            description: Some("Google Gemini 3.1 Pro Preview (custom tools)".to_string()),
+            tiers: Some(vec![
+                ModelTier {
+                    name: None,
+                    context_window: 200_000,
+                    input_price: Some(2.0),
+                    output_price: Some(12.0),
+                    cache_reads_price: Some(0.2),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: None,
+                    context_window: u64::MAX,
+                    input_price: Some(4.0),
+                    output_price: Some(18.0),
+                    cache_reads_price: Some(0.4),
+                    cache_writes_price: None,
+                },
+            ]),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gemini-3-pro-preview".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_536),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            supports_reasoning_effort: Some(serde_json::json!(["low", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Low),
+            supports_temperature: Some(true),
+            default_temperature: Some(1.0),
+            input_price: Some(4.0),
+            output_price: Some(18.0),
+            cache_reads_price: Some(0.4),
+            description: Some("Google Gemini 3 Pro Preview".to_string()),
+            tiers: Some(vec![
+                ModelTier {
+                    name: None,
+                    context_window: 200_000,
+                    input_price: Some(2.0),
+                    output_price: Some(12.0),
+                    cache_reads_price: Some(0.2),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: None,
+                    context_window: u64::MAX,
+                    input_price: Some(4.0),
+                    output_price: Some(18.0),
+                    cache_reads_price: Some(0.4),
+                    cache_writes_price: None,
+                },
+            ]),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gemini-3-flash-preview".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_536),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            supports_reasoning_effort: Some(serde_json::json!(["minimal", "low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            supports_temperature: Some(true),
+            default_temperature: Some(1.0),
+            input_price: Some(0.5),
+            output_price: Some(3.0),
+            cache_reads_price: Some(0.05),
+            description: Some("Google Gemini 3 Flash Preview".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // --- Gemini 2.5 Pro ---
     m.insert(
         "gemini-2.5-pro".to_string(),
         ModelInfo {
-            max_tokens: Some(65536),
-            context_window: 1048576,
+            max_tokens: Some(64_000),
+            context_window: 1_048_576,
             supports_images: Some(true),
             supports_prompt_cache: true,
+            input_price: Some(2.5),
+            output_price: Some(15.0),
+            cache_writes_price: Some(4.5),
+            cache_reads_price: Some(0.625),
+            max_thinking_tokens: Some(32_768),
             supports_reasoning_budget: Some(true),
-            input_price: Some(1.25),
-            output_price: Some(10.0),
-            cache_writes_price: Some(4.50),
-            cache_reads_price: Some(1.25),
+            required_reasoning_budget: Some(true),
             description: Some("Google Gemini 2.5 Pro".to_string()),
+            tiers: Some(vec![
+                ModelTier {
+                    name: None,
+                    context_window: 200_000,
+                    input_price: Some(1.25),
+                    output_price: Some(10.0),
+                    cache_reads_price: Some(0.31),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: None,
+                    context_window: u64::MAX,
+                    input_price: Some(2.5),
+                    output_price: Some(15.0),
+                    cache_reads_price: Some(0.625),
+                    cache_writes_price: None,
+                },
+            ]),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gemini-2.5-pro-preview-06-05".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_535),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(2.5),
+            output_price: Some(15.0),
+            cache_writes_price: Some(4.5),
+            cache_reads_price: Some(0.625),
+            max_thinking_tokens: Some(32_768),
+            supports_reasoning_budget: Some(true),
+            description: Some("Google Gemini 2.5 Pro Preview 06-05".to_string()),
+            tiers: Some(vec![
+                ModelTier {
+                    name: None,
+                    context_window: 200_000,
+                    input_price: Some(1.25),
+                    output_price: Some(10.0),
+                    cache_reads_price: Some(0.31),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: None,
+                    context_window: u64::MAX,
+                    input_price: Some(2.5),
+                    output_price: Some(15.0),
+                    cache_reads_price: Some(0.625),
+                    cache_writes_price: None,
+                },
+            ]),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gemini-2.5-pro-preview-05-06".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_535),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(2.5),
+            output_price: Some(15.0),
+            cache_writes_price: Some(4.5),
+            cache_reads_price: Some(0.625),
+            description: Some("Google Gemini 2.5 Pro Preview 05-06".to_string()),
+            tiers: Some(vec![
+                ModelTier {
+                    name: None,
+                    context_window: 200_000,
+                    input_price: Some(1.25),
+                    output_price: Some(10.0),
+                    cache_reads_price: Some(0.31),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: None,
+                    context_window: u64::MAX,
+                    input_price: Some(2.5),
+                    output_price: Some(15.0),
+                    cache_reads_price: Some(0.625),
+                    cache_writes_price: None,
+                },
+            ]),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gemini-2.5-pro-preview-03-25".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_535),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(2.5),
+            output_price: Some(15.0),
+            cache_writes_price: Some(4.5),
+            cache_reads_price: Some(0.625),
+            max_thinking_tokens: Some(32_768),
+            supports_reasoning_budget: Some(true),
+            description: Some("Google Gemini 2.5 Pro Preview 03-25".to_string()),
+            tiers: Some(vec![
+                ModelTier {
+                    name: None,
+                    context_window: 200_000,
+                    input_price: Some(1.25),
+                    output_price: Some(10.0),
+                    cache_reads_price: Some(0.31),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: None,
+                    context_window: u64::MAX,
+                    input_price: Some(2.5),
+                    output_price: Some(15.0),
+                    cache_reads_price: Some(0.625),
+                    cache_writes_price: None,
+                },
+            ]),
+            ..Default::default()
+        },
+    );
+
+    // --- Gemini 2.5 Flash ---
+    m.insert(
+        "gemini-flash-latest".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_536),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(0.3),
+            output_price: Some(2.5),
+            cache_writes_price: Some(1.0),
+            cache_reads_price: Some(0.075),
+            max_thinking_tokens: Some(24_576),
+            supports_reasoning_budget: Some(true),
+            description: Some("Google Gemini Flash Latest".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gemini-2.5-flash-preview-09-2025".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_536),
+            context_window: 1_048_576,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(0.3),
+            output_price: Some(2.5),
+            cache_writes_price: Some(1.0),
+            cache_reads_price: Some(0.075),
+            max_thinking_tokens: Some(24_576),
+            supports_reasoning_budget: Some(true),
+            description: Some("Google Gemini 2.5 Flash Preview 09-2025".to_string()),
             ..Default::default()
         },
     );
@@ -30,77 +327,54 @@ pub fn models() -> HashMap<String, ModelInfo> {
     m.insert(
         "gemini-2.5-flash".to_string(),
         ModelInfo {
-            max_tokens: Some(65536),
-            context_window: 1048576,
+            max_tokens: Some(64_000),
+            context_window: 1_048_576,
             supports_images: Some(true),
             supports_prompt_cache: true,
-            supports_reasoning_budget: Some(true),
-            input_price: Some(0.15),
-            output_price: Some(3.50),
+            input_price: Some(0.3),
+            output_price: Some(2.5),
             cache_writes_price: Some(1.0),
-            cache_reads_price: Some(0.15),
+            cache_reads_price: Some(0.075),
+            max_thinking_tokens: Some(24_576),
+            supports_reasoning_budget: Some(true),
             description: Some("Google Gemini 2.5 Flash".to_string()),
             ..Default::default()
         },
     );
 
+    // --- Gemini 2.5 Flash Lite ---
     m.insert(
-        "gemini-2.0-flash".to_string(),
+        "gemini-flash-lite-latest".to_string(),
         ModelInfo {
-            max_tokens: Some(8192),
-            context_window: 1048576,
+            max_tokens: Some(65_536),
+            context_window: 1_048_576,
             supports_images: Some(true),
             supports_prompt_cache: true,
-            input_price: Some(0.10),
-            output_price: Some(0.40),
-            cache_writes_price: Some(0.50),
+            input_price: Some(0.1),
+            output_price: Some(0.4),
+            cache_writes_price: Some(1.0),
             cache_reads_price: Some(0.025),
-            description: Some("Google Gemini 2.0 Flash".to_string()),
+            supports_reasoning_budget: Some(true),
+            max_thinking_tokens: Some(24_576),
+            description: Some("Google Gemini Flash Lite Latest".to_string()),
             ..Default::default()
         },
     );
 
     m.insert(
-        "gemini-2.0-flash-lite".to_string(),
+        "gemini-2.5-flash-lite-preview-09-2025".to_string(),
         ModelInfo {
-            max_tokens: Some(8192),
-            context_window: 1048576,
-            supports_images: Some(true),
-            input_price: Some(0.075),
-            output_price: Some(0.30),
-            description: Some("Google Gemini 2.0 Flash Lite".to_string()),
-            ..Default::default()
-        },
-    );
-
-    m.insert(
-        "gemini-1.5-pro".to_string(),
-        ModelInfo {
-            max_tokens: Some(8192),
-            context_window: 2097152,
+            max_tokens: Some(65_536),
+            context_window: 1_048_576,
             supports_images: Some(true),
             supports_prompt_cache: true,
-            input_price: Some(1.25),
-            output_price: Some(5.0),
-            cache_writes_price: Some(4.50),
-            cache_reads_price: Some(1.25),
-            description: Some("Google Gemini 1.5 Pro".to_string()),
-            ..Default::default()
-        },
-    );
-
-    m.insert(
-        "gemini-1.5-flash".to_string(),
-        ModelInfo {
-            max_tokens: Some(8192),
-            context_window: 1048576,
-            supports_images: Some(true),
-            supports_prompt_cache: true,
-            input_price: Some(0.075),
-            output_price: Some(0.30),
-            cache_writes_price: Some(0.50),
+            input_price: Some(0.1),
+            output_price: Some(0.4),
+            cache_writes_price: Some(1.0),
             cache_reads_price: Some(0.025),
-            description: Some("Google Gemini 1.5 Flash".to_string()),
+            supports_reasoning_budget: Some(true),
+            max_thinking_tokens: Some(24_576),
+            description: Some("Google Gemini 2.5 Flash Lite Preview 09-2025".to_string()),
             ..Default::default()
         },
     );

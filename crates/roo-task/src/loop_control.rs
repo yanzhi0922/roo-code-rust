@@ -58,6 +58,13 @@ pub struct LoopControl {
     ///
     /// Source: `src/core/task/Task.ts` — `consecutiveMistakeCountForEditFile`
     pub consecutive_mistake_count_for_edit_file: HashMap<String, usize>,
+    /// Whether the one-time mistake limit grace has been used.
+    ///
+    /// When the mistake limit is reached for the first time, the engine can
+    /// reset `consecutive_mistake_count` to 0 and set this flag to `true`,
+    /// giving the model one extra chance. If the limit is reached again,
+    /// the task terminates.
+    pub mistake_grace_used: bool,
 }
 
 impl LoopControl {
@@ -74,6 +81,7 @@ impl LoopControl {
             consecutive_no_assistant_messages_count: 0,
             consecutive_mistake_count_for_apply_diff: HashMap::new(),
             consecutive_mistake_count_for_edit_file: HashMap::new(),
+            mistake_grace_used: false,
         }
     }
 
@@ -90,6 +98,7 @@ impl LoopControl {
             consecutive_no_assistant_messages_count: 0,
             consecutive_mistake_count_for_apply_diff: HashMap::new(),
             consecutive_mistake_count_for_edit_file: HashMap::new(),
+            mistake_grace_used: false,
         }
     }
 
@@ -180,9 +189,16 @@ impl LoopControl {
 
     /// Record that the model did not use any tools in this iteration.
     ///
-    /// Source: `src/core/task/Task.ts` — `consecutiveNoToolUseCount`
+    /// Increments `consecutive_no_tool_use_count`. When the count reaches 2
+    /// or more, also increments `consecutive_mistake_count` to match the TS
+    /// behavior where `consecutiveNoToolUseCount >= 2` counts as a mistake.
+    ///
+    /// Source: `src/core/task/Task.ts` — `initiateTaskLoop()` outer loop
     pub fn record_no_tool_use(&mut self) {
         self.consecutive_no_tool_use_count += 1;
+        if self.consecutive_no_tool_use_count >= 2 {
+            self.consecutive_mistake_count += 1;
+        }
     }
 
     /// Reset the consecutive no-tool-use count.
@@ -192,11 +208,22 @@ impl LoopControl {
         self.consecutive_no_tool_use_count = 0;
     }
 
+    /// Alias for [`Self::reset_no_tool_use_count`].
+    pub fn reset_no_tool_use(&mut self) {
+        self.reset_no_tool_use_count();
+    }
+
     /// Record that the model did not produce an assistant message in this iteration.
+    ///
+    /// Increments `consecutive_no_assistant_messages_count`. When the count
+    /// reaches 2 or more, also increments `consecutive_mistake_count`.
     ///
     /// Source: `src/core/task/Task.ts` — `consecutiveNoAssistantMessagesCount`
     pub fn record_no_assistant_message(&mut self) {
         self.consecutive_no_assistant_messages_count += 1;
+        if self.consecutive_no_assistant_messages_count >= 2 {
+            self.consecutive_mistake_count += 1;
+        }
     }
 
     /// Reset the consecutive no-assistant-messages count.
@@ -204,6 +231,36 @@ impl LoopControl {
     /// Called when the model produces an assistant message.
     pub fn reset_no_assistant_messages_count(&mut self) {
         self.consecutive_no_assistant_messages_count = 0;
+    }
+
+    /// Alias for [`Self::reset_no_assistant_messages_count`].
+    pub fn reset_no_assistant_message(&mut self) {
+        self.reset_no_assistant_messages_count();
+    }
+
+    /// Check whether we should retry after receiving an empty response.
+    ///
+    /// Returns `true` when `consecutive_no_assistant_messages_count < 2`,
+    /// allowing up to 2 retries for empty API responses.
+    pub fn should_retry_empty_response(&self) -> bool {
+        self.consecutive_no_assistant_messages_count < 2
+    }
+
+    /// Try to use the one-time mistake limit grace.
+    ///
+    /// When the consecutive mistake limit is reached for the first time,
+    /// this method resets the mistake count and marks grace as used,
+    /// giving the model one extra chance. Returns `true` if grace was
+    /// applied (i.e., this is the first time the limit was reached).
+    ///
+    /// If grace has already been used, returns `false` and does nothing.
+    pub fn try_use_mistake_grace(&mut self) -> bool {
+        if self.mistake_grace_used {
+            return false;
+        }
+        self.mistake_grace_used = true;
+        self.consecutive_mistake_count = 0;
+        true
     }
 
     /// Reset the consecutive mistake count.
@@ -275,6 +332,7 @@ mod tests {
         assert_eq!(lc.consecutive_no_assistant_messages_count, 0);
         assert!(lc.consecutive_mistake_count_for_apply_diff.is_empty());
         assert!(lc.consecutive_mistake_count_for_edit_file.is_empty());
+        assert!(!lc.mistake_grace_used);
     }
 
     #[test]
@@ -419,10 +477,25 @@ mod tests {
         assert_eq!(lc.consecutive_no_tool_use_count, 0);
 
         lc.record_no_tool_use();
+        assert_eq!(lc.consecutive_no_tool_use_count, 1);
+        assert_eq!(lc.consecutive_mistake_count, 0); // count < 2, no mistake yet
+
+        lc.record_no_tool_use();
+        assert_eq!(lc.consecutive_no_tool_use_count, 2);
+        assert_eq!(lc.consecutive_mistake_count, 1); // count >= 2, mistake recorded
+
+        lc.reset_no_tool_use_count();
+        assert_eq!(lc.consecutive_no_tool_use_count, 0);
+    }
+
+    #[test]
+    fn test_loop_control_reset_no_tool_use_alias() {
+        let mut lc = LoopControl::new(3);
+        lc.record_no_tool_use();
         lc.record_no_tool_use();
         assert_eq!(lc.consecutive_no_tool_use_count, 2);
 
-        lc.reset_no_tool_use_count();
+        lc.reset_no_tool_use(); // alias
         assert_eq!(lc.consecutive_no_tool_use_count, 0);
     }
 
@@ -508,6 +581,9 @@ mod tests {
         lc.record_no_assistant_message();
         assert_eq!(lc.consecutive_no_tool_use_count, 2);
         assert_eq!(lc.consecutive_no_assistant_messages_count, 1);
+        // record_no_tool_use() twice → consecutive_mistake_count = 1
+        // record_no_assistant_message() once → no mistake increment (count < 2)
+        assert_eq!(lc.consecutive_mistake_count, 1);
 
         lc.cancel();
         assert_eq!(lc.consecutive_no_tool_use_count, 0);
@@ -520,10 +596,95 @@ mod tests {
         assert_eq!(lc.consecutive_no_assistant_messages_count, 0);
 
         lc.record_no_assistant_message();
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 1);
+        assert_eq!(lc.consecutive_mistake_count, 0); // count < 2, no mistake yet
+
         lc.record_no_assistant_message();
         assert_eq!(lc.consecutive_no_assistant_messages_count, 2);
+        assert_eq!(lc.consecutive_mistake_count, 1); // count >= 2, mistake recorded
 
         lc.reset_no_assistant_messages_count();
         assert_eq!(lc.consecutive_no_assistant_messages_count, 0);
+    }
+
+    #[test]
+    fn test_loop_control_reset_no_assistant_message_alias() {
+        let mut lc = LoopControl::new(3);
+        lc.record_no_assistant_message();
+        lc.record_no_assistant_message();
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 2);
+
+        lc.reset_no_assistant_message(); // alias
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 0);
+    }
+
+    #[test]
+    fn test_loop_control_should_retry_empty_response() {
+        let mut lc = LoopControl::new(3);
+        assert!(lc.should_retry_empty_response()); // count = 0
+
+        lc.record_no_assistant_message();
+        assert!(lc.should_retry_empty_response()); // count = 1
+
+        lc.record_no_assistant_message();
+        assert!(!lc.should_retry_empty_response()); // count = 2
+    }
+
+    #[test]
+    fn test_loop_control_no_tool_use_accumulates_mistakes() {
+        let mut lc = LoopControl::new(3);
+        // Three consecutive no-tool-use iterations
+        lc.record_no_tool_use(); // count=1, mistakes=0
+        lc.record_no_tool_use(); // count=2, mistakes=1
+        lc.record_no_tool_use(); // count=3, mistakes=2
+        assert_eq!(lc.consecutive_no_tool_use_count, 3);
+        assert_eq!(lc.consecutive_mistake_count, 2);
+        assert!(lc.should_continue()); // 2 < 3
+
+        // One more would hit mistake limit
+        lc.record_no_tool_use(); // count=4, mistakes=3
+        assert_eq!(lc.consecutive_mistake_count, 3);
+        assert!(!lc.should_continue()); // 3 >= 3
+    }
+
+    #[test]
+    fn test_loop_control_try_use_mistake_grace_first_time() {
+        let mut lc = LoopControl::new(3);
+        // Reach the mistake limit
+        lc.record_mistake(); // 1
+        lc.record_mistake(); // 2
+        lc.record_mistake(); // 3
+        assert!(!lc.should_continue()); // 3 >= 3
+
+        // Use grace: should reset mistakes and allow continuing
+        let granted = lc.try_use_mistake_grace();
+        assert!(granted);
+        assert!(lc.mistake_grace_used);
+        assert_eq!(lc.consecutive_mistake_count, 0);
+        assert!(lc.should_continue()); // 0 < 3
+    }
+
+    #[test]
+    fn test_loop_control_try_use_mistake_grace_already_used() {
+        let mut lc = LoopControl::new(3);
+        lc.record_mistake();
+        lc.record_mistake();
+        lc.record_mistake();
+
+        // First grace: succeeds
+        assert!(lc.try_use_mistake_grace());
+        assert_eq!(lc.consecutive_mistake_count, 0);
+
+        // Accumulate mistakes again
+        lc.record_mistake(); // 1
+        lc.record_mistake(); // 2
+        lc.record_mistake(); // 3
+        assert!(!lc.should_continue()); // 3 >= 3
+
+        // Second grace: denied
+        let granted = lc.try_use_mistake_grace();
+        assert!(!granted);
+        assert_eq!(lc.consecutive_mistake_count, 3);
+        assert!(!lc.should_continue()); // still at limit
     }
 }

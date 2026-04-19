@@ -367,6 +367,94 @@ impl TaskEngine {
         self.is_paused
     }
 
+    /// Truncate conversation history by removing messages and inserting a marker.
+    ///
+    /// Removes `remove_count` messages starting from index 1 (preserving the
+    /// first/system message), then inserts the truncation marker at index 1.
+    ///
+    /// This ensures the conversation history stays within the model's context
+    /// window while preserving the most recent messages.
+    pub fn truncate_history(&mut self, remove_count: usize, marker: roo_types::api::ApiMessage) {
+        if remove_count > 0 && remove_count < self.api_conversation_history.len() {
+            // Remove messages from index 1 to 1+remove_count (keep first message)
+            self.api_conversation_history.drain(1..1 + remove_count);
+            // Insert truncation marker at index 1
+            self.api_conversation_history.insert(1, marker);
+        }
+    }
+
+    /// Force truncate context to keep only a ratio of messages.
+    ///
+    /// Used when the API returns a `context_length_exceeded` error. Removes
+    /// messages from the middle of the history, keeping the first message
+    /// (system) and the most recent messages.
+    ///
+    /// Source: `src/core/task/Task.ts` — `FORCED_CONTEXT_REDUCTION_PERCENT`
+    pub fn force_truncate_context(&mut self, keep_ratio: f64) {
+        let total = self.api_conversation_history.len();
+        if total <= 2 {
+            // Not enough messages to truncate
+            return;
+        }
+        let keep = ((total as f64) * keep_ratio) as usize;
+        let remove = total.saturating_sub(keep);
+        if remove > 1 {
+            // Remove from index 1, keeping first (system) and last messages
+            self.api_conversation_history.drain(1..1 + remove);
+            // Insert a truncation notice
+            let marker = roo_types::api::ApiMessage {
+                role: roo_types::api::MessageRole::User,
+                content: vec![roo_types::api::ContentBlock::Text {
+                    text: "[CONTEXT WINDOW EXCEEDED — Earlier conversation history has been removed to fit within the context window.]".to_string(),
+                }],
+                reasoning: None,
+                ts: Some(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as f64),
+                truncation_parent: None,
+                is_truncation_marker: Some(true),
+                truncation_id: Some(uuid::Uuid::now_v7().to_string()),
+                condense_parent: None,
+                is_summary: None,
+                condense_id: None,
+            };
+            self.api_conversation_history.insert(1, marker);
+        }
+    }
+
+    /// Append environment context to the last user message or create a new one.
+    ///
+    /// Source: `src/core/task/Task.ts` — `getEnvironmentDetails()` injection
+    pub fn add_environment_context(&mut self, details: &str) {
+        if let Some(last_msg) = self.api_conversation_history.last_mut() {
+            if last_msg.role == roo_types::api::MessageRole::User {
+                last_msg.content.push(roo_types::api::ContentBlock::Text {
+                    text: format!("\n\n<environment_details>\n{}\n</environment_details>", details),
+                });
+                return;
+            }
+        }
+        // No last user message — create a new one
+        self.api_conversation_history.push(roo_types::api::ApiMessage {
+            role: roo_types::api::MessageRole::User,
+            content: vec![roo_types::api::ContentBlock::Text {
+                text: format!("<environment_details>\n{}\n</environment_details>", details),
+            }],
+            reasoning: None,
+            ts: Some(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as f64),
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        });
+    }
+
     /// Finalize the task and return the result.
     pub fn finalize(mut self) -> TaskResult {
         if self.state_machine.current() == TaskState::Running {

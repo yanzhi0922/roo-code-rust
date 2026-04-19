@@ -201,6 +201,98 @@ pub fn openai_native_models() -> HashMap<String, ModelInfo> {
     );
 
     m.insert(
+        "gpt-5.2-codex".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            prompt_cache_retention: Some("24h".to_string()),
+            supports_reasoning_effort: Some(serde_json::json!(["low", "medium", "high", "xhigh"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            input_price: Some(1.75),
+            output_price: Some(14.0),
+            cache_reads_price: Some(0.175),
+            supports_temperature: Some(false),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            tiers: Some(vec![ModelTier {
+                name: Some(ServiceTier::Priority),
+                context_window: 400_000,
+                input_price: Some(3.5),
+                output_price: Some(28.0),
+                cache_reads_price: Some(0.35),
+                cache_writes_price: None,
+            }]),
+            description: Some("GPT-5.2 Codex: Our most intelligent coding model optimized for long-horizon, agentic coding tasks".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gpt-5.3-codex".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            prompt_cache_retention: Some("24h".to_string()),
+            supports_reasoning_effort: Some(serde_json::json!(["low", "medium", "high", "xhigh"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            input_price: Some(1.75),
+            output_price: Some(14.0),
+            cache_reads_price: Some(0.175),
+            supports_temperature: Some(false),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            tiers: Some(vec![ModelTier {
+                name: Some(ServiceTier::Priority),
+                context_window: 400_000,
+                input_price: Some(3.5),
+                output_price: Some(28.0),
+                cache_reads_price: Some(0.35),
+                cache_writes_price: None,
+            }]),
+            description: Some("GPT-5.3 Codex: Our most intelligent coding model optimized for long-horizon, agentic coding tasks".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gpt-5.2-chat-latest".to_string(),
+        ModelInfo {
+            max_tokens: Some(16_384),
+            context_window: 128_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(1.75),
+            output_price: Some(14.0),
+            cache_reads_price: Some(0.175),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            description: Some("GPT-5.2 Chat: Optimized for conversational AI and chat use cases".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gpt-5.3-chat-latest".to_string(),
+        ModelInfo {
+            max_tokens: Some(16_384),
+            context_window: 128_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(1.75),
+            output_price: Some(14.0),
+            cache_reads_price: Some(0.175),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            description: Some("GPT-5.3 Chat: Optimized for conversational AI and chat use cases".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
         "gpt-5.1".to_string(),
         ModelInfo {
             max_tokens: Some(128_000),
@@ -236,6 +328,56 @@ pub fn openai_native_models() -> HashMap<String, ModelInfo> {
                 },
             ]),
             description: Some("GPT-5.1: The best model for coding and agentic tasks across domains".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gpt-5.1-codex".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            prompt_cache_retention: Some("24h".to_string()),
+            supports_reasoning_effort: Some(serde_json::json!(["low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            input_price: Some(1.25),
+            output_price: Some(10.0),
+            cache_reads_price: Some(0.125),
+            supports_temperature: Some(false),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            tiers: Some(vec![ModelTier {
+                name: Some(ServiceTier::Priority),
+                context_window: 400_000,
+                input_price: Some(2.5),
+                output_price: Some(20.0),
+                cache_reads_price: Some(0.25),
+                cache_writes_price: None,
+            }]),
+            description: Some("GPT-5.1 Codex: A version of GPT-5.1 optimized for agentic coding in Codex".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gpt-5.1-codex-mini".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            prompt_cache_retention: Some("24h".to_string()),
+            supports_reasoning_effort: Some(serde_json::json!(["low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            input_price: Some(0.25),
+            output_price: Some(2.0),
+            cache_reads_price: Some(0.025),
+            supports_temperature: Some(false),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            description: Some("GPT-5.1 Codex mini: A version of GPT-5.1 optimized for agentic coding in Codex".to_string()),
             ..Default::default()
         },
     );
@@ -319,6 +461,34 @@ pub fn openai_native_models() -> HashMap<String, ModelInfo> {
     );
 
     m.insert(
+        "gpt-5-codex".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            supports_reasoning_effort: Some(serde_json::json!(["low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            input_price: Some(1.25),
+            output_price: Some(10.0),
+            cache_reads_price: Some(0.125),
+            supports_temperature: Some(false),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            tiers: Some(vec![ModelTier {
+                name: Some(ServiceTier::Priority),
+                context_window: 400_000,
+                input_price: Some(2.5),
+                output_price: Some(20.0),
+                cache_reads_price: Some(0.25),
+                cache_writes_price: None,
+            }]),
+            description: Some("GPT-5-Codex: A version of GPT-5 optimized for agentic coding in Codex".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
         "gpt-5-nano".to_string(),
         ModelInfo {
             max_tokens: Some(128_000),
@@ -343,6 +513,23 @@ pub fn openai_native_models() -> HashMap<String, ModelInfo> {
                 cache_writes_price: None,
             }]),
             description: Some("GPT-5 Nano: Fastest, most cost-efficient version of GPT-5".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gpt-5-chat-latest".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(1.25),
+            output_price: Some(10.0),
+            cache_reads_price: Some(0.125),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            description: Some("GPT-5 Chat: Optimized for conversational AI and non-reasoning tasks".to_string()),
             ..Default::default()
         },
     );
@@ -462,6 +649,38 @@ pub fn openai_native_models() -> HashMap<String, ModelInfo> {
     );
 
     m.insert(
+        "o3-high".to_string(),
+        ModelInfo {
+            max_tokens: Some(100_000),
+            context_window: 200_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(2.0),
+            output_price: Some(8.0),
+            cache_reads_price: Some(0.5),
+            reasoning_effort: Some(ReasoningEffortExtended::High),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "o3-low".to_string(),
+        ModelInfo {
+            max_tokens: Some(100_000),
+            context_window: 200_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(2.0),
+            output_price: Some(8.0),
+            cache_reads_price: Some(0.5),
+            reasoning_effort: Some(ReasoningEffortExtended::Low),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
         "o4-mini".to_string(),
         ModelInfo {
             max_tokens: Some(100_000),
@@ -497,6 +716,38 @@ pub fn openai_native_models() -> HashMap<String, ModelInfo> {
     );
 
     m.insert(
+        "o4-mini-high".to_string(),
+        ModelInfo {
+            max_tokens: Some(100_000),
+            context_window: 200_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(1.1),
+            output_price: Some(4.4),
+            cache_reads_price: Some(0.275),
+            reasoning_effort: Some(ReasoningEffortExtended::High),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "o4-mini-low".to_string(),
+        ModelInfo {
+            max_tokens: Some(100_000),
+            context_window: 200_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(1.1),
+            output_price: Some(4.4),
+            cache_reads_price: Some(0.275),
+            reasoning_effort: Some(ReasoningEffortExtended::Low),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
         "o3-mini".to_string(),
         ModelInfo {
             max_tokens: Some(100_000),
@@ -508,6 +759,83 @@ pub fn openai_native_models() -> HashMap<String, ModelInfo> {
             cache_reads_price: Some(0.55),
             supports_reasoning_effort: Some(serde_json::json!(["low", "medium", "high"])),
             reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "o3-mini-high".to_string(),
+        ModelInfo {
+            max_tokens: Some(100_000),
+            context_window: 200_000,
+            supports_images: Some(false),
+            supports_prompt_cache: true,
+            input_price: Some(1.1),
+            output_price: Some(4.4),
+            cache_reads_price: Some(0.55),
+            reasoning_effort: Some(ReasoningEffortExtended::High),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "o3-mini-low".to_string(),
+        ModelInfo {
+            max_tokens: Some(100_000),
+            context_window: 200_000,
+            supports_images: Some(false),
+            supports_prompt_cache: true,
+            input_price: Some(1.1),
+            output_price: Some(4.4),
+            cache_reads_price: Some(0.55),
+            reasoning_effort: Some(ReasoningEffortExtended::Low),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "o1".to_string(),
+        ModelInfo {
+            max_tokens: Some(100_000),
+            context_window: 200_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(15.0),
+            output_price: Some(60.0),
+            cache_reads_price: Some(7.5),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "o1-preview".to_string(),
+        ModelInfo {
+            max_tokens: Some(32_768),
+            context_window: 128_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(15.0),
+            output_price: Some(60.0),
+            cache_reads_price: Some(7.5),
+            supports_temperature: Some(false),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "o1-mini".to_string(),
+        ModelInfo {
+            max_tokens: Some(65_536),
+            context_window: 128_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(1.1),
+            output_price: Some(4.4),
+            cache_reads_price: Some(0.55),
             supports_temperature: Some(false),
             ..Default::default()
         },
@@ -557,6 +885,136 @@ pub fn openai_native_models() -> HashMap<String, ModelInfo> {
                 cache_reads_price: Some(0.125),
                 cache_writes_price: None,
             }]),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "codex-mini-latest".to_string(),
+        ModelInfo {
+            max_tokens: Some(16_384),
+            context_window: 200_000,
+            supports_images: Some(false),
+            supports_prompt_cache: false,
+            input_price: Some(1.5),
+            output_price: Some(6.0),
+            cache_reads_price: Some(0.375),
+            supports_temperature: Some(false),
+            description: Some(
+                "Codex Mini: Cloud-based software engineering agent powered by codex-1, a version \
+                 of o3 optimized for coding tasks. Trained with reinforcement learning to generate \
+                 human-style code, adhere to instructions, and iteratively run tests."
+                    .to_string(),
+            ),
+            ..Default::default()
+        },
+    );
+
+    // --- Dated clones (snapshots) ---
+
+    m.insert(
+        "gpt-5-2025-08-07".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            supports_reasoning_effort: Some(serde_json::json!(["minimal", "low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            input_price: Some(1.25),
+            output_price: Some(10.0),
+            cache_reads_price: Some(0.125),
+            supports_verbosity: Some(true),
+            supports_temperature: Some(false),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            tiers: Some(vec![
+                ModelTier {
+                    name: Some(ServiceTier::Flex),
+                    context_window: 400_000,
+                    input_price: Some(0.625),
+                    output_price: Some(5.0),
+                    cache_reads_price: Some(0.0625),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: Some(ServiceTier::Priority),
+                    context_window: 400_000,
+                    input_price: Some(2.5),
+                    output_price: Some(20.0),
+                    cache_reads_price: Some(0.25),
+                    cache_writes_price: None,
+                },
+            ]),
+            description: Some("GPT-5: The best model for coding and agentic tasks across domains".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gpt-5-mini-2025-08-07".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            supports_reasoning_effort: Some(serde_json::json!(["minimal", "low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            input_price: Some(0.25),
+            output_price: Some(2.0),
+            cache_reads_price: Some(0.025),
+            supports_verbosity: Some(true),
+            supports_temperature: Some(false),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            tiers: Some(vec![
+                ModelTier {
+                    name: Some(ServiceTier::Flex),
+                    context_window: 400_000,
+                    input_price: Some(0.125),
+                    output_price: Some(1.0),
+                    cache_reads_price: Some(0.0125),
+                    cache_writes_price: None,
+                },
+                ModelTier {
+                    name: Some(ServiceTier::Priority),
+                    context_window: 400_000,
+                    input_price: Some(0.45),
+                    output_price: Some(3.6),
+                    cache_reads_price: Some(0.045),
+                    cache_writes_price: None,
+                },
+            ]),
+            description: Some("GPT-5 Mini: A faster, more cost-efficient version of GPT-5 for well-defined tasks".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "gpt-5-nano-2025-08-07".to_string(),
+        ModelInfo {
+            max_tokens: Some(128_000),
+            context_window: 400_000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            supports_reasoning_effort: Some(serde_json::json!(["minimal", "low", "medium", "high"])),
+            reasoning_effort: Some(ReasoningEffortExtended::Medium),
+            input_price: Some(0.05),
+            output_price: Some(0.4),
+            cache_reads_price: Some(0.005),
+            supports_verbosity: Some(true),
+            supports_temperature: Some(false),
+            included_tools: Some(vec!["apply_patch".to_string()]),
+            excluded_tools: Some(vec!["apply_diff".to_string(), "write_to_file".to_string()]),
+            tiers: Some(vec![ModelTier {
+                name: Some(ServiceTier::Flex),
+                context_window: 400_000,
+                input_price: Some(0.025),
+                output_price: Some(0.2),
+                cache_reads_price: Some(0.0025),
+                cache_writes_price: None,
+            }]),
+            description: Some("GPT-5 Nano: Fastest, most cost-efficient version of GPT-5".to_string()),
             ..Default::default()
         },
     );
@@ -921,8 +1379,8 @@ mod tests {
     fn test_native_models_count() {
         let models = openai_native_models();
         assert!(
-            models.len() >= 15,
-            "Should have at least 15 OpenAI Native models, got {}",
+            models.len() >= 36,
+            "Should have at least 36 OpenAI Native models, got {}",
             models.len()
         );
     }
