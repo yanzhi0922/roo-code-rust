@@ -10,6 +10,42 @@ use crate::types::SystemPromptSettings;
 /// Maximum depth for recursive symlink resolution.
 const MAX_DEPTH: usize = 5;
 
+/// Language code to human-readable name mapping.
+///
+/// Source: `src/shared/language.ts` — `LANGUAGES`
+const LANGUAGE_NAMES: &[(&str, &str)] = &[
+    ("ca", "Català"),
+    ("de", "Deutsch"),
+    ("en", "English"),
+    ("es", "Español"),
+    ("fr", "Français"),
+    ("hi", "हिन्दी"),
+    ("id", "Bahasa Indonesia"),
+    ("it", "Italiano"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("nl", "Nederlands"),
+    ("pl", "Polski"),
+    ("pt-BR", "Português"),
+    ("ru", "Русский"),
+    ("tr", "Türkçe"),
+    ("vi", "Tiếng Việt"),
+    ("zh-CN", "简体中文"),
+    ("zh-TW", "繁體中文"),
+];
+
+/// Returns the human-readable language name for a language code.
+/// Falls back to the code itself if not found.
+///
+/// Source: `src/shared/language.ts` — `LANGUAGES` + `isLanguage`
+fn get_language_name(code: &str) -> &str {
+    LANGUAGE_NAMES
+        .iter()
+        .find(|(k, _)| *k == code)
+        .map(|(_, v)| *v)
+        .unwrap_or(code)
+}
+
 /// Cache file patterns to exclude from rule compilation.
 const CACHE_PATTERNS: &[&str] = &[
     "*.DS_Store",
@@ -484,9 +520,10 @@ pub fn add_custom_instructions(
 
     // Add language preference if provided
     if let Some(lang) = language {
+        let language_name = get_language_name(lang);
         sections.push(format!(
             "Language Preference:\nYou should always speak and think in the \"{}\" ({}) language unless the user gives you instructions below to do otherwise.",
-            lang, lang
+            language_name, lang
         ));
     }
 

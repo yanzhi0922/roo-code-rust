@@ -3,7 +3,7 @@
 //! Source: `src/core/prompts/responses.ts`
 
 use serde_json::json;
-use similar::{ChangeTag, TextDiff};
+use similar::TextDiff;
 
 use crate::types::FileEntry;
 
@@ -284,26 +284,24 @@ pub fn format_files_list(entries: &[FileEntry], did_hit_limit: bool) -> String {
 ///
 /// Source: `src/core/prompts/responses.ts` — `formatResponse.createPrettyPatch`
 pub fn create_pretty_patch(filename: &str, old_str: Option<&str>, new_str: Option<&str>) -> String {
-    let _filename_posix = filename.replace('\\', "/");
+    let filename_posix = filename.replace('\\', "/");
     let old = old_str.unwrap_or("");
     let new = new_str.unwrap_or("");
 
     let diff = TextDiff::from_lines(old, new);
 
-    let mut output = String::new();
+    // Use similar's unified_diff with context_radius(3) to match TS behavior
+    // (TS uses diff.createPatch with context: 3)
+    let output = format!(
+        "{}",
+        diff.unified_diff()
+            .context_radius(3)
+            .header(&filename_posix, &filename_posix)
+    );
 
-    for change in diff.iter_all_changes() {
-        let sign = match change.tag() {
-            ChangeTag::Delete => "-",
-            ChangeTag::Insert => "+",
-            ChangeTag::Equal => " ",
-        };
-        output.push_str(format!("{}{}", sign, change).as_str());
-    }
-
-    // Skip the header lines (similar to lines.slice(4) in TS)
-    // The unified diff header from similar starts with --- and +++ lines
-    // We strip them to match the TypeScript behavior
+    // TS strips 4 header lines from diff.createPatch output (Index, ===, ---, +++).
+    // similar's unified_diff only has 2 header lines (---, +++).
+    // Strip them to match the TypeScript behavior of keeping only hunks and content.
     let lines: Vec<&str> = output.lines().collect();
     if lines.len() > 2 {
         lines[2..].join("\n")
