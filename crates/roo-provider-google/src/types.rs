@@ -115,3 +115,73 @@ pub struct GeminiWebChunk {
 pub struct GeminiSearchEntryPoint {
     pub rendered_content: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Vertex AI configuration
+// ---------------------------------------------------------------------------
+
+/// Configuration for the Vertex AI provider.
+///
+/// Vertex AI uses the same Gemini API format as Google Gemini,
+/// but with a different endpoint and authentication mechanism.
+#[derive(Debug, Clone)]
+pub struct VertexConfig {
+    /// Google Cloud project ID.
+    pub project_id: String,
+    /// Vertex AI region (default: "us-east5").
+    pub region: String,
+    /// Google Cloud OAuth2 access token for authentication.
+    ///
+    /// In a production environment, this should be obtained through
+    /// proper OAuth2 authentication using service account credentials
+    /// or the Application Default Credentials mechanism.
+    pub access_token: String,
+    /// Model ID to use.
+    pub model_id: Option<String>,
+    /// Temperature for generation.
+    pub temperature: Option<f64>,
+    /// Request timeout in milliseconds.
+    pub request_timeout: Option<u64>,
+}
+
+impl VertexConfig {
+    /// Default Vertex AI region.
+    pub const DEFAULT_REGION: &'static str = "us-east5";
+
+    /// Create configuration from provider settings.
+    ///
+    /// Requires `vertex_project_id` and either `vertex_json_credentials`
+    /// (treated as an access token for now) or `vertex_key_file`.
+    pub fn from_settings(settings: &ProviderSettings) -> Option<Self> {
+        let project_id = settings.vertex_project_id.clone()?;
+
+        let region = settings
+            .vertex_region
+            .clone()
+            .unwrap_or_else(|| Self::DEFAULT_REGION.to_string());
+
+        // Use JSON credentials or key file as the access token.
+        // TODO: Implement proper OAuth2 token acquisition from service account credentials.
+        let access_token = settings
+            .vertex_json_credentials
+            .clone()
+            .or(settings.vertex_key_file.clone())?;
+
+        Some(Self {
+            project_id,
+            region,
+            access_token,
+            model_id: settings.api_model_id.clone(),
+            temperature: settings.model_temperature.flatten(),
+            request_timeout: settings.request_timeout,
+        })
+    }
+
+    /// Build the Vertex AI base URL from region.
+    pub fn base_url(&self) -> String {
+        format!(
+            "https://{}-aiplatform.googleapis.com/v1",
+            self.region
+        )
+    }
+}

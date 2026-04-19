@@ -1,9 +1,12 @@
-﻿//! Anthropic provider handler.
+//! Anthropic provider handler.
 //!
 //! Implements the Provider trait for the Anthropic Messages API.
 //! Handles SSE streaming with Anthropic-specific event types:
 //! - message_start, content_block_start, content_block_delta, message_delta
 //! Supports extended thinking, prompt caching, and tool use.
+//!
+//! Also includes [`AnthropicVertexHandler`] for running Claude models
+//! through Vertex AI's Anthropic publisher endpoint.
 
 use std::pin::Pin;
 
@@ -15,6 +18,7 @@ use serde_json::{json, Value};
 use roo_provider::error::{ProviderError, Result};
 use roo_provider::handler::{ApiStream, CreateMessageMetadata, Provider};
 use roo_provider::transform::anthropic_filter::filter_non_anthropic_blocks;
+use roo_provider::transform::caching::apply_vertex_caching;
 use roo_types::api::{
     ApiMessage, ApiStreamChunk, ContentBlock, ProviderName,
 };
@@ -23,7 +27,12 @@ use roo_types::model::ModelInfo;
 use crate::models;
 use crate::types::{
     AnthropicConfig, AnthropicDelta, AnthropicSseEvent, AnthropicUsage,
+    AnthropicVertexConfig, anthropic_vertex_models, anthropic_vertex_default_model_id,
 };
+
+// =========================================================================
+// AnthropicHandler
+// =========================================================================
 
 /// Anthropic API provider handler.
 pub struct AnthropicHandler {
@@ -146,7 +155,11 @@ impl AnthropicHandler {
     }
 
     /// Parse the SSE stream from the Anthropic API.
-    fn parse_sse_stream(
+    ///
+    /// This is the core SSE parsing logic shared between [`AnthropicHandler`]
+    /// and [`AnthropicVertexHandler`]. Both handlers use the same Anthropic
+    /// Messages API response format.
+    pub(crate) fn parse_sse_stream_impl(
         stream: Pin<Box<dyn Stream<Item = Result<AnthropicSseEvent>> + Send>>,
         model_info: ModelInfo,
     ) -> ApiStream {
@@ -507,7 +520,7 @@ impl Provider for AnthropicHandler {
         let stream: Pin<Box<dyn Stream<Item = Result<AnthropicSseEvent>> + Send>> =
             Box::pin(sse_stream);
 
-        Ok(Self::parse_sse_stream(stream, model_info))
+        Ok(Self::parse_sse_stream_impl(stream, model_info))
     }
 
     fn get_model(&self) -> (String, ModelInfo) {
@@ -601,10 +614,375 @@ impl Provider for AnthropicHandler {
     }
 }
 
+// =========================================================================
+// AnthropicVertexHandler
+// =========================================================================
+
+/// Anthropic Vertex AI provider handler.
+///
+/// Uses the Anthropic Messages API format through Vertex AI's
+/// `streamRawPredict` endpoint with OAuth2 bearer token authentication.
+///
+/// Key differences from [`AnthropicHandler`]:
+/// - Authentication via `Authorization: Bearer {access_token}` instead of `x-api-key`
+/// - Endpoint: `{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict`
+/// - Uses Vertex-style caching (`apply_vertex_caching`) instead of Anthropic caching
+/// - Supports 1M context beta header (`context-1m-2025-08-07`)
+pub struct AnthropicVertexHandler {
+    http_client: reqwest::Client,
+    config: AnthropicVertexConfig,
+    model_id: String,
+    model_info: ModelInfo,
+    temperature: f64,
+    use_extended_thinking: bool,
+    max_thinking_tokens: Option<u64>,
+    betas: Vec<String>,
+}
+
+impl AnthropicVertexHandler {
+    /// Create a new Anthropic Vertex handler from configuration.
+    pub fn new(config: AnthropicVertexConfig) -> Result<Self> {
+        let model_id = config
+            .model_id
+            .clone()
+            .unwrap_or_else(|| anthropic_vertex_default_model_id());
+
+        let mut model_info = anthropic_vertex_models()
+            .get(&model_id)
+            .cloned()
+            .unwrap_or_else(|| ModelInfo {
+                max_tokens: Some(8192),
+                context_window: 200_000,
+                supports_images: Some(true),
+                supports_prompt_cache: true,
+                input_price: Some(3.0),
+                output_price: Some(15.0),
+                cache_writes_price: Some(3.75),
+                cache_reads_price: Some(0.3),
+                description: Some("Anthropic Vertex model (unknown variant)".to_string()),
+                ..Default::default()
+            });
+
+        // Build betas array for request headers
+        let mut betas = Vec::new();
+
+        // If 1M context beta is enabled AND the model supports it, update model info
+        let supports_1m = crate::types::VERTEX_1M_CONTEXT_MODEL_IDS
+            .contains(&model_id.as_str());
+        if config.enable_1m_context && supports_1m {
+            if let Some(tier) = model_info.tiers.as_ref().and_then(|t| t.first()) {
+                model_info.context_window = tier.context_window;
+                if let Some(p) = tier.input_price {
+                    model_info.input_price = Some(p);
+                }
+                if let Some(p) = tier.output_price {
+                    model_info.output_price = Some(p);
+                }
+                if let Some(p) = tier.cache_writes_price {
+                    model_info.cache_writes_price = Some(p);
+                }
+                if let Some(p) = tier.cache_reads_price {
+                    model_info.cache_reads_price = Some(p);
+                }
+            }
+            betas.push("context-1m-2025-08-07".to_string());
+        }
+
+        let use_extended_thinking = config
+            .use_extended_thinking
+            .unwrap_or(false)
+            && model_info.supports_reasoning_budget.unwrap_or(false);
+
+        let temperature = config.temperature.unwrap_or(0.0);
+
+        let mut client_builder = reqwest::Client::builder();
+        if let Some(timeout) = config.request_timeout {
+            client_builder =
+                client_builder.timeout(std::time::Duration::from_millis(timeout));
+        }
+        let http_client = client_builder.build().map_err(ProviderError::Reqwest)?;
+
+        Ok(Self {
+            http_client,
+            config,
+            model_id,
+            model_info,
+            temperature,
+            use_extended_thinking,
+            max_thinking_tokens: None,
+            betas,
+        })
+    }
+
+    /// Create a new Anthropic Vertex handler from provider settings.
+    pub fn from_settings(
+        settings: &roo_types::provider_settings::ProviderSettings,
+    ) -> Result<Self> {
+        let config = AnthropicVertexConfig::from_settings(settings)
+            .ok_or(ProviderError::ApiKeyRequired)?;
+        Self::new(config)
+    }
+
+    /// Build the request body for the Anthropic Messages API via Vertex.
+    fn build_request_body(
+        &self,
+        system_prompt: &str,
+        messages: &[ApiMessage],
+        tools: Option<&Vec<Value>>,
+    ) -> Value {
+        let max_tokens = self.model_info.max_tokens.unwrap_or(8192);
+
+        // Filter messages to only include Anthropic-compatible blocks
+        let filtered_messages = filter_non_anthropic_blocks(messages.to_vec());
+
+        // Convert messages to Anthropic format
+        let mut anthropic_messages = convert_to_anthropic_messages(&filtered_messages);
+
+        // Apply Vertex caching strategy (last 2 user messages)
+        if self.model_info.supports_prompt_cache {
+            apply_vertex_caching(&mut anthropic_messages);
+        }
+
+        let mut body = json!({
+            "model": self.model_id,
+            "max_tokens": max_tokens,
+            "temperature": self.temperature,
+            "messages": anthropic_messages,
+            "stream": true,
+        });
+
+        // System prompt with cache_control for Vertex
+        if self.model_info.supports_prompt_cache {
+            body["system"] = json!([{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": { "type": "ephemeral" }
+            }]);
+        } else {
+            body["system"] = json!(system_prompt);
+        }
+
+        // Add extended thinking configuration
+        if self.use_extended_thinking {
+            let budget_tokens = self
+                .max_thinking_tokens
+                .unwrap_or(10000)
+                .min(max_tokens.saturating_sub(1));
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget_tokens,
+            });
+            // Extended thinking requires temperature to be unset
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("temperature");
+            }
+        }
+
+        // Add tools if provided
+        if let Some(tools) = tools {
+            if !tools.is_empty() {
+                let anthropic_tools: Vec<Value> = tools
+                    .iter()
+                    .map(|tool| convert_tool_for_anthropic(tool))
+                    .collect();
+                body["tools"] = json!(anthropic_tools);
+            }
+        }
+
+        body
+    }
+}
+
+#[async_trait]
+impl Provider for AnthropicVertexHandler {
+    async fn create_message(
+        &self,
+        system_prompt: &str,
+        messages: Vec<ApiMessage>,
+        tools: Option<Vec<Value>>,
+        _metadata: CreateMessageMetadata,
+    ) -> Result<ApiStream> {
+        let body = self.build_request_body(system_prompt, &messages, tools.as_ref());
+        let url = self.config.stream_url(&self.model_id);
+
+        let mut request = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.access_token))
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream");
+
+        // Add beta headers if any
+        if !self.betas.is_empty() {
+            request = request.header("anthropic-beta", self.betas.join(","));
+        }
+
+        let response = request
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::api_error("anthropic-vertex", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(ProviderError::api_error_response(
+                "anthropic-vertex", status, text,
+            ));
+        }
+
+        let model_info = self.model_info.clone();
+
+        // Parse SSE stream — reuse AnthropicHandler's parser
+        let sse_stream = response
+            .bytes_stream()
+            .eventsource()
+            .map(move |event| {
+                match event {
+                    Ok(event) => {
+                        match serde_json::from_str::<AnthropicSseEvent>(&event.data) {
+                            Ok(sse_event) => Ok(sse_event),
+                            Err(e) => Err(ProviderError::ParseError(format!(
+                                "Failed to parse Anthropic Vertex SSE event: {e}"
+                            ))),
+                        }
+                    }
+                    Err(e) => Err(ProviderError::StreamError(format!(
+                        "SSE error: {e}"
+                    ))),
+                }
+            });
+
+        let stream: Pin<Box<dyn Stream<Item = Result<AnthropicSseEvent>> + Send>> =
+            Box::pin(sse_stream);
+
+        Ok(AnthropicHandler::parse_sse_stream_impl(stream, model_info))
+    }
+
+    fn get_model(&self) -> (String, ModelInfo) {
+        // Strip :thinking suffix for the returned model ID
+        let clean_id = if self.model_id.ends_with(":thinking") {
+            self.model_id[..self.model_id.len() - ":thinking".len()].to_string()
+        } else {
+            self.model_id.clone()
+        };
+        (clean_id, self.model_info.clone())
+    }
+
+    async fn count_tokens(
+        &self,
+        content: &[ContentBlock],
+    ) -> Result<u64> {
+        // Simple estimation: ~4 characters per token (rough approximation)
+        let mut total_chars: usize = 0;
+        for block in content {
+            match block {
+                ContentBlock::Text { text } => total_chars += text.len(),
+                ContentBlock::ToolUse { input, name, .. } => {
+                    total_chars += name.len();
+                    total_chars += input.to_string().len();
+                }
+                ContentBlock::ToolResult { content: inner, .. } => {
+                    for c in inner {
+                        match c {
+                            roo_types::api::ToolResultContent::Text { text } => {
+                                total_chars += text.len();
+                            }
+                            roo_types::api::ToolResultContent::Image { .. } => {
+                                total_chars += 256;
+                            }
+                        }
+                    }
+                }
+                ContentBlock::Thinking { thinking, .. } => total_chars += thinking.len(),
+                ContentBlock::Image { .. } => total_chars += 256,
+                ContentBlock::RedactedThinking { data } => total_chars += data.len(),
+            }
+        }
+        Ok(((total_chars as f64) / 4.0).ceil() as u64)
+    }
+
+    async fn complete_prompt(&self, prompt: &str) -> Result<String> {
+        let url = self.config.predict_url(&self.model_id);
+        let max_tokens = self.model_info.max_tokens.unwrap_or(8192);
+
+        let body = json!({
+            "model": self.model_id,
+            "max_tokens": max_tokens,
+            "messages": [{
+                "role": "user",
+                "content": if self.model_info.supports_prompt_cache {
+                    json!([{ "type": "text", "text": prompt, "cache_control": { "type": "ephemeral" } }])
+                } else {
+                    json!(prompt)
+                }
+            }],
+            "stream": false,
+        });
+
+        let mut request = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.access_token))
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json");
+
+        if !self.betas.is_empty() {
+            request = request.header("anthropic-beta", self.betas.join(","));
+        }
+
+        let response = request
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::api_error("anthropic-vertex", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(ProviderError::api_error_response(
+                "anthropic-vertex", status, text,
+            ));
+        }
+
+        let resp: Value = response.json().await.map_err(ProviderError::Reqwest)?;
+
+        // Extract text from content blocks
+        if let Some(content) = resp.get("content").and_then(|c| c.as_array()) {
+            let text: String = content
+                .iter()
+                .filter_map(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        block.get("text").and_then(|t| t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            return Ok(text);
+        }
+
+        Ok(String::new())
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Vertex
+    }
+}
+
+// =========================================================================
+// Tests
+// =========================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models;
+
+    // -----------------------------------------------------------------------
+    // AnthropicHandler tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_default_model_exists() {
@@ -896,5 +1274,393 @@ mod tests {
         assert_eq!(model_id, "minimax-m2.7");
         // The handler uses unknown model, so it gets fallback ModelInfo
         assert!(handler.model_info.max_tokens.unwrap_or(0) > 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // AnthropicVertexHandler tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_vertex_config_default_region() {
+        assert_eq!(AnthropicVertexConfig::DEFAULT_REGION, "us-east5");
+    }
+
+    #[test]
+    fn test_vertex_config_default_project_id() {
+        assert_eq!(AnthropicVertexConfig::DEFAULT_PROJECT_ID, "not-provided");
+    }
+
+    #[test]
+    fn test_vertex_config_base_url() {
+        let config = AnthropicVertexConfig {
+            project_id: "my-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let expected = "https://us-east5-aiplatform.googleapis.com/v1/projects/my-project/locations/us-east5/publishers/anthropic/models";
+        assert_eq!(config.base_url(), expected);
+    }
+
+    #[test]
+    fn test_vertex_config_stream_url() {
+        let config = AnthropicVertexConfig {
+            project_id: "my-project".to_string(),
+            region: "europe-west1".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let url = config.stream_url("claude-sonnet-4@20250514");
+        assert!(url.contains("streamRawPredict"));
+        assert!(url.contains("claude-sonnet-4@20250514"));
+        assert!(url.contains("europe-west1"));
+    }
+
+    #[test]
+    fn test_vertex_config_stream_url_strips_thinking() {
+        let config = AnthropicVertexConfig {
+            project_id: "my-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let url = config.stream_url("claude-3-7-sonnet@20250219:thinking");
+        assert!(url.contains("claude-3-7-sonnet@20250219"));
+        assert!(!url.contains(":thinking"));
+        assert!(url.contains("streamRawPredict"));
+    }
+
+    #[test]
+    fn test_vertex_config_predict_url() {
+        let config = AnthropicVertexConfig {
+            project_id: "my-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let url = config.predict_url("claude-sonnet-4@20250514");
+        assert!(url.contains("rawPredict"));
+        assert!(url.contains("claude-sonnet-4@20250514"));
+    }
+
+    #[test]
+    fn test_vertex_handler_creation() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config);
+        assert!(handler.is_ok());
+    }
+
+    #[test]
+    fn test_vertex_handler_default_model() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+        let (model_id, _) = handler.get_model();
+        assert_eq!(model_id, crate::types::ANTHROPIC_VERTEX_DEFAULT_MODEL_ID);
+    }
+
+    #[test]
+    fn test_vertex_handler_custom_model() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: Some("claude-opus-4@20250514".to_string()),
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+        let (model_id, _) = handler.get_model();
+        assert_eq!(model_id, "claude-opus-4@20250514");
+    }
+
+    #[test]
+    fn test_vertex_handler_provider_name() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+        assert_eq!(handler.provider_name(), ProviderName::Vertex);
+    }
+
+    #[test]
+    fn test_vertex_handler_1m_context_beta() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: Some("claude-sonnet-4@20250514".to_string()),
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: true,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+        assert!(handler.betas.contains(&"context-1m-2025-08-07".to_string()));
+        // Model info should be updated with tier pricing
+        assert_eq!(handler.model_info.context_window, 1_000_000);
+    }
+
+    #[test]
+    fn test_vertex_handler_1m_context_unsupported_model() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: Some("claude-3-opus@20240229".to_string()),
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: true,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+        // claude-3-opus is not in VERTEX_1M_CONTEXT_MODEL_IDS, so no beta
+        assert!(handler.betas.is_empty());
+        // Context window should remain at default 200_000
+        assert_eq!(handler.model_info.context_window, 200_000);
+    }
+
+    #[test]
+    fn test_vertex_config_from_settings() {
+        let mut settings = roo_types::provider_settings::ProviderSettings::default();
+        settings.vertex_project_id = Some("my-project".to_string());
+        settings.vertex_json_credentials = Some("my-creds".to_string());
+        settings.vertex_region = Some("europe-west1".to_string());
+        settings.api_model_id = Some("claude-sonnet-4@20250514".to_string());
+
+        let config = AnthropicVertexConfig::from_settings(&settings).unwrap();
+        assert_eq!(config.project_id, "my-project");
+        assert_eq!(config.access_token, "my-creds");
+        assert_eq!(config.region, "europe-west1");
+        assert_eq!(config.model_id, Some("claude-sonnet-4@20250514".to_string()));
+    }
+
+    #[test]
+    fn test_vertex_config_from_settings_no_credentials() {
+        let settings = roo_types::provider_settings::ProviderSettings::default();
+        // No credentials → should return None
+        assert!(AnthropicVertexConfig::from_settings(&settings).is_none());
+    }
+
+    #[test]
+    fn test_vertex_config_from_settings_defaults() {
+        let mut settings = roo_types::provider_settings::ProviderSettings::default();
+        settings.vertex_json_credentials = Some("token".to_string());
+        // No project_id → should use default
+        // No region → should use default
+
+        let config = AnthropicVertexConfig::from_settings(&settings).unwrap();
+        assert_eq!(config.project_id, "not-provided");
+        assert_eq!(config.region, "us-east5");
+    }
+
+    #[test]
+    fn test_vertex_models_count() {
+        let vertex_models = anthropic_vertex_models();
+        assert!(
+            vertex_models.len() >= 10,
+            "Should have at least 10 Anthropic Vertex models, got {}",
+            vertex_models.len()
+        );
+    }
+
+    #[test]
+    fn test_vertex_models_all_have_required_fields() {
+        for (id, info) in anthropic_vertex_models() {
+            assert!(
+                info.max_tokens.is_some(),
+                "Vertex model '{}' missing max_tokens",
+                id
+            );
+            assert!(
+                info.input_price.is_some(),
+                "Vertex model '{}' missing input_price",
+                id
+            );
+            assert!(
+                info.output_price.is_some(),
+                "Vertex model '{}' missing output_price",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_vertex_handler_thinking_suffix_stripped() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: Some("claude-3-7-sonnet@20250219:thinking".to_string()),
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+        let (model_id, _) = handler.get_model();
+        // :thinking should be stripped in get_model()
+        assert_eq!(model_id, "claude-3-7-sonnet@20250219");
+    }
+
+    #[test]
+    fn test_vertex_handler_build_request_body() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: Some("claude-sonnet-4@20250514".to_string()),
+            temperature: Some(0.5),
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+
+        let messages = vec![ApiMessage {
+            role: roo_types::api::MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "Hello".to_string(),
+            }],
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        }];
+
+        let body = handler.build_request_body("You are helpful", &messages, None);
+
+        // Verify basic structure
+        assert_eq!(body["model"], "claude-sonnet-4@20250514");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["temperature"], 0.5);
+
+        // System should be array with cache_control
+        let system = body["system"].as_array().expect("system should be array");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+
+        // Messages should be present
+        let msgs = body["messages"].as_array().expect("messages should be array");
+        assert_eq!(msgs.len(), 1);
+    }
+
+    #[test]
+    fn test_vertex_handler_build_request_body_with_tools() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: Some("claude-sonnet-4@20250514".to_string()),
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+
+        let messages = vec![];
+        let tools = Some(vec![json!({
+            "type": "function",
+            "function": {
+                "name": "test_tool",
+                "description": "A test tool",
+                "parameters": { "type": "object" }
+            }
+        })]);
+
+        let body = handler.build_request_body("system", &messages, tools.as_ref());
+
+        let tools_arr = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools_arr.len(), 1);
+        assert_eq!(tools_arr[0]["name"], "test_tool");
+        assert!(tools_arr[0].get("input_schema").is_some());
+    }
+
+    #[test]
+    fn test_vertex_handler_from_settings_no_credentials() {
+        let settings = roo_types::provider_settings::ProviderSettings::default();
+        let result = AnthropicVertexHandler::from_settings(&settings);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_vertex_handler_count_tokens() {
+        let config = AnthropicVertexConfig {
+            project_id: "test-project".to_string(),
+            region: "us-east5".to_string(),
+            access_token: "test-token".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            enable_1m_context: false,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+        };
+        let handler = AnthropicVertexHandler::new(config).unwrap();
+
+        let content = vec![ContentBlock::Text {
+            text: "Hello, world!".to_string(),
+        }];
+        let tokens = handler.count_tokens(&content).await.unwrap();
+        assert_eq!(tokens, 4);
     }
 }
