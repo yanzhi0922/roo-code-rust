@@ -1,9 +1,12 @@
 //! Roo CLI — command-line interface for Roo Code Rust.
 //!
 //! Supports sending messages to AI providers and streaming responses.
-//! Currently supports the `anthropic` provider (Anthropic Messages API).
+//! Implements a full tool-call execution loop: user input → API call →
+//! tool execution → feedback → loop until text-only response.
 
 use std::io::{self, Write as IoWrite};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -11,7 +14,13 @@ use futures::StreamExt;
 
 use roo_provider::handler::{CreateMessageMetadata, Provider};
 use roo_provider_anthropic::{AnthropicConfig, AnthropicHandler};
-use roo_types::api::{ApiMessage, ContentBlock, MessageRole};
+use roo_task::tool_dispatcher::{
+    ToolContext, ToolDispatcher, ToolExecutionResult,
+    default_dispatcher_with_terminal,
+};
+use roo_terminal::TerminalRegistry;
+use roo_tools::definition::{NativeToolsOptions, get_native_tools};
+use roo_types::api::{ApiMessage, ApiStreamChunk, ContentBlock, MessageRole, ToolResultContent};
 
 // ---------------------------------------------------------------------------
 // CLI argument definitions
@@ -85,6 +94,18 @@ struct ConfigFile {
 }
 
 // ---------------------------------------------------------------------------
+// Collected tool call (accumulated from stream chunks)
+// ---------------------------------------------------------------------------
+
+/// A tool call accumulated from streaming chunks.
+#[derive(Debug, Clone)]
+struct CollectedToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -129,10 +150,33 @@ async fn main() -> Result<()> {
         )
     });
 
+    // Build tool definitions (JSON values for the API).
+    let tool_defs = get_native_tools(NativeToolsOptions::default());
+    let tools_json: Vec<serde_json::Value> = tool_defs
+        .iter()
+        .map(|td| serde_json::to_value(td).unwrap_or_default())
+        .collect();
+
+    // Build the terminal registry and tool dispatcher.
+    let registry = Arc::new(TerminalRegistry::new());
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let output_dir = std::env::temp_dir().join("roo-cli-output");
+    std::fs::create_dir_all(&output_dir).ok();
+
+    let dispatcher = default_dispatcher_with_terminal(registry, output_dir, "code");
+
     if cli.interactive {
-        run_interactive(&*handler, &system_prompt).await
+        run_interactive(&*handler, &system_prompt, &tools_json, &dispatcher, &working_dir).await
     } else if let Some(msg) = &cli.message {
-        run_single(&*handler, &system_prompt, msg).await
+        run_single(
+            &*handler,
+            &system_prompt,
+            &tools_json,
+            &dispatcher,
+            &working_dir,
+            msg,
+        )
+        .await
     } else {
         anyhow::bail!(
             "Provide --message <text> for single-shot mode or --interactive for REPL mode."
@@ -238,12 +282,19 @@ fn build_handler(
 }
 
 // ---------------------------------------------------------------------------
-// Single-shot mode
+// Single-shot mode (with tool execution loop)
 // ---------------------------------------------------------------------------
 
-/// Send one message and stream the response to stdout.
-async fn run_single(handler: &dyn Provider, system_prompt: &str, message: &str) -> Result<()> {
-    let messages = vec![ApiMessage {
+/// Send one message and run the full tool-call loop.
+async fn run_single(
+    handler: &dyn Provider,
+    system_prompt: &str,
+    tools_json: &[serde_json::Value],
+    dispatcher: &ToolDispatcher,
+    working_dir: &PathBuf,
+    message: &str,
+) -> Result<()> {
+    let mut messages = vec![ApiMessage {
         role: MessageRole::User,
         content: vec![ContentBlock::Text {
             text: message.to_string(),
@@ -258,22 +309,84 @@ async fn run_single(handler: &dyn Provider, system_prompt: &str, message: &str) 
         condense_id: None,
     }];
 
-    let metadata = CreateMessageMetadata::default();
+    loop {
+        let metadata = CreateMessageMetadata::default();
 
-    let stream = handler
-        .create_message(system_prompt, messages, None, metadata)
-        .await
-        .context("Failed to create message")?;
+        let stream = handler
+            .create_message(system_prompt, messages.clone(), Some(tools_json.to_vec()), metadata)
+            .await
+            .context("Failed to create message")?;
 
-    print_stream(stream).await
+        let (assistant_text, tool_calls) = collect_stream(stream).await?;
+
+        // Build assistant message content blocks.
+        let mut assistant_content: Vec<ContentBlock> = Vec::new();
+        if !assistant_text.is_empty() {
+            assistant_content.push(ContentBlock::Text {
+                text: assistant_text.clone(),
+            });
+        }
+        for tc in &tool_calls {
+            let input: serde_json::Value =
+                serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+            assistant_content.push(ContentBlock::ToolUse {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                input,
+            });
+        }
+
+        messages.push(ApiMessage {
+            role: MessageRole::Assistant,
+            content: assistant_content,
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        });
+
+        // If no tool calls, we're done.
+        if tool_calls.is_empty() {
+            println!();
+            return Ok(());
+        }
+
+        // Execute tool calls and collect results.
+        let tool_results = execute_tool_calls(tool_calls, dispatcher, working_dir).await;
+
+        messages.push(ApiMessage {
+            role: MessageRole::User,
+            content: tool_results,
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        });
+
+        // Continue loop — let the model process tool results.
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Interactive REPL mode
+// Interactive REPL mode (with tool execution loop)
 // ---------------------------------------------------------------------------
 
-/// Simple interactive read-eval-print loop.
-async fn run_interactive(handler: &dyn Provider, system_prompt: &str) -> Result<()> {
+/// Interactive read-eval-print loop with full tool-call support.
+async fn run_interactive(
+    handler: &dyn Provider,
+    system_prompt: &str,
+    tools_json: &[serde_json::Value],
+    dispatcher: &ToolDispatcher,
+    working_dir: &PathBuf,
+) -> Result<()> {
     println!("Roo CLI — interactive mode (type :quit or Ctrl-C to exit)\n");
 
     let mut conversation: Vec<ApiMessage> = Vec::new();
@@ -288,6 +401,11 @@ async fn run_interactive(handler: &dyn Provider, system_prompt: &str) -> Result<
         if trimmed == ":quit" || trimmed == ":q" {
             println!("Bye!");
             return Ok(());
+        }
+        if trimmed == ":clear" {
+            conversation.clear();
+            println!("[Conversation cleared]\n");
+            continue;
         }
 
         // Append user message.
@@ -304,23 +422,45 @@ async fn run_interactive(handler: &dyn Provider, system_prompt: &str) -> Result<
             condense_id: None,
         });
 
-        let metadata = CreateMessageMetadata::default();
+        // Tool-call loop: keep calling the API until we get a text-only response.
+        loop {
+            let metadata = CreateMessageMetadata::default();
 
-        let stream = handler
-            .create_message(system_prompt, conversation.clone(), None, metadata)
-            .await
-            .context("Failed to create message")?;
+            let stream = handler
+                .create_message(
+                    system_prompt,
+                    conversation.clone(),
+                    Some(tools_json.to_vec()),
+                    metadata,
+                )
+                .await
+                .context("Failed to create message")?;
 
-        print!("ai> ");
-        io::stdout().flush().ok();
+            print!("ai> ");
+            io::stdout().flush().ok();
 
-        let assistant_text = print_stream_collect(stream).await?;
+            let (assistant_text, tool_calls) = collect_stream(stream).await?;
 
-        // Append assistant response to conversation history.
-        if !assistant_text.is_empty() {
+            // Build assistant message content blocks.
+            let mut assistant_content: Vec<ContentBlock> = Vec::new();
+            if !assistant_text.is_empty() {
+                assistant_content.push(ContentBlock::Text {
+                    text: assistant_text.clone(),
+                });
+            }
+            for tc in &tool_calls {
+                let input: serde_json::Value =
+                    serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+                assistant_content.push(ContentBlock::ToolUse {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    input,
+                });
+            }
+
             conversation.push(ApiMessage {
                 role: MessageRole::Assistant,
-                content: vec![ContentBlock::Text { text: assistant_text }],
+                content: assistant_content,
                 reasoning: None,
                 ts: None,
                 truncation_parent: None,
@@ -330,62 +470,89 @@ async fn run_interactive(handler: &dyn Provider, system_prompt: &str) -> Result<
                 is_summary: None,
                 condense_id: None,
             });
-        }
-        println!();
-    }
-}
 
-// ---------------------------------------------------------------------------
-// Stream printing helpers
-// ---------------------------------------------------------------------------
-
-/// Print all chunks from an API stream to stdout (fire-and-forget).
-async fn print_stream(
-    mut stream: roo_provider::handler::ApiStream,
-) -> Result<()> {
-    while let Some(chunk_result) = stream.next().await {
-        match chunk_result {
-            Ok(chunk) => print_chunk(&chunk)?,
-            Err(e) => eprintln!("\n[stream error] {e}"),
-        }
-    }
-    println!(); // trailing newline
-    Ok(())
-}
-
-/// Print all chunks and collect the assistant text for conversation history.
-async fn print_stream_collect(
-    mut stream: roo_provider::handler::ApiStream,
-) -> Result<String> {
-    let mut collected = String::new();
-    while let Some(chunk_result) = stream.next().await {
-        match chunk_result {
-            Ok(chunk) => {
-                if let Some(text) = print_chunk_collected(&chunk) {
-                    collected.push_str(&text);
-                }
+            // If no tool calls, we're done — wait for next user input.
+            if tool_calls.is_empty() {
+                println!();
+                break;
             }
-            Err(e) => eprintln!("\n[stream error] {e}"),
+
+            // Execute tool calls and collect results.
+            let tool_results = execute_tool_calls(tool_calls, dispatcher, working_dir).await;
+
+            conversation.push(ApiMessage {
+                role: MessageRole::User,
+                content: tool_results,
+                reasoning: None,
+                ts: None,
+                truncation_parent: None,
+                is_truncation_marker: None,
+                truncation_id: None,
+                condense_parent: None,
+                is_summary: None,
+                condense_id: None,
+            });
+
+            // Continue loop — let the model process tool results.
         }
     }
-    Ok(collected)
 }
 
-/// Print a single stream chunk. Returns `true` if text was printed.
-fn print_chunk(chunk: &roo_types::api::ApiStreamChunk) -> Result<()> {
+// ---------------------------------------------------------------------------
+// Stream collection — accumulate text + tool calls from API stream
+// ---------------------------------------------------------------------------
+
+/// Collect all chunks from an API stream, printing text in real-time,
+/// and return the accumulated text and tool calls.
+async fn collect_stream(
+    mut stream: roo_provider::handler::ApiStream,
+) -> Result<(String, Vec<CollectedToolCall>)> {
+    let mut collected_text = String::new();
+    let mut tool_calls: Vec<CollectedToolCall> = Vec::new();
+    // Map from tool call id → index in tool_calls vec (for delta accumulation).
+    let mut tool_call_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => process_chunk(
+                &chunk,
+                &mut collected_text,
+                &mut tool_calls,
+                &mut tool_call_index,
+            ),
+            Err(e) => {
+                eprintln!("\n[stream error] {e}");
+            }
+        }
+    }
+
+    Ok((collected_text, tool_calls))
+}
+
+/// Process a single stream chunk, printing text and accumulating tool calls.
+fn process_chunk(
+    chunk: &ApiStreamChunk,
+    collected_text: &mut String,
+    tool_calls: &mut Vec<CollectedToolCall>,
+    tool_call_index: &mut std::collections::HashMap<String, usize>,
+) {
     match chunk {
-        roo_types::api::ApiStreamChunk::Text { text } => {
+        ApiStreamChunk::Text { text } => {
             print!("{text}");
             io::stdout().flush().ok();
+            collected_text.push_str(text);
         }
-        roo_types::api::ApiStreamChunk::Reasoning { text, .. } => {
+        ApiStreamChunk::Reasoning { text, .. } => {
             print!("\x1b[90m{text}\x1b[0m");
             io::stdout().flush().ok();
         }
-        roo_types::api::ApiStreamChunk::ThinkingComplete { signature } => {
-            print!("\x1b[90m[thinking complete: sig={}]\x1b[0m", &signature[..signature.len().min(16)]);
+        ApiStreamChunk::ThinkingComplete { signature } => {
+            print!(
+                "\x1b[90m[thinking complete: sig={}]\x1b[0m",
+                &signature[..signature.len().min(16)]
+            );
         }
-        roo_types::api::ApiStreamChunk::Usage {
+        ApiStreamChunk::Usage {
             input_tokens,
             output_tokens,
             cache_write_tokens,
@@ -398,70 +565,140 @@ fn print_chunk(chunk: &roo_types::api::ApiStreamChunk) -> Result<()> {
                 cache_write_tokens, cache_read_tokens, reasoning_tokens, total_cost,
             );
         }
-        roo_types::api::ApiStreamChunk::ToolCallStart { id, name } => {
-            print!("\n[tool call: {name} (id={id})]");
+        ApiStreamChunk::ToolCallStart { id, name } => {
+            print!("\n\x1b[36m[tool: {name}]\x1b[0m ");
             io::stdout().flush().ok();
+            let idx = tool_calls.len();
+            tool_calls.push(CollectedToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: String::new(),
+            });
+            tool_call_index.insert(id.clone(), idx);
         }
-        roo_types::api::ApiStreamChunk::ToolCallDelta { delta, .. } => {
-            print!("{delta}");
+        ApiStreamChunk::ToolCallDelta { id, delta } => {
+            if let Some(&idx) = tool_call_index.get(id) {
+                tool_calls[idx].arguments.push_str(delta);
+            }
+        }
+        ApiStreamChunk::ToolCallEnd { .. } => {
+            // Tool call complete — nothing extra to print.
+        }
+        ApiStreamChunk::ToolCall {
+            id,
+            name,
+            arguments,
+        } => {
+            // Complete tool call in one shot.
+            print!("\n\x1b[36m[tool: {name}]\x1b[0m ");
             io::stdout().flush().ok();
+            let idx = tool_calls.len();
+            tool_calls.push(CollectedToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            });
+            tool_call_index.insert(id.clone(), idx);
         }
-        roo_types::api::ApiStreamChunk::ToolCall { id, name, arguments } => {
-            print!("\n[tool call: {name} (id={id}) args={arguments}]");
-            io::stdout().flush().ok();
+        ApiStreamChunk::ToolCallPartial {
+            index,
+            id,
+            name,
+            arguments,
+        } => {
+            // Partial tool call from OpenAI-compatible providers.
+            let idx = *index as usize;
+            if idx >= tool_calls.len() {
+                tool_calls.resize(idx + 1, CollectedToolCall {
+                    id: String::new(),
+                    name: String::new(),
+                    arguments: String::new(),
+                });
+            }
+            if let Some(partial_id) = id {
+                tool_call_index.insert(partial_id.clone(), idx);
+                tool_calls[idx].id = partial_id.clone();
+            }
+            if let Some(partial_name) = name {
+                if tool_calls[idx].name.is_empty() {
+                    print!("\n\x1b[36m[tool: {partial_name}]\x1b[0m ");
+                    io::stdout().flush().ok();
+                }
+                tool_calls[idx].name = partial_name.clone();
+            }
+            if let Some(partial_args) = arguments {
+                tool_calls[idx].arguments.push_str(partial_args);
+            }
         }
-        roo_types::api::ApiStreamChunk::ToolCallEnd { id } => {
-            print!("[tool end: {id}]");
-            io::stdout().flush().ok();
-        }
-        roo_types::api::ApiStreamChunk::ToolCallPartial { index, id, name, arguments } => {
-            print!(
-                "\x1b[36m[tool partial #{index} id={:?} name={:?} args={:?}]\x1b[0m",
-                id, name, arguments,
-            );
-            io::stdout().flush().ok();
-        }
-        roo_types::api::ApiStreamChunk::Grounding { sources } => {
+        ApiStreamChunk::Grounding { sources } => {
             eprintln!("\n[grounding: {} sources]", sources.len());
         }
-        roo_types::api::ApiStreamChunk::Error { error, message } => {
+        ApiStreamChunk::Error { error, message } => {
             eprintln!("\n\x1b[31m[error] {error}: {message}\x1b[0m");
         }
     }
-    Ok(())
 }
 
-/// Like `print_chunk` but also returns the text content for conversation history.
-fn print_chunk_collected(chunk: &roo_types::api::ApiStreamChunk) -> Option<String> {
-    match chunk {
-        roo_types::api::ApiStreamChunk::Text { text } => {
-            print!("{text}");
-            io::stdout().flush().ok();
-            Some(text.clone())
-        }
-        roo_types::api::ApiStreamChunk::Reasoning { text, .. } => {
-            print!("\x1b[90m{text}\x1b[0m");
-            io::stdout().flush().ok();
-            None
-        }
-        roo_types::api::ApiStreamChunk::Usage {
-            input_tokens,
-            output_tokens,
-            ..
-        } => {
-            eprintln!("\n[usage] in={input_tokens} out={output_tokens}");
-            None
-        }
-        roo_types::api::ApiStreamChunk::Error { error, message } => {
-            eprintln!("\n\x1b[31m[error] {error}: {message}\x1b[0m");
-            None
-        }
-        _ => {
-            // Delegate other variants to print_chunk for display.
-            print_chunk(chunk).ok();
-            None
-        }
+// ---------------------------------------------------------------------------
+// Tool execution
+// ---------------------------------------------------------------------------
+
+/// Execute a list of tool calls and return content blocks for the results.
+async fn execute_tool_calls(
+    tool_calls: Vec<CollectedToolCall>,
+    dispatcher: &ToolDispatcher,
+    working_dir: &PathBuf,
+) -> Vec<ContentBlock> {
+    let mut results: Vec<ContentBlock> = Vec::new();
+
+    for tc in &tool_calls {
+        // Parse the arguments as JSON Value.
+        let params: serde_json::Value =
+            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+
+        // Display tool invocation.
+        let args_preview = serde_json::to_string_pretty(&params)
+            .unwrap_or_else(|_| tc.arguments.clone());
+        println!(
+            "\n\x1b[33m[executing] {}({})\x1b[0m",
+            tc.name,
+            truncate_str(&args_preview, 200)
+        );
+
+        let context = ToolContext::new(working_dir, "cli-session");
+
+        let result = dispatcher.dispatch(&tc.name, params, &context).await;
+
+        let (output_text, is_error) = match result {
+            ToolExecutionResult {
+                text,
+                is_error: err,
+                ..
+            } => {
+                let preview = truncate_str(&text, 300);
+                if err {
+                    eprintln!("\x1b[31m[result] Error: {}\x1b[0m", preview);
+                } else {
+                    println!("\x1b[32m[result] {}\x1b[0m", preview);
+                }
+                (text, err)
+            }
+        };
+
+        results.push(ContentBlock::ToolResult {
+            tool_use_id: tc.id.clone(),
+            content: vec![ToolResultContent::Text {
+                text: if is_error {
+                    format!("Error: {}", output_text)
+                } else {
+                    output_text
+                },
+            }],
+            is_error: if is_error { Some(true) } else { None },
+        });
     }
+
+    results
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +714,17 @@ fn read_line(prompt: &str) -> Result<String> {
         .read_line(&mut buf)
         .context("Failed to read from stdin")?;
     Ok(buf)
+}
+
+/// Truncate a string to `max_len` characters, appending "..." if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let mut truncated = s[..max_len].to_string();
+        truncated.push_str("...");
+        truncated
+    }
 }
 
 /// Best-effort OS info string.

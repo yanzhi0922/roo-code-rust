@@ -4,11 +4,12 @@
 //! to [`ToolHandler`] implementations. The dispatcher supports both
 //! synchronous and asynchronous tool execution.
 //!
-//! Source: `src/core/task/Task.ts` 鈥?tool execution logic scattered across
+//! Source: `src/core/task/Task.ts` — tool execution logic scattered across
 //! `executeTool`, `presentAssistantMessage`, and various tool handlers.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -725,7 +726,445 @@ impl ToolHandler for CodebaseSearchHandler {
 }
 
 // ---------------------------------------------------------------------------
-// Default dispatcher builder
+// Command execution handlers
+// ---------------------------------------------------------------------------
+
+/// Handler for the `execute_command` tool.
+///
+/// Executes shell commands via the [`TerminalRegistry`] with optional
+/// timeout and output persistence.
+pub struct ExecuteCommandHandler {
+    registry: Arc<roo_terminal::TerminalRegistry>,
+    output_dir: PathBuf,
+    max_preview_lines: usize,
+}
+
+impl ExecuteCommandHandler {
+    /// Create a new execute_command handler.
+    pub fn new(
+        registry: Arc<roo_terminal::TerminalRegistry>,
+        output_dir: PathBuf,
+    ) -> Self {
+        Self {
+            registry,
+            output_dir,
+            max_preview_lines: 50,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for ExecuteCommandHandler {
+    async fn execute(&self, params: Value, context: &ToolContext) -> ToolExecutionResult {
+        let command = match params.get("command").and_then(|v| v.as_str()) {
+            Some(c) => c.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: command"),
+        };
+
+        let cwd = params
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(|s| PathBuf::from(s));
+
+        let timeout_ms = params
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .or_else(|| params.get("timeout_ms").and_then(|v| v.as_u64()));
+
+        let cwd_ref = cwd.as_deref();
+        let registry = self.registry.clone();
+        let output_dir = self.output_dir.clone();
+        let max_preview = self.max_preview_lines;
+        let working_dir = context.cwd.clone();
+
+        match roo_tools_command::execute_command::execute_command(
+            &command,
+            cwd_ref,
+            timeout_ms,
+            registry,
+            &working_dir,
+            Some(&output_dir),
+            max_preview,
+        )
+        .await
+        {
+            Ok(result) => ToolExecutionResult::success(result.output),
+            Err(e) => ToolExecutionResult::error(format!("Error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "execute_command"
+    }
+}
+
+/// Handler for the `read_command_output` tool.
+///
+/// Reads persisted command output artifacts from disk with optional
+/// search filtering and pagination.
+pub struct ReadCommandOutputHandler {
+    storage_dir: PathBuf,
+}
+
+impl ReadCommandOutputHandler {
+    /// Create a new read_command_output handler.
+    pub fn new(storage_dir: PathBuf) -> Self {
+        Self { storage_dir }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for ReadCommandOutputHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let artifact_id = match params.get("artifact_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: artifact_id"),
+        };
+
+        let read_params = roo_types::tool::ReadCommandOutputParams {
+            artifact_id,
+            offset: params.get("offset").and_then(|v| v.as_u64()),
+            limit: params.get("limit").and_then(|v| v.as_u64()),
+            search: params.get("search").and_then(|v| v.as_str()).map(String::from),
+        };
+
+        match roo_tools_command::read_command_output::read_command_output_from_disk(
+            &read_params,
+            &self.storage_dir,
+        )
+        .await
+        {
+            Ok(result) => ToolExecutionResult::success(result.content),
+            Err(e) => ToolExecutionResult::error(format!("read_command_output error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "read_command_output"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Miscellaneous tool handlers
+// ---------------------------------------------------------------------------
+
+/// Handler for the `ask_followup_question` tool.
+pub struct AskFollowupQuestionHandler;
+
+#[async_trait]
+impl ToolHandler for AskFollowupQuestionHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let question = match params.get("question").and_then(|v| v.as_str()) {
+            Some(q) => q.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: question"),
+        };
+
+        let follow_up: Vec<roo_types::tool::FollowUpOption> = match params.get("follow_up") {
+            Some(opts) => match serde_json::from_value::<Vec<roo_types::tool::FollowUpOption>>(
+                opts.clone(),
+            ) {
+                Ok(o) => o,
+                Err(e) => return ToolExecutionResult::error(format!("Invalid follow_up: {}", e)),
+            },
+            None => return ToolExecutionResult::error("Missing required parameter: follow_up"),
+        };
+
+        let ask_params = roo_types::tool::AskFollowupQuestionParams {
+            question,
+            follow_up,
+        };
+
+        match roo_tools_misc::process_followup(&ask_params) {
+            Ok(result) => {
+                let output = format!(
+                    "Question: {}\nSuggestions:\n{}",
+                    result.question,
+                    result
+                        .suggestions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| format!("  {}. {}", i + 1, s))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                ToolExecutionResult::success(output)
+            }
+            Err(e) => ToolExecutionResult::error(format!("ask_followup_question error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "ask_followup_question"
+    }
+}
+
+/// Handler for the `attempt_completion` tool.
+pub struct AttemptCompletionHandler;
+
+#[async_trait]
+impl ToolHandler for AttemptCompletionHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let result_text = match params.get("result").and_then(|v| v.as_str()) {
+            Some(r) => r.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: result"),
+        };
+
+        let command = params
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let completion_params = roo_types::tool::AttemptCompletionParams {
+            result: result_text,
+            command,
+        };
+
+        match roo_tools_misc::process_attempt_completion(&completion_params) {
+            Ok(_result) => ToolExecutionResult::success(completion_params.result.clone()),
+            Err(e) => ToolExecutionResult::error(format!("attempt_completion error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "attempt_completion"
+    }
+}
+
+/// Handler for the `update_todo_list` tool.
+pub struct UpdateTodoListHandler;
+
+#[async_trait]
+impl ToolHandler for UpdateTodoListHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let todos = match params.get("todos").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: todos"),
+        };
+
+        let todo_params = roo_types::tool::UpdateTodoListParams { todos };
+
+        match roo_tools_misc::process_update_todo(&todo_params) {
+            Ok(items) => {
+                let output = items
+                    .iter()
+                    .map(|item| format!("{} {}", item.status.to_checkbox(), item.text))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ToolExecutionResult::success(output)
+            }
+            Err(e) => ToolExecutionResult::error(format!("update_todo_list error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "update_todo_list"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mode tool handlers
+// ---------------------------------------------------------------------------
+
+/// Handler for the `switch_mode` tool.
+pub struct SwitchModeHandler {
+    /// Current mode slug, used to detect same-mode switches.
+    current_mode: String,
+}
+
+impl SwitchModeHandler {
+    /// Create a new switch_mode handler with the given current mode.
+    pub fn new(current_mode: impl Into<String>) -> Self {
+        Self {
+            current_mode: current_mode.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for SwitchModeHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let mode_slug = match params.get("mode_slug").and_then(|v| v.as_str()) {
+            Some(m) => m.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: mode_slug"),
+        };
+
+        let reason = params
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let switch_params = roo_types::tool::SwitchModeParams { mode_slug, reason };
+
+        match roo_tools_mode::process_switch_mode(&switch_params, &self.current_mode) {
+            Ok(result) => {
+                let msg = if let Some(reason) = &result.reason {
+                    format!("Switching to '{}' mode: {}", result.mode_slug, reason)
+                } else {
+                    format!("Switching to '{}' mode", result.mode_slug)
+                };
+                ToolExecutionResult::success(msg)
+            }
+            Err(e) => ToolExecutionResult::error(format!("switch_mode error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "switch_mode"
+    }
+}
+
+/// Handler for the `new_task` tool.
+pub struct NewTaskHandler;
+
+#[async_trait]
+impl ToolHandler for NewTaskHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let mode = match params.get("mode").and_then(|v| v.as_str()) {
+            Some(m) => m.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: mode"),
+        };
+
+        let message = match params.get("message").and_then(|v| v.as_str()) {
+            Some(m) => m.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: message"),
+        };
+
+        let todos = params
+            .get("todos")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let task_params = roo_types::tool::NewTaskParams {
+            mode,
+            message,
+            todos,
+        };
+
+        match roo_tools_mode::process_new_task(&task_params) {
+            Ok(result) => {
+                let mut output = format!("New task in '{}' mode:\n{}", result.mode, result.message);
+                if let Some(todos) = &result.todos {
+                    output.push_str(&format!("\n\nTodos:\n{}", todos));
+                }
+                ToolExecutionResult::success(output)
+            }
+            Err(e) => ToolExecutionResult::error(format!("new_task error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "new_task"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MCP tool handlers
+// ---------------------------------------------------------------------------
+
+/// Handler for the `use_mcp_tool` tool.
+///
+/// Calls an MCP tool on a connected server via [`roo_mcp::McpHub`].
+pub struct UseMcpToolHandler {
+    hub: Arc<roo_mcp::McpHub>,
+}
+
+impl UseMcpToolHandler {
+    /// Create a new use_mcp_tool handler.
+    pub fn new(hub: Arc<roo_mcp::McpHub>) -> Self {
+        Self { hub }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for UseMcpToolHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let server_name = match params.get("server_name").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: server_name"),
+        };
+        let tool_name = match params.get("tool_name").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: tool_name"),
+        };
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+
+        let mcp_params = roo_types::tool::UseMcpToolParams {
+            server_name,
+            tool_name,
+            arguments,
+        };
+
+        let result = roo_tools_mcp::execute_mcp_tool(&self.hub, &mcp_params).await;
+
+        let mut exec_result = if result.is_error {
+            ToolExecutionResult::error(&result.text)
+        } else {
+            ToolExecutionResult::success(&result.text)
+        };
+
+        // Attach images if present
+        if !result.images.is_empty() {
+            exec_result.images = Some(result.images);
+        }
+
+        exec_result
+    }
+
+    fn tool_name(&self) -> &str {
+        "use_mcp_tool"
+    }
+}
+
+/// Handler for the `access_mcp_resource` tool.
+///
+/// Reads a resource from a connected MCP server via [`roo_mcp::McpHub`].
+pub struct AccessMcpResourceHandler {
+    hub: Arc<roo_mcp::McpHub>,
+}
+
+impl AccessMcpResourceHandler {
+    /// Create a new access_mcp_resource handler.
+    pub fn new(hub: Arc<roo_mcp::McpHub>) -> Self {
+        Self { hub }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for AccessMcpResourceHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let server_name = match params.get("server_name").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: server_name"),
+        };
+        let uri = match params.get("uri").and_then(|v| v.as_str()) {
+            Some(u) => u.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: uri"),
+        };
+
+        let mcp_params = roo_types::tool::AccessMcpResourceParams {
+            server_name,
+            uri,
+        };
+
+        let result = roo_tools_mcp::access_mcp_resource(&self.hub, &mcp_params).await;
+
+        if result.is_error {
+            ToolExecutionResult::error(&result.text)
+        } else {
+            ToolExecutionResult::success(&result.text)
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "access_mcp_resource"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default dispatcher builders
 // ---------------------------------------------------------------------------
 
 /// Build a [`ToolDispatcher`] pre-loaded with all built-in tool handlers.
@@ -750,6 +1189,95 @@ pub fn default_dispatcher() -> ToolDispatcher {
     dispatcher.register("list_files", Box::new(ListFilesHandler));
     dispatcher.register("search_files", Box::new(SearchFilesHandler));
     dispatcher.register("codebase_search", Box::new(CodebaseSearchHandler));
+
+    dispatcher
+}
+
+/// Build a [`ToolDispatcher`] pre-loaded with **all** built-in tool handlers,
+/// including those that require runtime infrastructure.
+///
+/// In addition to the tools registered by [`default_dispatcher`], this also
+/// registers:
+/// - `execute_command`, `read_command_output` (command execution)
+/// - `ask_followup_question`, `attempt_completion`, `update_todo_list` (misc)
+/// - `switch_mode`, `new_task` (mode switching)
+///
+/// # Arguments
+/// * `registry` — Shared [`TerminalRegistry`] for command execution.
+/// * `output_dir` — Directory where command output artifacts are persisted.
+/// * `current_mode` — The current mode slug (used by `switch_mode` validation).
+pub fn default_dispatcher_with_terminal(
+    registry: Arc<roo_terminal::TerminalRegistry>,
+    output_dir: PathBuf,
+    current_mode: &str,
+) -> ToolDispatcher {
+    // Start with the base set of tools
+    let mut dispatcher = default_dispatcher();
+
+    // Command execution tools
+    dispatcher.register(
+        "execute_command",
+        Box::new(ExecuteCommandHandler::new(registry.clone(), output_dir.clone())),
+    );
+    dispatcher.register(
+        "read_command_output",
+        Box::new(ReadCommandOutputHandler::new(output_dir)),
+    );
+
+    // Miscellaneous tools
+    dispatcher.register(
+        "ask_followup_question",
+        Box::new(AskFollowupQuestionHandler),
+    );
+    dispatcher.register(
+        "attempt_completion",
+        Box::new(AttemptCompletionHandler),
+    );
+    dispatcher.register(
+        "update_todo_list",
+        Box::new(UpdateTodoListHandler),
+    );
+
+    // Mode tools
+    dispatcher.register(
+        "switch_mode",
+        Box::new(SwitchModeHandler::new(current_mode)),
+    );
+    dispatcher.register("new_task", Box::new(NewTaskHandler));
+
+    dispatcher
+}
+
+/// Build a [`ToolDispatcher`] pre-loaded with **all** built-in tool handlers,
+/// including MCP tools that require an [`roo_mcp::McpHub`] reference.
+///
+/// In addition to the tools registered by [`default_dispatcher_with_terminal`],
+/// this also registers:
+/// - `use_mcp_tool` (MCP tool calls)
+/// - `access_mcp_resource` (MCP resource access)
+///
+/// # Arguments
+/// * `registry` — Shared [`TerminalRegistry`] for command execution.
+/// * `output_dir` — Directory where command output artifacts are persisted.
+/// * `current_mode` — The current mode slug (used by `switch_mode` validation).
+/// * `mcp_hub` — Shared [`roo_mcp::McpHub`] for MCP tool and resource operations.
+pub fn default_dispatcher_full(
+    registry: Arc<roo_terminal::TerminalRegistry>,
+    output_dir: PathBuf,
+    current_mode: &str,
+    mcp_hub: Arc<roo_mcp::McpHub>,
+) -> ToolDispatcher {
+    let mut dispatcher = default_dispatcher_with_terminal(registry, output_dir, current_mode);
+
+    // MCP tools
+    dispatcher.register(
+        "use_mcp_tool",
+        Box::new(UseMcpToolHandler::new(mcp_hub.clone())),
+    );
+    dispatcher.register(
+        "access_mcp_resource",
+        Box::new(AccessMcpResourceHandler::new(mcp_hub)),
+    );
 
     dispatcher
 }
@@ -930,5 +1458,364 @@ mod tests {
         let result = handler.execute(serde_json::json!({}), &ctx).await;
         assert!(result.is_error);
         assert!(result.text.contains("query"));
+    }
+
+    // ---- Command handler tests ----
+
+    #[tokio::test]
+    async fn test_execute_command_handler_missing_command() {
+        let registry = Arc::new(roo_terminal::TerminalRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let handler = ExecuteCommandHandler::new(registry, dir.path().to_path_buf());
+        let ctx = make_context();
+        let result = handler.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_error);
+        assert!(result.text.contains("command"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_handler_simple() {
+        let registry = Arc::new(roo_terminal::TerminalRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let handler = ExecuteCommandHandler::new(registry, dir.path().to_path_buf());
+        let ctx = ToolContext::new(dir.path().to_path_buf(), "test-task");
+        let result = handler
+            .execute(
+                serde_json::json!({"command": "echo hello", "timeout": 5000}),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(
+            result.text.contains("hello"),
+            "expected 'hello' in: {}",
+            result.text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_command_output_handler_missing_artifact_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = ReadCommandOutputHandler::new(dir.path().to_path_buf());
+        let ctx = make_context();
+        let result = handler.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_error);
+        assert!(result.text.contains("artifact_id"));
+    }
+
+    #[tokio::test]
+    async fn test_read_command_output_handler_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let handler = ReadCommandOutputHandler::new(dir.path().to_path_buf());
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"artifact_id": "cmd-nonexistent.txt"}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error);
+    }
+
+    // ---- Misc handler tests ----
+
+    #[tokio::test]
+    async fn test_ask_followup_question_handler_missing_question() {
+        let handler = AskFollowupQuestionHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"follow_up": [{"text": "yes"}]}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("question"));
+    }
+
+    #[tokio::test]
+    async fn test_ask_followup_question_handler_valid() {
+        let handler = AskFollowupQuestionHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({
+                    "question": "Continue?",
+                    "follow_up": [{"text": "Yes"}, {"text": "No"}]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(result.text.contains("Continue?"));
+    }
+
+    #[tokio::test]
+    async fn test_attempt_completion_handler_missing_result() {
+        let handler = AttemptCompletionHandler;
+        let ctx = make_context();
+        let result = handler.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_error);
+        assert!(result.text.contains("result"));
+    }
+
+    #[tokio::test]
+    async fn test_attempt_completion_handler_valid() {
+        let handler = AttemptCompletionHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"result": "Task completed!"}), &ctx)
+            .await;
+        assert!(!result.is_error);
+        assert!(result.text.contains("Task completed!"));
+    }
+
+    #[tokio::test]
+    async fn test_update_todo_list_handler_missing_todos() {
+        let handler = UpdateTodoListHandler;
+        let ctx = make_context();
+        let result = handler.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_error);
+        assert!(result.text.contains("todos"));
+    }
+
+    #[tokio::test]
+    async fn test_update_todo_list_handler_valid() {
+        let handler = UpdateTodoListHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"todos": "[x] done\n[ ] pending"}),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(result.text.contains("done"));
+        assert!(result.text.contains("pending"));
+    }
+
+    // ---- Mode handler tests ----
+
+    #[tokio::test]
+    async fn test_switch_mode_handler_missing_mode() {
+        let handler = SwitchModeHandler::new("code");
+        let ctx = make_context();
+        let result = handler.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_error);
+        assert!(result.text.contains("mode_slug"));
+    }
+
+    #[tokio::test]
+    async fn test_switch_mode_handler_valid() {
+        let handler = SwitchModeHandler::new("code");
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"mode_slug": "architect", "reason": "need to plan"}),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(result.text.contains("architect"));
+    }
+
+    #[tokio::test]
+    async fn test_new_task_handler_missing_mode() {
+        let handler = NewTaskHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"message": "do something"}), &ctx)
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("mode"));
+    }
+
+    #[tokio::test]
+    async fn test_new_task_handler_valid() {
+        let handler = NewTaskHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({
+                    "mode": "code",
+                    "message": "implement feature",
+                    "todos": "[ ] task1\n[x] task2"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(result.text.contains("implement feature"));
+    }
+
+    // ---- MCP handler tests ----
+
+    #[tokio::test]
+    async fn test_use_mcp_tool_handler_missing_server_name() {
+        let hub = Arc::new(roo_mcp::McpHub::new());
+        let handler = UseMcpToolHandler::new(hub);
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"tool_name": "tool", "arguments": {}}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("server_name"));
+    }
+
+    #[tokio::test]
+    async fn test_use_mcp_tool_handler_missing_tool_name() {
+        let hub = Arc::new(roo_mcp::McpHub::new());
+        let handler = UseMcpToolHandler::new(hub);
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"server_name": "server", "arguments": {}}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("tool_name"));
+    }
+
+    #[tokio::test]
+    async fn test_use_mcp_tool_handler_server_not_found() {
+        let hub = Arc::new(roo_mcp::McpHub::new());
+        let handler = UseMcpToolHandler::new(hub);
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({
+                    "server_name": "nonexistent",
+                    "tool_name": "tool",
+                    "arguments": {}
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_access_mcp_resource_handler_missing_server_name() {
+        let hub = Arc::new(roo_mcp::McpHub::new());
+        let handler = AccessMcpResourceHandler::new(hub);
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"uri": "file:///test"}), &ctx)
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("server_name"));
+    }
+
+    #[tokio::test]
+    async fn test_access_mcp_resource_handler_missing_uri() {
+        let hub = Arc::new(roo_mcp::McpHub::new());
+        let handler = AccessMcpResourceHandler::new(hub);
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"server_name": "server"}), &ctx)
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("uri"));
+    }
+
+    #[tokio::test]
+    async fn test_access_mcp_resource_handler_server_not_found() {
+        let hub = Arc::new(roo_mcp::McpHub::new());
+        let handler = AccessMcpResourceHandler::new(hub);
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({
+                    "server_name": "nonexistent",
+                    "uri": "file:///test"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("not found"));
+    }
+
+    // ---- Dispatcher builder tests ----
+
+    #[test]
+    fn test_default_dispatcher_with_terminal_has_all_tools() {
+        let registry = Arc::new(roo_terminal::TerminalRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let dispatcher = default_dispatcher_with_terminal(
+            registry,
+            dir.path().to_path_buf(),
+            "code",
+        );
+
+        // Core tools
+        assert!(dispatcher.has_handler("read_file"));
+        assert!(dispatcher.has_handler("write_to_file"));
+        assert!(dispatcher.has_handler("apply_diff"));
+        assert!(dispatcher.has_handler("edit_file"));
+        assert!(dispatcher.has_handler("list_files"));
+        assert!(dispatcher.has_handler("search_files"));
+        assert!(dispatcher.has_handler("codebase_search"));
+
+        // Command tools
+        assert!(dispatcher.has_handler("execute_command"));
+        assert!(dispatcher.has_handler("read_command_output"));
+
+        // Misc tools
+        assert!(dispatcher.has_handler("ask_followup_question"));
+        assert!(dispatcher.has_handler("attempt_completion"));
+        assert!(dispatcher.has_handler("update_todo_list"));
+
+        // Mode tools
+        assert!(dispatcher.has_handler("switch_mode"));
+        assert!(dispatcher.has_handler("new_task"));
+
+        // MCP tools should NOT be registered
+        assert!(!dispatcher.has_handler("use_mcp_tool"));
+        assert!(!dispatcher.has_handler("access_mcp_resource"));
+    }
+
+    #[test]
+    fn test_default_dispatcher_full_has_all_tools_including_mcp() {
+        let registry = Arc::new(roo_terminal::TerminalRegistry::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mcp_hub = Arc::new(roo_mcp::McpHub::new());
+        let dispatcher = default_dispatcher_full(
+            registry,
+            dir.path().to_path_buf(),
+            "code",
+            mcp_hub,
+        );
+
+        // All core tools
+        assert!(dispatcher.has_handler("read_file"));
+        assert!(dispatcher.has_handler("write_to_file"));
+        assert!(dispatcher.has_handler("apply_diff"));
+        assert!(dispatcher.has_handler("edit_file"));
+        assert!(dispatcher.has_handler("list_files"));
+        assert!(dispatcher.has_handler("search_files"));
+        assert!(dispatcher.has_handler("codebase_search"));
+
+        // Command tools
+        assert!(dispatcher.has_handler("execute_command"));
+        assert!(dispatcher.has_handler("read_command_output"));
+
+        // Misc tools
+        assert!(dispatcher.has_handler("ask_followup_question"));
+        assert!(dispatcher.has_handler("attempt_completion"));
+        assert!(dispatcher.has_handler("update_todo_list"));
+
+        // Mode tools
+        assert!(dispatcher.has_handler("switch_mode"));
+        assert!(dispatcher.has_handler("new_task"));
+
+        // MCP tools
+        assert!(dispatcher.has_handler("use_mcp_tool"));
+        assert!(dispatcher.has_handler("access_mcp_resource"));
     }
 }

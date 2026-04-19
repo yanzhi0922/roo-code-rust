@@ -2,6 +2,12 @@
 //!
 //! MCP (Model Context Protocol) tool implementations: `use_mcp_tool`
 //! and `access_mcp_resource`.
+//!
+//! ## Architecture
+//!
+//! - **Validation functions** — synchronous parameter validation
+//! - **Execution functions** — async tool execution via [`roo_mcp::McpHub`]
+//! - **Response formatting** — convert MCP responses to tool results
 
 pub mod types;
 pub mod helpers;

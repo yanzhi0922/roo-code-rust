@@ -1,8 +1,15 @@
 //! read_command_output tool implementation.
+//!
+//! Provides validation, in-memory processing, and disk-based artifact retrieval.
 
 use crate::helpers::*;
 use crate::types::*;
 use roo_types::tool::ReadCommandOutputParams;
+use std::path::Path;
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
 
 /// Validate read_command_output parameters.
 pub fn validate_read_command_output_params(
@@ -36,6 +43,10 @@ pub fn validate_read_command_output_params(
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// In-memory processing
+// ---------------------------------------------------------------------------
 
 /// Process a read_command_output request.
 ///
@@ -75,6 +86,79 @@ pub fn process_read_output(
         matched_lines,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Disk-based artifact retrieval
+// ---------------------------------------------------------------------------
+
+/// Read a command output artifact from disk.
+///
+/// Looks for the file at `<storage_dir>/command-output/<artifact_id>`.
+/// Returns `Ok(Some(content))` if found, `Ok(None)` if not found.
+pub async fn read_artifact_from_disk(
+    storage_dir: &Path,
+    artifact_id: &str,
+) -> std::io::Result<Option<String>> {
+    // Validate artifact_id to prevent path traversal
+    if validate_artifact_id(artifact_id).is_err() {
+        return Ok(None);
+    }
+
+    let file_path = storage_dir.join("command-output").join(artifact_id);
+    if file_path.exists() {
+        let content = tokio::fs::read_to_string(&file_path).await?;
+        Ok(Some(content))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Read, filter, and paginate an artifact from disk.
+///
+/// Combines [`read_artifact_from_disk`] with search/pagination logic.
+pub async fn read_command_output_from_disk(
+    params: &ReadCommandOutputParams,
+    storage_dir: &Path,
+) -> Result<ReadOutputResult, CommandToolError> {
+    validate_read_command_output_params(params)?;
+
+    let content = read_artifact_from_disk(storage_dir, &params.artifact_id)
+        .await
+        .map_err(|e| CommandToolError::Execution(format!("Failed to read artifact: {}", e)))?
+        .ok_or_else(|| CommandToolError::ArtifactNotFound(params.artifact_id.clone()))?;
+
+    let total_bytes = content.len();
+
+    // Apply search filter if provided
+    let (filtered, matched_lines) = if let Some(ref search) = params.search {
+        if !search.is_empty() {
+            let (filtered, count) = filter_output_by_search(&content, search, true)?;
+            (filtered, Some(count))
+        } else {
+            (content.clone(), None)
+        }
+    } else {
+        (content.clone(), None)
+    };
+
+    // Apply pagination
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(DEFAULT_PAGE_SIZE as u64);
+
+    let (paginated, has_more) = paginate_output(&filtered, offset, limit);
+
+    Ok(ReadOutputResult {
+        artifact_id: params.artifact_id.clone(),
+        content: paginated,
+        total_bytes,
+        has_more,
+        matched_lines,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -201,5 +285,79 @@ mod tests {
         let result = process_read_output(&params, &persisted).unwrap();
         assert!(result.content.contains("stdout"));
         assert!(result.content.contains("stderr"));
+    }
+
+    #[tokio::test]
+    async fn test_read_artifact_from_disk_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_artifact_from_disk(dir.path(), "nonexistent.txt")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_artifact_from_disk_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd_dir = dir.path().join("command-output");
+        tokio::fs::create_dir_all(&cmd_dir).await.unwrap();
+        tokio::fs::write(cmd_dir.join("cmd-test.txt"), "hello world")
+            .await
+            .unwrap();
+
+        let result = read_artifact_from_disk(dir.path(), "cmd-test.txt")
+            .await
+            .unwrap();
+        assert_eq!(result.as_deref(), Some("hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_read_artifact_from_disk_traversal_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_artifact_from_disk(dir.path(), "../etc/passwd")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_command_output_from_disk_with_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd_dir = dir.path().join("command-output");
+        tokio::fs::create_dir_all(&cmd_dir).await.unwrap();
+        tokio::fs::write(
+            cmd_dir.join("cmd-test.txt"),
+            "error: foo\nwarning: bar\nerror: baz\n",
+        )
+        .await
+        .unwrap();
+
+        let params = ReadCommandOutputParams {
+            artifact_id: "cmd-test.txt".to_string(),
+            offset: None,
+            limit: None,
+            search: Some("error".to_string()),
+        };
+
+        let result = read_command_output_from_disk(&params, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(result.matched_lines, Some(2));
+        assert!(result.content.contains("error: foo"));
+        assert!(!result.content.contains("warning"));
+    }
+
+    #[tokio::test]
+    async fn test_read_command_output_from_disk_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let params = ReadCommandOutputParams {
+            artifact_id: "cmd-missing.txt".to_string(),
+            offset: None,
+            limit: None,
+            search: None,
+        };
+
+        let result = read_command_output_from_disk(&params, dir.path()).await;
+        assert!(result.is_err());
     }
 }

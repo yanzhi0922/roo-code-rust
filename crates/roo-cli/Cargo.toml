@@ -14,8 +14,12 @@ path = "src/main.rs"
 roo-types = { path = "../roo-types" }
 roo-provider = { path = "../roo-provider" }
 roo-provider-anthropic = { path = "../roo-provider-anthropic" }
+roo-provider-openai = { path = "../roo-provider-openai" }
+roo-task = { path = "../roo-task" }
+roo-terminal = { path = "../roo-terminal" }
 roo-prompt = { path = "../roo-prompt" }
 roo-modes = { path = "../roo-modes" }
+roo-tools = { path = "../roo-tools" }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -24,3 +28,4 @@ clap = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
