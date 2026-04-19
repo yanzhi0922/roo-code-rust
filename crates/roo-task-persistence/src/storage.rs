@@ -134,6 +134,13 @@ pub fn messages_path(base_storage_path: &Path, task_id: &str) -> PathBuf {
     task_dir(base_storage_path, task_id).join("messages.json")
 }
 
+/// Get the API conversation history file path for a given task ID.
+///
+/// Source: `src/core/task-persistence/apiMessages.ts` — `GlobalFileNames.apiConversationHistory`
+pub fn api_messages_path(base_storage_path: &Path, task_id: &str) -> PathBuf {
+    task_dir(base_storage_path, task_id).join("api_conversation_history.json")
+}
+
 /// Get the metadata file path for a given task ID.
 pub fn metadata_path(base_storage_path: &Path, task_id: &str) -> PathBuf {
     task_dir(base_storage_path, task_id).join("meta.json")
@@ -170,6 +177,13 @@ mod tests {
         let base = Path::new("/data/storage");
         let path = messages_path(base, "abc-123");
         assert_eq!(path, PathBuf::from("/data/storage/tasks/abc-123/messages.json"));
+    }
+
+    #[test]
+    fn test_api_messages_path() {
+        let base = Path::new("/data/storage");
+        let path = api_messages_path(base, "abc-123");
+        assert_eq!(path, PathBuf::from("/data/storage/tasks/abc-123/api_conversation_history.json"));
     }
 
     #[test]

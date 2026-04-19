@@ -41,6 +41,7 @@ pub enum TaskPersistenceError {
 
 pub mod types;
 pub mod messages;
+pub mod api_messages;
 pub mod metadata;
 pub mod storage;
 pub mod history;
@@ -56,8 +57,10 @@ pub use types::{
 
 pub use messages::{read_task_messages, save_task_messages};
 
+pub use api_messages::{read_api_messages, save_api_messages};
+
 pub use metadata::{compute_history_item, compute_task_metadata};
 
-pub use storage::{OsFileSystem, TaskFileSystem, ensure_task_dir, messages_path, metadata_path, task_dir};
+pub use storage::{OsFileSystem, TaskFileSystem, api_messages_path, ensure_task_dir, messages_path, metadata_path, task_dir};
 
 pub use history::{delete_task, get_history_item, list_history, search_history};

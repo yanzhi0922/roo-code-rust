@@ -68,14 +68,17 @@ pub fn count_diff_blocks(diff: &str) -> usize {
 /// The diff format is:
 /// ```text
 /// <<<<<<< SEARCH
-/// :start_line:
+/// :start_line:N
+/// -------
 /// search content
 /// =======
 /// replace content
 /// >>>>>>> REPLACE
 /// ```
 ///
-/// The `:start_line:` line is optional and is skipped if present.
+/// The `:start_line:N` line is optional and is skipped if present.
+/// The `-------` separator line after `:start_line:` is also optional.
+/// Legacy format `:N:` is also supported.
 pub fn parse_diff_blocks(diff: &str) -> Result<Vec<(String, String)>, FsToolError> {
     let mut blocks = Vec::new();
     let mut remaining = diff;
@@ -89,12 +92,22 @@ pub fn parse_diff_blocks(diff: &str) -> Result<Vec<(String, String)>, FsToolErro
 
         let mut after_header = &remaining[header_end..];
 
-        // Skip optional :start_line: header (e.g., ":9:" or ":start_line:42:")
+        // Skip optional :start_line: header
+        // The format is: `:start_line:N` or `:N:` (legacy)
         if let Some(line_end) = after_header.find('\n') {
             let first_line = after_header[..line_end].trim();
-            if first_line.starts_with(':') && first_line.ends_with(':') {
-                // This is a start_line header, skip it
+            // Match `:start_line:N` or `:N:` patterns
+            if first_line.starts_with(':') {
+                // Skip this line
                 after_header = &after_header[line_end + 1..];
+
+                // Skip the `-------` separator line that follows :start_line:
+                if let Some(next_line_end) = after_header.find('\n') {
+                    let second_line = after_header[..next_line_end].trim();
+                    if second_line.starts_with('-') && second_line.chars().all(|c| c == '-') {
+                        after_header = &after_header[next_line_end + 1..];
+                    }
+                }
             }
         }
 
@@ -103,16 +116,18 @@ pub fn parse_diff_blocks(diff: &str) -> Result<Vec<(String, String)>, FsToolErro
             .find("=======")
             .ok_or_else(|| FsToolError::InvalidDiff("missing '=======' separator".to_string()))?;
 
-        let search_content = after_header[..separator_pos].trim().to_string();
+        let search_content = after_header[..separator_pos].trim_end().to_string();
 
-        let after_separator = &after_header[separator_pos + "=======".len()..];
+        let after_separator_raw = &after_header[separator_pos + "=======".len()..];
+        // Skip the newline immediately after the separator
+        let after_separator = after_separator_raw.strip_prefix('\n').unwrap_or(after_separator_raw);
 
         // Find the end marker
         let end_pos = after_separator
             .find(">>>>>>> REPLACE")
             .ok_or_else(|| FsToolError::InvalidDiff("missing '>>>>>>> REPLACE' marker".to_string()))?;
 
-        let replace_content = after_separator[..end_pos].trim().to_string();
+        let replace_content = after_separator[..end_pos].trim_end().to_string();
 
         blocks.push((search_content, replace_content));
 
@@ -294,5 +309,152 @@ bar
     fn test_validate_diff_format_missing_separator() {
         let diff = "<<<<<<< SEARCH\nfoo\n>>>>>>> REPLACE";
         assert!(validate_diff_format(diff).is_err());
+    }
+
+    // --- New tests for :start_line:N and ------- format ---
+
+    #[test]
+    fn test_parse_start_line_format() {
+        // Test the :start_line:N format (new Roo Code format)
+        let diff = concat!(
+            "<<<<<<< SEARCH\n",
+            ":start_line:5\n",
+            "-------\n",
+            "old line\n",
+            "=======\n",
+            "new line\n",
+            ">>>>>>> REPLACE"
+        );
+        let blocks = parse_diff_blocks(diff).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "old line");
+        assert_eq!(blocks[0].1, "new line");
+    }
+
+    #[test]
+    fn test_parse_start_line_format_multiline() {
+        // Test :start_line:N with multiline search/replace content
+        let diff = concat!(
+            "<<<<<<< SEARCH\n",
+            ":start_line:10\n",
+            "-------\n",
+            "line one\n",
+            "line two\n",
+            "line three\n",
+            "=======\n",
+            "replaced one\n",
+            "replaced two\n",
+            ">>>>>>> REPLACE"
+        );
+        let blocks = parse_diff_blocks(diff).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "line one\nline two\nline three");
+        assert_eq!(blocks[0].1, "replaced one\nreplaced two");
+    }
+
+    #[test]
+    fn test_parse_start_line_without_dashes() {
+        // Test :start_line:N without the ------- separator
+        let diff = concat!(
+            "<<<<<<< SEARCH\n",
+            ":start_line:42\n",
+            "search this\n",
+            "=======\n",
+            "replace that\n",
+            ">>>>>>> REPLACE"
+        );
+        let blocks = parse_diff_blocks(diff).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "search this");
+        assert_eq!(blocks[0].1, "replace that");
+    }
+
+    #[test]
+    fn test_parse_no_start_line_header() {
+        // Test diff without any :start_line: or :N: header
+        let diff = concat!(
+            "<<<<<<< SEARCH\n",
+            "plain search\n",
+            "=======\n",
+            "plain replace\n",
+            ">>>>>>> REPLACE"
+        );
+        let blocks = parse_diff_blocks(diff).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "plain search");
+        assert_eq!(blocks[0].1, "plain replace");
+    }
+
+    #[test]
+    fn test_parse_legacy_colon_format() {
+        // Test legacy :N: format
+        let diff = "<<<<<<< SEARCH\n:15:\nlegacy search\n=======\nlegacy replace\n>>>>>>> REPLACE";
+        let blocks = parse_diff_blocks(diff).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "legacy search");
+        assert_eq!(blocks[0].1, "legacy replace");
+    }
+
+    #[test]
+    fn test_parse_mixed_formats() {
+        // Test a diff with both :start_line:N+------- and :N: formats
+        let diff = concat!(
+            "<<<<<<< SEARCH\n",
+            ":start_line:3\n",
+            "-------\n",
+            "first old\n",
+            "=======\n",
+            "first new\n",
+            ">>>>>>> REPLACE\n",
+            "<<<<<<< SEARCH\n",
+            ":7:\n",
+            "second old\n",
+            "=======\n",
+            "second new\n",
+            ">>>>>>> REPLACE"
+        );
+        let blocks = parse_diff_blocks(diff).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].0, "first old");
+        assert_eq!(blocks[0].1, "first new");
+        assert_eq!(blocks[1].0, "second old");
+        assert_eq!(blocks[1].1, "second new");
+    }
+
+    #[test]
+    fn test_parse_start_line_with_leading_whitespace() {
+        // Test that leading whitespace in search content is preserved
+        let diff = concat!(
+            "<<<<<<< SEARCH\n",
+            ":start_line:1\n",
+            "-------\n",
+            "    indented code\n",
+            "=======\n",
+            "    replaced code\n",
+            ">>>>>>> REPLACE"
+        );
+        let blocks = parse_diff_blocks(diff).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, "    indented code");
+        assert_eq!(blocks[0].1, "    replaced code");
+    }
+
+    #[test]
+    fn test_apply_with_start_line_format() {
+        // End-to-end test: parse then apply
+        let diff = concat!(
+            "<<<<<<< SEARCH\n",
+            ":start_line:2\n",
+            "-------\n",
+            "hello\n",
+            "=======\n",
+            "world\n",
+            ">>>>>>> REPLACE"
+        );
+        let blocks = parse_diff_blocks(diff).unwrap();
+        let original = "line1\nhello\nline3";
+        let result = apply_diff_blocks(original, &blocks).unwrap();
+        assert_eq!(result.blocks_applied, 1);
+        assert!(result.warnings.is_empty());
     }
 }

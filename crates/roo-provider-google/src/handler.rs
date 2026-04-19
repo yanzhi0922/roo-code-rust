@@ -15,9 +15,7 @@ use roo_provider::handler::{ApiStream, CreateMessageMetadata, Provider};
 use roo_provider::transform::gemini_format::{
     build_tool_id_to_name_map, convert_anthropic_message_to_gemini, GeminiConversionOptions,
 };
-use roo_types::api::{
-    ApiMessage, ApiStreamChunk, ContentBlock, GroundingSource, ProviderName,
-};
+use roo_types::api::{ApiMessage, ApiStreamChunk, GroundingSource, ProviderName};
 use roo_types::model::ModelInfo;
 
 use crate::models;
@@ -336,10 +334,6 @@ impl Provider for GoogleHandler {
         (self.model_id.clone(), self.model_info.clone())
     }
 
-    async fn count_tokens(&self, content: &[ContentBlock]) -> Result<u64> {
-        let _ = content;
-        Ok(0)
-    }
 
     async fn complete_prompt(&self, prompt: &str) -> Result<String> {
         let url = format!(

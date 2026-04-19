@@ -32,7 +32,11 @@ pub use manager::McpServerManager;
 pub use client::McpClient;
 pub use config::{validate_server_config, ValidatedServerConfig};
 pub use hub::McpConnectionExt;
-pub use name_utils::{sanitize_mcp_name, tool_names_match};
+pub use name_utils::{
+    build_mcp_tool_name, is_mcp_tool, normalize_for_comparison, normalize_mcp_tool_name,
+    parse_mcp_tool_name, sanitize_mcp_name, tool_names_match, MCP_TOOL_PREFIX,
+    MCP_TOOL_SEPARATOR,
+};
 pub use transport::{
     JsonRpcError, JsonRpcMessage, McpTransport, SseTransport, StdioTransport,
     StreamableHttpTransport,

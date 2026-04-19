@@ -3,6 +3,10 @@
 //! Provides [`LoopControl`] which manages iteration counting, consecutive
 //! mistake limits, cancellation, and the decision of whether to continue
 //! the task loop.
+//!
+//! Source: `src/core/task/Task.ts` — mistake tracking, loop control
+
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // LoopControl
@@ -12,15 +16,22 @@
 ///
 /// Tracks:
 /// - Consecutive mistake count and limit
+/// - Per-tool-type consecutive mistake counts (for apply_diff, edit_file)
+/// - Consecutive no-tool-use count
 /// - Maximum iterations
 /// - Current iteration
 /// - Cancellation state
 /// - Whether a tool failed in the current turn
+///
+/// Source: `src/core/task/Task.ts` — `consecutiveMistakeCount`, `consecutiveMistakeLimit`,
+/// `consecutiveMistakeCountForApplyDiff`, `consecutiveMistakeCountForEditFile`,
+/// `consecutiveNoToolUseCount`
 #[derive(Debug, Clone)]
 pub struct LoopControl {
     /// Number of consecutive mistakes (e.g., tool failures, API errors).
     pub consecutive_mistake_count: usize,
     /// Maximum allowed consecutive mistakes before stopping.
+    /// When `consecutive_mistake_count >= max_consecutive_mistakes`, the limit is reached.
     pub max_consecutive_mistakes: usize,
     /// Maximum number of iterations (None = unlimited).
     pub max_iterations: Option<usize>,
@@ -30,6 +41,23 @@ pub struct LoopControl {
     pub is_cancelled: bool,
     /// Whether a tool failed in the current turn.
     pub did_tool_fail_in_current_turn: bool,
+    /// Number of consecutive iterations where the model did not use any tools.
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveNoToolUseCount`
+    pub consecutive_no_tool_use_count: usize,
+    /// Number of consecutive iterations where the model did not produce any
+    /// assistant messages.
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveNoAssistantMessagesCount`
+    pub consecutive_no_assistant_messages_count: usize,
+    /// Per-file consecutive mistake count for apply_diff operations.
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveMistakeCountForApplyDiff`
+    pub consecutive_mistake_count_for_apply_diff: HashMap<String, usize>,
+    /// Per-file consecutive mistake count for edit_file operations.
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveMistakeCountForEditFile`
+    pub consecutive_mistake_count_for_edit_file: HashMap<String, usize>,
 }
 
 impl LoopControl {
@@ -42,6 +70,10 @@ impl LoopControl {
             current_iteration: 0,
             is_cancelled: false,
             did_tool_fail_in_current_turn: false,
+            consecutive_no_tool_use_count: 0,
+            consecutive_no_assistant_messages_count: 0,
+            consecutive_mistake_count_for_apply_diff: HashMap::new(),
+            consecutive_mistake_count_for_edit_file: HashMap::new(),
         }
     }
 
@@ -54,6 +86,10 @@ impl LoopControl {
             current_iteration: 0,
             is_cancelled: false,
             did_tool_fail_in_current_turn: false,
+            consecutive_no_tool_use_count: 0,
+            consecutive_no_assistant_messages_count: 0,
+            consecutive_mistake_count_for_apply_diff: HashMap::new(),
+            consecutive_mistake_count_for_edit_file: HashMap::new(),
         }
     }
 
@@ -61,14 +97,22 @@ impl LoopControl {
     ///
     /// Returns `false` if:
     /// - The task has been cancelled
+    /// - The consecutive mistake limit has been reached or exceeded (`>=`)
     /// - The maximum iteration limit has been reached
-    /// - The consecutive mistake limit has been exceeded
+    ///
+    /// **Note**: The mistake limit uses `>=` comparison to match the TypeScript
+    /// behavior where `consecutiveMistakeCount >= consecutiveMistakeLimit` triggers
+    /// the limit check.
     pub fn should_continue(&self) -> bool {
         if self.is_cancelled {
             return false;
         }
 
-        if self.consecutive_mistake_count > self.max_consecutive_mistakes {
+        // BUG FIX: Changed from `>` to `>=` to match TypeScript behavior.
+        // TS: `this.consecutiveMistakeCount >= this.consecutiveMistakeLimit`
+        if self.max_consecutive_mistakes > 0
+            && self.consecutive_mistake_count >= self.max_consecutive_mistakes
+        {
             return false;
         }
 
@@ -81,18 +125,90 @@ impl LoopControl {
         true
     }
 
+    /// Check whether the consecutive mistake limit has been reached.
+    ///
+    /// Returns `true` when `consecutive_mistake_count >= max_consecutive_mistakes`.
+    /// This matches the TypeScript behavior where the limit triggers at equality.
+    pub fn is_mistake_limit_reached(&self) -> bool {
+        self.max_consecutive_mistakes > 0
+            && self.consecutive_mistake_count >= self.max_consecutive_mistakes
+    }
+
     /// Record a mistake (e.g., tool failure).
     ///
-    /// Returns `true` if the mistake limit has been exceeded.
+    /// Returns `true` if the mistake limit has been reached or exceeded.
     pub fn record_mistake(&mut self) -> bool {
         self.consecutive_mistake_count += 1;
         self.did_tool_fail_in_current_turn = true;
-        self.consecutive_mistake_count > self.max_consecutive_mistakes
+        // BUG FIX: Changed from `>` to `>=` to match TypeScript behavior
+        self.consecutive_mistake_count >= self.max_consecutive_mistakes
+    }
+
+    /// Record a per-file mistake for apply_diff.
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveMistakeCountForApplyDiff`
+    pub fn record_apply_diff_mistake(&mut self, file_path: &str) -> usize {
+        let count = self
+            .consecutive_mistake_count_for_apply_diff
+            .entry(file_path.to_string())
+            .or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Reset the per-file apply_diff mistake count for a specific file.
+    pub fn reset_apply_diff_mistake(&mut self, file_path: &str) {
+        self.consecutive_mistake_count_for_apply_diff.remove(file_path);
+    }
+
+    /// Record a per-file mistake for edit_file.
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveMistakeCountForEditFile`
+    pub fn record_edit_file_mistake(&mut self, file_path: &str) -> usize {
+        let count = self
+            .consecutive_mistake_count_for_edit_file
+            .entry(file_path.to_string())
+            .or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Reset the per-file edit_file mistake count for a specific file.
+    pub fn reset_edit_file_mistake(&mut self, file_path: &str) {
+        self.consecutive_mistake_count_for_edit_file.remove(file_path);
+    }
+
+    /// Record that the model did not use any tools in this iteration.
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveNoToolUseCount`
+    pub fn record_no_tool_use(&mut self) {
+        self.consecutive_no_tool_use_count += 1;
+    }
+
+    /// Reset the consecutive no-tool-use count.
+    ///
+    /// Called when the model successfully uses a tool.
+    pub fn reset_no_tool_use_count(&mut self) {
+        self.consecutive_no_tool_use_count = 0;
+    }
+
+    /// Record that the model did not produce an assistant message in this iteration.
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveNoAssistantMessagesCount`
+    pub fn record_no_assistant_message(&mut self) {
+        self.consecutive_no_assistant_messages_count += 1;
+    }
+
+    /// Reset the consecutive no-assistant-messages count.
+    ///
+    /// Called when the model produces an assistant message.
+    pub fn reset_no_assistant_messages_count(&mut self) {
+        self.consecutive_no_assistant_messages_count = 0;
     }
 
     /// Reset the consecutive mistake count.
     ///
-    /// Called when a successful action occurs.
+    /// Called when a successful action occurs. Also resets per-tool mistake counts.
     pub fn reset_mistake_count(&mut self) {
         self.consecutive_mistake_count = 0;
         self.did_tool_fail_in_current_turn = false;
@@ -111,8 +227,13 @@ impl LoopControl {
     }
 
     /// Cancel the task loop.
+    ///
+    /// Also resets consecutive error counters on abort (manual intervention),
+    /// matching the TypeScript behavior in `abortTask`.
     pub fn cancel(&mut self) {
         self.is_cancelled = true;
+        self.consecutive_no_tool_use_count = 0;
+        self.consecutive_no_assistant_messages_count = 0;
     }
 
     /// Reset the turn-level state (called at the beginning of each iteration).
@@ -150,6 +271,10 @@ mod tests {
         assert_eq!(lc.current_iteration, 0);
         assert!(!lc.is_cancelled);
         assert!(!lc.did_tool_fail_in_current_turn);
+        assert_eq!(lc.consecutive_no_tool_use_count, 0);
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 0);
+        assert!(lc.consecutive_mistake_count_for_apply_diff.is_empty());
+        assert!(lc.consecutive_mistake_count_for_edit_file.is_empty());
     }
 
     #[test]
@@ -179,11 +304,47 @@ mod tests {
         let mut lc = LoopControl::new(3);
         lc.record_mistake(); // 1
         lc.record_mistake(); // 2
-        lc.record_mistake(); // 3 — count == limit, should_continue still true
-        assert!(lc.should_continue()); // 3 > 3 is false
-        let exceeded = lc.record_mistake(); // 4 — exceeds limit
-        assert!(exceeded); // 4 > 3
-        assert!(!lc.should_continue()); // 4 > 3
+        let exceeded = lc.record_mistake(); // 3 — count == limit
+        assert!(exceeded); // 3 >= 3 is true (FIXED: was false with >)
+        assert!(!lc.should_continue()); // 3 >= 3 triggers stop
+    }
+
+    #[test]
+    fn test_loop_control_mistake_limit_boundary() {
+        // With limit=3, should stop at exactly 3 mistakes (>= comparison)
+        let mut lc = LoopControl::new(3);
+        assert!(lc.should_continue()); // 0 mistakes
+
+        lc.record_mistake(); // 1
+        assert!(lc.should_continue()); // 1 < 3
+
+        lc.record_mistake(); // 2
+        assert!(lc.should_continue()); // 2 < 3
+
+        lc.record_mistake(); // 3
+        assert!(!lc.should_continue()); // 3 >= 3 → STOP (FIXED)
+    }
+
+    #[test]
+    fn test_loop_control_mistake_limit_with_zero() {
+        // limit=0 means no limit checking (matches TS: `if (this.consecutiveMistakeLimit > 0 && ...)`)
+        let mut lc = LoopControl::new(0);
+        lc.record_mistake();
+        lc.record_mistake();
+        lc.record_mistake();
+        assert!(lc.should_continue()); // limit=0 disables check
+    }
+
+    #[test]
+    fn test_loop_control_is_mistake_limit_reached() {
+        let mut lc = LoopControl::new(3);
+        assert!(!lc.is_mistake_limit_reached());
+        lc.record_mistake(); // 1
+        assert!(!lc.is_mistake_limit_reached());
+        lc.record_mistake(); // 2
+        assert!(!lc.is_mistake_limit_reached());
+        lc.record_mistake(); // 3
+        assert!(lc.is_mistake_limit_reached()); // 3 >= 3
     }
 
     #[test]
@@ -253,8 +414,55 @@ mod tests {
     }
 
     #[test]
+    fn test_loop_control_consecutive_no_tool_use() {
+        let mut lc = LoopControl::new(3);
+        assert_eq!(lc.consecutive_no_tool_use_count, 0);
+
+        lc.record_no_tool_use();
+        lc.record_no_tool_use();
+        assert_eq!(lc.consecutive_no_tool_use_count, 2);
+
+        lc.reset_no_tool_use_count();
+        assert_eq!(lc.consecutive_no_tool_use_count, 0);
+    }
+
+    #[test]
+    fn test_loop_control_per_file_apply_diff_mistakes() {
+        let mut lc = LoopControl::new(3);
+
+        let count = lc.record_apply_diff_mistake("/path/to/file.rs");
+        assert_eq!(count, 1);
+
+        let count = lc.record_apply_diff_mistake("/path/to/file.rs");
+        assert_eq!(count, 2);
+
+        // Different file should have its own count
+        let count = lc.record_apply_diff_mistake("/path/to/other.rs");
+        assert_eq!(count, 1);
+
+        // Reset specific file
+        lc.reset_apply_diff_mistake("/path/to/file.rs");
+        assert_eq!(lc.consecutive_mistake_count_for_apply_diff.get("/path/to/file.rs"), None);
+        assert_eq!(lc.consecutive_mistake_count_for_apply_diff.get("/path/to/other.rs"), Some(&1));
+    }
+
+    #[test]
+    fn test_loop_control_per_file_edit_file_mistakes() {
+        let mut lc = LoopControl::new(3);
+
+        let count = lc.record_edit_file_mistake("/path/to/file.rs");
+        assert_eq!(count, 1);
+
+        let count = lc.record_edit_file_mistake("/path/to/file.rs");
+        assert_eq!(count, 2);
+
+        lc.reset_edit_file_mistake("/path/to/file.rs");
+        assert_eq!(lc.consecutive_mistake_count_for_edit_file.get("/path/to/file.rs"), None);
+    }
+
+    #[test]
     fn test_loop_control_full_scenario() {
-        let mut lc = LoopControl::with_max_iterations(2, 10);
+        let mut lc = LoopControl::with_max_iterations(3, 10);
 
         // Iteration 1: success
         assert!(lc.should_continue());
@@ -265,18 +473,20 @@ mod tests {
         assert!(lc.should_continue());
         lc.increment_iteration();
         let exceeded = lc.record_mistake();
-        assert!(!exceeded);
+        assert!(!exceeded); // 1 < 3
 
         // Iteration 3: another mistake
         assert!(lc.should_continue());
         lc.increment_iteration();
         let exceeded = lc.record_mistake();
-        assert!(!exceeded); // 2 mistakes, limit is 2, 2 > 2 = false
+        assert!(!exceeded); // 2 < 3
 
-        // Iteration 4: another mistake (exceeds limit)
-        lc.reset_turn();
+        // Now at 2 mistakes, should still continue
+        assert!(lc.should_continue());
+
+        // Third mistake hits the limit
         let exceeded = lc.record_mistake();
-        assert!(exceeded); // 3 > 2
+        assert!(exceeded); // 3 >= 3 (FIXED)
         assert!(!lc.should_continue());
     }
 
@@ -287,5 +497,33 @@ mod tests {
         lc.cancel();
         assert!(lc.is_cancelled);
         assert!(!lc.should_continue());
+    }
+
+    #[test]
+    fn test_loop_control_cancel_resets_counters() {
+        // Source: `src/core/task/Task.ts` — abortTask resets counters
+        let mut lc = LoopControl::new(3);
+        lc.record_no_tool_use();
+        lc.record_no_tool_use();
+        lc.record_no_assistant_message();
+        assert_eq!(lc.consecutive_no_tool_use_count, 2);
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 1);
+
+        lc.cancel();
+        assert_eq!(lc.consecutive_no_tool_use_count, 0);
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 0);
+    }
+
+    #[test]
+    fn test_loop_control_consecutive_no_assistant_messages() {
+        let mut lc = LoopControl::new(3);
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 0);
+
+        lc.record_no_assistant_message();
+        lc.record_no_assistant_message();
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 2);
+
+        lc.reset_no_assistant_messages_count();
+        assert_eq!(lc.consecutive_no_assistant_messages_count, 0);
     }
 }

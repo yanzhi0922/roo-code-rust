@@ -99,6 +99,19 @@ pub struct McpTool {
     pub description: Option<String>,
     #[serde(default)]
     pub input_schema: Option<serde_json::Value>,
+    /// Whether this tool is always allowed (auto-approved) without user confirmation.
+    /// Set based on the server's `alwaysAllow` configuration.
+    #[serde(default)]
+    pub always_allow: bool,
+    /// Whether this tool is enabled for inclusion in prompts.
+    /// `true` unless the tool is in the server's `disabledTools` list.
+    #[serde(default = "default_true")]
+    pub enabled_for_prompt: bool,
+}
+
+/// Default value for `enabled_for_prompt` (true).
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------

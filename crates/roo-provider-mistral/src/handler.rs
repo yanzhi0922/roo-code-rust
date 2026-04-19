@@ -81,14 +81,6 @@ impl Provider for MistralHandler {
         self.inner.get_model()
     }
 
-    async fn count_tokens(
-        &self,
-        content: &[roo_types::api::ContentBlock],
-    ) -> Result<u64, roo_provider::ProviderError> {
-        let _ = content;
-        Ok(0)
-    }
-
     async fn complete_prompt(
         &self,
         prompt: &str,

@@ -6,10 +6,8 @@
 use async_trait::async_trait;
 use roo_provider::{
     ApiStream, BaseProvider, CreateMessageMetadata, Provider,
-    convert_tools_for_openai,
 };
 use roo_provider::error::{ProviderError, Result};
-use roo_provider::transform::openai_format::convert_to_openai_messages;
 use roo_types::api::{ApiMessage, ProviderName};
 use roo_types::model::ModelInfo;
 
@@ -67,48 +65,6 @@ impl OpenRouterHandler {
         Self::new(config)
     }
 
-    /// Build the request body for a streaming chat completion.
-    #[allow(dead_code)]
-    fn build_request_body(
-        &self,
-        system_prompt: &str,
-        messages: &[ApiMessage],
-        tools: Option<&Vec<serde_json::Value>>,
-        metadata: &CreateMessageMetadata,
-    ) -> Result<serde_json::Value> {
-        let (model, info) = self.base.get_model();
-
-        let openai_messages = convert_to_openai_messages(messages, None)?;
-
-        let mut system_and_messages = vec![serde_json::json!({
-            "role": "system",
-            "content": system_prompt
-        })];
-        system_and_messages.extend(openai_messages);
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "temperature": self.temperature,
-            "messages": system_and_messages,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-            "parallel_tool_calls": metadata.parallel_tool_calls.unwrap_or(true),
-        });
-
-        if let Some(max_tokens) = info.max_tokens {
-            body["max_tokens"] = serde_json::json!(max_tokens);
-        }
-
-        if let Some(tools) = convert_tools_for_openai(tools) {
-            body["tools"] = serde_json::json!(tools);
-        }
-
-        if let Some(ref tool_choice) = metadata.tool_choice {
-            body["tool_choice"] = tool_choice.clone();
-        }
-
-        Ok(body)
-    }
 }
 
 #[async_trait]
@@ -141,14 +97,6 @@ impl Provider for OpenRouterHandler {
 
     fn get_model(&self) -> (String, ModelInfo) {
         self.base.get_model()
-    }
-
-    async fn count_tokens(
-        &self,
-        content: &[roo_types::api::ContentBlock],
-    ) -> Result<u64> {
-        let _ = content;
-        Ok(0)
     }
 
     async fn complete_prompt(&self, prompt: &str) -> Result<String> {

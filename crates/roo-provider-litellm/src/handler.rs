@@ -1,4 +1,4 @@
-﻿//! LiteLLM provider handler.
+//! LiteLLM provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via LiteLLM proxy.
 //! Supports prompt caching, GPT-5 detection, and Gemini model handling.
@@ -111,14 +111,6 @@ impl Provider for LiteLlmHandler {
 
     fn get_model(&self) -> (String, ModelInfo) {
         self.inner.get_model()
-    }
-
-    async fn count_tokens(
-        &self,
-        content: &[roo_types::api::ContentBlock],
-    ) -> Result<u64, roo_provider::ProviderError> {
-        let _ = content;
-        Ok(0)
     }
 
     async fn complete_prompt(

@@ -1,7 +1,8 @@
-﻿//! AWS Bedrock provider handler.
+//! AWS Bedrock provider handler.
 //!
 //! Uses the Bedrock Converse API with AWS SigV4 signing.
 //! Supports cross-region inference and custom model IDs.
+//! Parses the AWS event stream binary format for streaming responses.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -15,6 +16,9 @@ use roo_types::api::{
 };
 use roo_types::model::ModelInfo;
 
+use crate::bedrock_events::{
+    BedrockEvent, ContentBlockDeltaData, ContentBlockStartData, parse_bedrock_event_stream,
+};
 use crate::models;
 use crate::signing::SigV4Signer;
 use crate::types::AwsBedrockConfig;
@@ -317,14 +321,134 @@ impl Provider for AwsBedrockHandler {
             return Err(ProviderError::api_error_response("bedrock", status, text));
         }
 
-        // For now, return a simple stream that reads the response
-        // In a full implementation, this would parse the Bedrock SSE stream
+        // Read the full response body and parse the Bedrock event stream
         let model_info = self.model_info.clone();
-        let stream = futures::stream::once(async move {
-            let _ = model_info;
-            Ok(ApiStreamChunk::Text { text: String::new() })
-        });
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(ProviderError::Reqwest)?;
 
+        let events = parse_bedrock_event_stream(&bytes);
+
+        // Convert Bedrock events into ApiStreamChunks
+        let mut chunks: Vec<Result<ApiStreamChunk>> = Vec::new();
+        let mut usage_emitted = false;
+
+        for event in events {
+            match event {
+                BedrockEvent::ContentBlockDelta { delta, .. } => match delta {
+                    ContentBlockDeltaData::TextDelta { text } => {
+                        if !text.is_empty() {
+                            chunks.push(Ok(ApiStreamChunk::Text { text }));
+                        }
+                    }
+                    ContentBlockDeltaData::ToolUseDelta {
+                        tool_use_id,
+                        input,
+                    } => {
+                        chunks.push(Ok(ApiStreamChunk::ToolCall {
+                            id: tool_use_id.clone(),
+                            name: String::new(), // name comes from ContentBlockStart
+                            arguments: input,
+                        }));
+                    }
+                    ContentBlockDeltaData::ReasoningTextDelta { text } => {
+                        if !text.is_empty() {
+                            chunks.push(Ok(ApiStreamChunk::Reasoning {
+                                text,
+                                signature: None,
+                            }));
+                        }
+                    }
+                    ContentBlockDeltaData::ReasoningSignatureDelta { signature } => {
+                        // Signatures are typically handled at a higher level
+                        let _ = signature;
+                    }
+                },
+                BedrockEvent::ContentBlockStart { content_block, .. } => {
+                    match content_block {
+                        ContentBlockStartData::ToolUse {
+                            tool_use_id,
+                            name,
+                        } => {
+                            chunks.push(Ok(ApiStreamChunk::ToolCallStart {
+                                id: tool_use_id,
+                                name,
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+                BedrockEvent::ContentBlockStop { .. } => {
+                    // No action needed for stop events
+                }
+                BedrockEvent::MessageStart { .. } => {
+                    // No action needed for start events
+                }
+                BedrockEvent::MessageStop { .. } => {
+                    // No action needed for stop events
+                }
+                BedrockEvent::Metadata { usage, .. } => {
+                    if !usage_emitted {
+                        let input_tokens = usage.input_tokens;
+                        let output_tokens = usage.output_tokens;
+                        let cache_read_tokens = usage.cache_read_input_tokens;
+                        let cache_write_tokens = usage.cache_write_input_tokens;
+
+                        let input_cost = model_info.input_price.unwrap_or(0.0)
+                            * input_tokens as f64
+                            / 1_000_000.0;
+                        let output_cost = model_info.output_price.unwrap_or(0.0)
+                            * output_tokens as f64
+                            / 1_000_000.0;
+                        let cache_read_cost = model_info.cache_reads_price.unwrap_or(0.0)
+                            * cache_read_tokens.unwrap_or(0) as f64
+                            / 1_000_000.0;
+                        let cache_write_cost = model_info.cache_writes_price.unwrap_or(0.0)
+                            * cache_write_tokens.unwrap_or(0) as f64
+                            / 1_000_000.0;
+
+                        chunks.push(Ok(ApiStreamChunk::Usage {
+                            input_tokens,
+                            output_tokens,
+                            cache_write_tokens,
+                            cache_read_tokens,
+                            reasoning_tokens: None,
+                            total_cost: Some(
+                                input_cost + output_cost + cache_read_cost + cache_write_cost,
+                            ),
+                        }));
+                        usage_emitted = true;
+                    }
+                }
+                BedrockEvent::InternalServerException { message } => {
+                    chunks.push(Err(ProviderError::Other(format!(
+                        "Bedrock internal server error: {message}"
+                    ))));
+                }
+                BedrockEvent::ServiceUnavailableException { message } => {
+                    chunks.push(Err(ProviderError::Other(format!(
+                        "Bedrock service unavailable: {message}"
+                    ))));
+                }
+                BedrockEvent::ThrottlingException { message } => {
+                    chunks.push(Err(ProviderError::Other(format!(
+                        "Bedrock throttled: {message}"
+                    ))));
+                }
+                BedrockEvent::ValidationException { message } => {
+                    chunks.push(Err(ProviderError::Other(format!(
+                        "Bedrock validation error: {message}"
+                    ))));
+                }
+                BedrockEvent::Unknown { event_type, .. } => {
+                    // Log but don't fail on unknown events
+                    let _ = event_type;
+                }
+            }
+        }
+
+        let stream = futures::stream::iter(chunks);
         Ok(Box::pin(stream))
     }
 
@@ -332,10 +456,6 @@ impl Provider for AwsBedrockHandler {
         (self.model_id.clone(), self.model_info.clone())
     }
 
-    async fn count_tokens(&self, content: &[ContentBlock]) -> Result<u64> {
-        let _ = content;
-        Ok(0)
-    }
 
     async fn complete_prompt(&self, prompt: &str) -> Result<String> {
         let body = self.build_converse_request("", &[ApiMessage {

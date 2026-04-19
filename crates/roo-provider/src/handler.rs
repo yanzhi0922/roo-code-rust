@@ -49,9 +49,41 @@ pub trait Provider: Send + Sync {
     fn get_model(&self) -> (String, ModelInfo);
 
     /// Count tokens for content blocks.
+    ///
+    /// Default implementation uses a simple heuristic of ~4 characters per token.
+    /// Individual providers should override this with accurate counting when available.
     async fn count_tokens(&self, content: &[roo_types::api::ContentBlock]) -> Result<u64> {
-        let _ = content;
-        Ok(0)
+        let total_chars: usize = content
+            .iter()
+            .map(|block| match block {
+                roo_types::api::ContentBlock::Text { text } => text.len(),
+                roo_types::api::ContentBlock::ToolUse { input, .. } => {
+                    // Estimate JSON input size
+                    serde_json::to_string(input).map(|s| s.len()).unwrap_or(0)
+                }
+                roo_types::api::ContentBlock::ToolResult { content, .. } => content
+                    .iter()
+                    .map(|c| match c {
+                        roo_types::api::ToolResultContent::Text { text } => text.len(),
+                        roo_types::api::ToolResultContent::Image { .. } => 256, // rough estimate for image tokens
+                    })
+                    .sum(),
+                roo_types::api::ContentBlock::Image { source } => {
+                    // Rough estimate: images typically use 85-170 tokens depending on detail
+                    match source {
+                        roo_types::api::ImageSource::Base64 { data, .. } => {
+                            // Estimate based on base64 data length
+                            (data.len() / 100).max(85).min(1000)
+                        }
+                        roo_types::api::ImageSource::Url { .. } => 256,
+                    }
+                }
+                roo_types::api::ContentBlock::Thinking { thinking, .. } => thinking.len(),
+                roo_types::api::ContentBlock::RedactedThinking { data } => data.len() / 4,
+            })
+            .sum();
+        // ~4 characters per token is a reasonable default for most tokenizers
+        Ok((total_chars as u64).div_ceil(4))
     }
 
     /// Complete a simple prompt (non-streaming).

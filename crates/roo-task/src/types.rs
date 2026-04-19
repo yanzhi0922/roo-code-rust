@@ -1,7 +1,9 @@
 //! Task engine type definitions.
 //!
 //! Defines TaskState, TaskConfig, TaskResult, TaskEvent, TaskError,
-//! and related types for the task engine.
+//! StreamingState, and related types for the task engine.
+//!
+//! Source: `src/core/task/Task.ts` — Task class properties and types
 
 use std::collections::HashMap;
 use std::fmt;
@@ -9,6 +11,36 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use roo_types::message::TokenUsage;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Default checkpoint timeout in seconds.
+///
+/// Source: `packages/types/src/provider-settings.ts` — `DEFAULT_CHECKPOINT_TIMEOUT_SECONDS`
+pub const DEFAULT_CHECKPOINT_TIMEOUT_SECONDS: usize = 30;
+
+/// Maximum checkpoint timeout in seconds.
+pub const MAX_CHECKPOINT_TIMEOUT_SECONDS: usize = 600;
+
+/// Minimum checkpoint timeout in seconds.
+pub const MIN_CHECKPOINT_TIMEOUT_SECONDS: usize = 1;
+
+/// Maximum exponential backoff in seconds for API retries.
+///
+/// Source: `src/core/task/Task.ts` — `MAX_EXPONENTIAL_BACKOFF_SECONDS`
+pub const MAX_EXPONENTIAL_BACKOFF_SECONDS: u64 = 600;
+
+/// Forced context reduction percent (keep 75%, remove 25%).
+///
+/// Source: `src/core/task/Task.ts` — `FORCED_CONTEXT_REDUCTION_PERCENT`
+pub const FORCED_CONTEXT_REDUCTION_PERCENT: u64 = 75;
+
+/// Maximum retries for context window errors.
+///
+/// Source: `src/core/task/Task.ts` — `MAX_CONTEXT_WINDOW_RETRIES`
+pub const MAX_CONTEXT_WINDOW_RETRIES: usize = 3;
 
 // ---------------------------------------------------------------------------
 // TaskState
@@ -84,18 +116,54 @@ impl Default for TaskState {
 // ---------------------------------------------------------------------------
 
 /// Configuration for a task.
+///
+/// Source: `src/core/task/Task.ts` — `TaskOptions` and constructor parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskConfig {
+    /// Unique task identifier.
     pub task_id: String,
+    /// Root task ID (for subtasks).
     pub root_task_id: Option<String>,
+    /// Parent task ID (for subtasks).
     pub parent_task_id: Option<String>,
+    /// Task number (for subtask ordering).
     pub task_number: usize,
+    /// Current working directory.
     pub cwd: String,
+    /// Task mode (e.g., "code", "architect", "ask").
     pub mode: String,
+    /// API configuration name (provider profile).
     pub api_config_name: Option<String>,
+    /// Workspace path.
     pub workspace: String,
+    /// Maximum iterations (None = unlimited).
     pub max_iterations: Option<usize>,
+    /// Whether auto-approval is enabled.
     pub auto_approval: bool,
+    /// Whether checkpoints are enabled.
+    ///
+    /// Source: `src/core/task/Task.ts` — `enableCheckpoints`
+    pub enable_checkpoints: bool,
+    /// Checkpoint timeout in seconds.
+    ///
+    /// Source: `src/core/task/Task.ts` — `checkpointTimeout`
+    pub checkpoint_timeout: usize,
+    /// Consecutive mistake limit (overrides global default).
+    ///
+    /// Source: `src/core/task/Task.ts` — `consecutiveMistakeLimit`
+    pub consecutive_mistake_limit: usize,
+    /// Initial task text (user message).
+    ///
+    /// Source: `src/core/task/Task.ts` — `task` option
+    pub task_text: Option<String>,
+    /// Initial images.
+    ///
+    /// Source: `src/core/task/Task.ts` — `images` option
+    pub images: Vec<String>,
+    /// History item ID to resume from.
+    ///
+    /// Source: `src/core/task/Task.ts` — `historyItem` option
+    pub history_item_id: Option<String>,
 }
 
 impl TaskConfig {
@@ -112,6 +180,12 @@ impl TaskConfig {
             workspace: String::new(),
             max_iterations: None,
             auto_approval: false,
+            enable_checkpoints: true,
+            checkpoint_timeout: DEFAULT_CHECKPOINT_TIMEOUT_SECONDS,
+            consecutive_mistake_limit: crate::config::DEFAULT_MAX_MISTAKES,
+            task_text: None,
+            images: Vec::new(),
+            history_item_id: None,
         }
     }
 
@@ -162,6 +236,42 @@ impl TaskConfig {
         self.task_number = num;
         self
     }
+
+    /// Set whether checkpoints are enabled.
+    pub fn with_checkpoints(mut self, enabled: bool) -> Self {
+        self.enable_checkpoints = enabled;
+        self
+    }
+
+    /// Set the checkpoint timeout in seconds.
+    pub fn with_checkpoint_timeout(mut self, timeout: usize) -> Self {
+        self.checkpoint_timeout = timeout;
+        self
+    }
+
+    /// Set the consecutive mistake limit.
+    pub fn with_consecutive_mistake_limit(mut self, limit: usize) -> Self {
+        self.consecutive_mistake_limit = limit;
+        self
+    }
+
+    /// Set the initial task text.
+    pub fn with_task_text(mut self, text: impl Into<String>) -> Self {
+        self.task_text = Some(text.into());
+        self
+    }
+
+    /// Set the initial images.
+    pub fn with_images(mut self, images: Vec<String>) -> Self {
+        self.images = images;
+        self
+    }
+
+    /// Set the history item ID to resume from.
+    pub fn with_history_item_id(mut self, id: impl Into<String>) -> Self {
+        self.history_item_id = Some(id.into());
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +305,94 @@ impl TaskResult {
     /// Record a tool usage.
     pub fn record_tool_usage(&mut self, tool_name: &str) {
         *self.tool_usage.entry(tool_name.to_string()).or_insert(0) += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StreamingState
+// ---------------------------------------------------------------------------
+
+/// Streaming state for the current API request.
+///
+/// Tracks the state of the current streaming response from the API,
+/// including content parsing, tool call processing, and checkpoint status.
+///
+/// Source: `src/core/task/Task.ts` — streaming-related properties:
+/// `isStreaming`, `isWaitingForFirstChunk`, `currentStreamingContentIndex`,
+/// `didCompleteReadingStream`, `assistantMessageSavedToHistory`, etc.
+#[derive(Debug, Clone)]
+pub struct StreamingState {
+    /// Whether we are currently streaming an API response.
+    pub is_streaming: bool,
+    /// Whether we are waiting for the first chunk of the response.
+    pub is_waiting_for_first_chunk: bool,
+    /// Current content index within the streaming response.
+    pub current_streaming_content_index: usize,
+    /// Whether a checkpoint was done for the current streaming session.
+    pub current_streaming_did_checkpoint: bool,
+    /// Whether the stream has been fully read.
+    pub did_complete_reading_stream: bool,
+    /// Whether the assistant message has been saved to API conversation history.
+    ///
+    /// This is critical for parallel tool calling: tools should NOT execute until
+    /// the assistant message is saved.
+    pub assistant_message_saved_to_history: bool,
+    /// Whether a tool was rejected in the current streaming session.
+    pub did_reject_tool: bool,
+    /// Whether a tool was already used in the current streaming session.
+    pub did_already_use_tool: bool,
+    /// Whether a tool failed in the current turn.
+    pub did_tool_fail_in_current_turn: bool,
+    /// Whether the present-assistant-message handler is locked.
+    pub present_assistant_message_locked: bool,
+    /// Whether there are pending updates for the assistant message handler.
+    pub present_assistant_message_has_pending_updates: bool,
+    /// Whether the stream finished aborting.
+    ///
+    /// Source: `src/core/task/Task.ts` — `didFinishAbortingStream`
+    pub did_finish_aborting_stream: bool,
+}
+
+impl StreamingState {
+    /// Create a new default streaming state.
+    pub fn new() -> Self {
+        Self {
+            is_streaming: false,
+            is_waiting_for_first_chunk: false,
+            current_streaming_content_index: 0,
+            current_streaming_did_checkpoint: false,
+            did_complete_reading_stream: false,
+            assistant_message_saved_to_history: false,
+            did_reject_tool: false,
+            did_already_use_tool: false,
+            did_tool_fail_in_current_turn: false,
+            present_assistant_message_locked: false,
+            present_assistant_message_has_pending_updates: false,
+            did_finish_aborting_stream: false,
+        }
+    }
+
+    /// Reset all streaming state for a new API request.
+    ///
+    /// Source: `src/core/task/Task.ts` — streaming state reset block in
+    /// `recursivelyMakeClineRequests`
+    pub fn reset_for_new_request(&mut self) {
+        self.current_streaming_content_index = 0;
+        self.current_streaming_did_checkpoint = false;
+        self.did_complete_reading_stream = false;
+        self.assistant_message_saved_to_history = false;
+        self.did_reject_tool = false;
+        self.did_already_use_tool = false;
+        self.did_tool_fail_in_current_turn = false;
+        self.present_assistant_message_locked = false;
+        self.present_assistant_message_has_pending_updates = false;
+        self.did_finish_aborting_stream = false;
+    }
+}
+
+impl Default for StreamingState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -354,6 +552,12 @@ mod tests {
         assert!(config.api_config_name.is_none());
         assert!(!config.auto_approval);
         assert!(config.max_iterations.is_none());
+        assert!(config.enable_checkpoints);
+        assert_eq!(config.checkpoint_timeout, DEFAULT_CHECKPOINT_TIMEOUT_SECONDS);
+        assert_eq!(config.consecutive_mistake_limit, crate::config::DEFAULT_MAX_MISTAKES);
+        assert!(config.task_text.is_none());
+        assert!(config.images.is_empty());
+        assert!(config.history_item_id.is_none());
     }
 
     #[test]
@@ -366,7 +570,13 @@ mod tests {
             .with_auto_approval(true)
             .with_root_task_id("root-1")
             .with_parent_task_id("parent-1")
-            .with_task_number(3);
+            .with_task_number(3)
+            .with_checkpoints(false)
+            .with_checkpoint_timeout(60)
+            .with_consecutive_mistake_limit(5)
+            .with_task_text("Fix the bug")
+            .with_images(vec!["img1.png".to_string()])
+            .with_history_item_id("hist-1");
 
         assert_eq!(config.task_id, "task-2");
         assert_eq!(config.mode, "architect");
@@ -377,6 +587,12 @@ mod tests {
         assert_eq!(config.root_task_id, Some("root-1".to_string()));
         assert_eq!(config.parent_task_id, Some("parent-1".to_string()));
         assert_eq!(config.task_number, 3);
+        assert!(!config.enable_checkpoints);
+        assert_eq!(config.checkpoint_timeout, 60);
+        assert_eq!(config.consecutive_mistake_limit, 5);
+        assert_eq!(config.task_text, Some("Fix the bug".to_string()));
+        assert_eq!(config.images, vec!["img1.png".to_string()]);
+        assert_eq!(config.history_item_id, Some("hist-1".to_string()));
     }
 
     #[test]
@@ -429,6 +645,57 @@ mod tests {
         assert_eq!(back.tool_usage["read_file"], 1);
     }
 
+    // --- StreamingState tests ---
+
+    #[test]
+    fn test_streaming_state_new() {
+        let state = StreamingState::new();
+        assert!(!state.is_streaming);
+        assert!(!state.is_waiting_for_first_chunk);
+        assert_eq!(state.current_streaming_content_index, 0);
+        assert!(!state.current_streaming_did_checkpoint);
+        assert!(!state.did_complete_reading_stream);
+        assert!(!state.assistant_message_saved_to_history);
+        assert!(!state.did_reject_tool);
+        assert!(!state.did_already_use_tool);
+        assert!(!state.did_tool_fail_in_current_turn);
+        assert!(!state.present_assistant_message_locked);
+        assert!(!state.present_assistant_message_has_pending_updates);
+        assert!(!state.did_finish_aborting_stream);
+    }
+
+    #[test]
+    fn test_streaming_state_default() {
+        assert_eq!(StreamingState::default().is_streaming, false);
+    }
+
+    #[test]
+    fn test_streaming_state_reset_for_new_request() {
+        let mut state = StreamingState::new();
+        state.is_streaming = true;
+        state.current_streaming_content_index = 5;
+        state.assistant_message_saved_to_history = true;
+        state.did_tool_fail_in_current_turn = true;
+        state.did_finish_aborting_stream = true;
+
+        state.reset_for_new_request();
+
+        // These should be reset
+        assert_eq!(state.current_streaming_content_index, 0);
+        assert!(!state.current_streaming_did_checkpoint);
+        assert!(!state.did_complete_reading_stream);
+        assert!(!state.assistant_message_saved_to_history);
+        assert!(!state.did_reject_tool);
+        assert!(!state.did_already_use_tool);
+        assert!(!state.did_tool_fail_in_current_turn);
+        assert!(!state.present_assistant_message_locked);
+        assert!(!state.present_assistant_message_has_pending_updates);
+        assert!(!state.did_finish_aborting_stream);
+
+        // is_streaming should NOT be reset by reset_for_new_request
+        assert!(state.is_streaming);
+    }
+
     // --- TaskError tests ---
 
     #[test]
@@ -450,5 +717,17 @@ mod tests {
     fn test_task_error_max_iterations() {
         let err = TaskError::MaxIterationsExceeded(100);
         assert!(err.to_string().contains("100"));
+    }
+
+    // --- Constants tests ---
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(DEFAULT_CHECKPOINT_TIMEOUT_SECONDS, 30);
+        assert_eq!(MAX_CHECKPOINT_TIMEOUT_SECONDS, 600);
+        assert_eq!(MIN_CHECKPOINT_TIMEOUT_SECONDS, 1);
+        assert_eq!(MAX_EXPONENTIAL_BACKOFF_SECONDS, 600);
+        assert_eq!(FORCED_CONTEXT_REDUCTION_PERCENT, 75);
+        assert_eq!(MAX_CONTEXT_WINDOW_RETRIES, 3);
     }
 }

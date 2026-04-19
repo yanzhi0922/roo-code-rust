@@ -116,6 +116,8 @@ pub trait McpTransport: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Stdio transport using a child process with stdin/stdout pipes.
+///
+/// Captures stderr output from the child process for debugging purposes.
 pub struct StdioTransport {
     command: String,
     args: Vec<String>,
@@ -126,6 +128,10 @@ pub struct StdioTransport {
     // We use a simple approach: write to stdin, read from stdout line by line
     stdin_writer: Option<tokio::process::ChildStdin>,
     stdout_reader: Option<BufReader<tokio::process::ChildStdout>>,
+    /// Channel for stderr lines captured from the child process.
+    stderr_rx: Option<mpsc::Receiver<String>>,
+    /// Join handle for the stderr reader task.
+    stderr_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl StdioTransport {
@@ -145,7 +151,30 @@ impl StdioTransport {
             connected: false,
             stdin_writer: None,
             stdout_reader: None,
+            stderr_rx: None,
+            stderr_handle: None,
         }
+    }
+
+    /// Read a line from the child process stderr (non-blocking).
+    ///
+    /// Returns `Some(line)` if a line is available, `None` if no data is
+    /// currently available or the stderr stream has ended.
+    pub fn try_read_stderr(&mut self) -> Option<String> {
+        if let Some(rx) = self.stderr_rx.as_mut() {
+            rx.try_recv().ok()
+        } else {
+            None
+        }
+    }
+
+    /// Read all available stderr lines.
+    pub fn read_all_stderr(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        while let Some(line) = self.try_read_stderr() {
+            lines.push(line);
+        }
+        lines
     }
 }
 
@@ -196,9 +225,28 @@ impl McpTransport for StdioTransport {
         let stdout = child.stdout.take().ok_or_else(|| {
             McpError::ConnectionFailed("Failed to open stdout pipe".to_string())
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            McpError::ConnectionFailed("Failed to open stderr pipe".to_string())
+        })?;
+
+        // Spawn a background task to read stderr lines and forward them to a channel
+        let (stderr_tx, stderr_rx) = mpsc::channel::<String>(100);
+        let stderr_handle = tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "mcp::stderr", "stderr: {}", line);
+                if stderr_tx.send(line).await.is_err() {
+                    // Receiver dropped
+                    break;
+                }
+            }
+        });
 
         self.stdin_writer = Some(stdin);
         self.stdout_reader = Some(BufReader::new(stdout));
+        self.stderr_rx = Some(stderr_rx);
+        self.stderr_handle = Some(stderr_handle);
         self.child = Some(child);
         self.connected = true;
 
@@ -212,8 +260,12 @@ impl McpTransport for StdioTransport {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
+        if let Some(handle) = self.stderr_handle.take() {
+            handle.abort();
+        }
         self.stdin_writer = None;
         self.stdout_reader = None;
+        self.stderr_rx = None;
         self.child = None;
         self.connected = false;
         tracing::info!("Stdio transport closed");
@@ -299,9 +351,16 @@ impl Drop for StdioTransport {
 // SseTransport
 // ---------------------------------------------------------------------------
 
+/// Default maximum number of reconnection attempts for SSE transport.
+const SSE_DEFAULT_MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
+/// Default initial reconnect delay in milliseconds.
+const SSE_DEFAULT_INITIAL_RECONNECT_DELAY_MS: u64 = 1000;
+
 /// SSE (Server-Sent Events) transport.
 ///
 /// Uses HTTP POST for sending and SSE for receiving.
+/// Supports automatic reconnection with exponential backoff.
 pub struct SseTransport {
     url: String,
     headers: HashMap<String, String>,
@@ -313,6 +372,10 @@ pub struct SseTransport {
     sse_endpoint: Option<String>,
     // Join handle for the SSE listener task
     listener_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Maximum number of reconnection attempts before giving up.
+    max_reconnect_attempts: u32,
+    /// Initial delay before reconnecting (milliseconds).
+    initial_reconnect_delay_ms: u64,
 }
 
 impl SseTransport {
@@ -326,6 +389,28 @@ impl SseTransport {
             message_rx: None,
             sse_endpoint: None,
             listener_handle: None,
+            max_reconnect_attempts: SSE_DEFAULT_MAX_RECONNECT_ATTEMPTS,
+            initial_reconnect_delay_ms: SSE_DEFAULT_INITIAL_RECONNECT_DELAY_MS,
+        }
+    }
+
+    /// Create a new SSE transport with custom reconnection settings.
+    pub fn with_reconnect_settings(
+        url: String,
+        headers: HashMap<String, String>,
+        max_reconnect_attempts: u32,
+        initial_reconnect_delay_ms: u64,
+    ) -> Self {
+        Self {
+            url,
+            headers,
+            http_client: reqwest::Client::new(),
+            connected: false,
+            message_rx: None,
+            sse_endpoint: None,
+            listener_handle: None,
+            max_reconnect_attempts,
+            initial_reconnect_delay_ms,
         }
     }
 }
@@ -342,10 +427,21 @@ impl McpTransport for SseTransport {
 
         let client = self.http_client.clone();
         let headers = self.headers.clone();
+        let max_reconnect = self.max_reconnect_attempts;
+        let initial_delay = self.initial_reconnect_delay_ms;
 
         // Start SSE listener in background
         let handle = tokio::spawn(async move {
-            if let Err(e) = Self::listen_sse(client, &sse_url, &headers, tx).await {
+            if let Err(e) = Self::listen_sse_with_reconnect(
+                client,
+                &sse_url,
+                &headers,
+                tx,
+                max_reconnect,
+                initial_delay,
+            )
+            .await
+            {
                 tracing::error!("SSE listener error: {}", e);
             }
         });
@@ -415,12 +511,77 @@ impl McpTransport for SseTransport {
 }
 
 impl SseTransport {
-    /// Listen to SSE events and forward JSON-RPC messages to the channel.
-    async fn listen_sse(
+    /// Listen to SSE events with automatic reconnection and exponential backoff.
+    ///
+    /// When the SSE stream ends or encounters an error, this method will
+    /// attempt to reconnect with exponential backoff up to `max_reconnect_attempts`
+    /// times before giving up.
+    async fn listen_sse_with_reconnect(
         client: reqwest::Client,
         url: &str,
         headers: &HashMap<String, String>,
         tx: mpsc::Sender<JsonRpcMessage>,
+        max_reconnect_attempts: u32,
+        initial_delay_ms: u64,
+    ) -> McpResult<()> {
+        let mut attempt = 0u32;
+
+        loop {
+            match Self::listen_sse_once(client.clone(), url, headers, &tx).await {
+                Ok(()) => {
+                    // Stream ended normally (EOF) — try to reconnect
+                    attempt += 1;
+                    if attempt > max_reconnect_attempts {
+                        tracing::warn!(
+                            "SSE stream ended. Max reconnect attempts ({}) reached.",
+                            max_reconnect_attempts
+                        );
+                        return Ok(());
+                    }
+
+                    let delay_ms = initial_delay_ms * 2u64.pow(attempt - 1);
+                    tracing::info!(
+                        "SSE stream ended. Reconnecting in {}ms (attempt {}/{})",
+                        delay_ms,
+                        attempt,
+                        max_reconnect_attempts
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt > max_reconnect_attempts {
+                        tracing::error!(
+                            "SSE error: {}. Max reconnect attempts ({}) reached.",
+                            e,
+                            max_reconnect_attempts
+                        );
+                        return Err(e);
+                    }
+
+                    let delay_ms = initial_delay_ms * 2u64.pow(attempt - 1);
+                    tracing::warn!(
+                        "SSE error: {}. Reconnecting in {}ms (attempt {}/{})",
+                        e,
+                        delay_ms,
+                        attempt,
+                        max_reconnect_attempts
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+
+    /// Listen to SSE events once (without reconnection).
+    ///
+    /// Returns `Ok(())` when the stream ends normally (EOF),
+    /// or `Err` on a fatal error.
+    async fn listen_sse_once(
+        client: reqwest::Client,
+        url: &str,
+        headers: &HashMap<String, String>,
+        tx: &mpsc::Sender<JsonRpcMessage>,
     ) -> McpResult<()> {
         let mut request = client.get(url);
         request = request.header("Accept", "text/event-stream");
@@ -448,21 +609,26 @@ impl SseTransport {
                         if let Ok(msg) = serde_json::from_str::<JsonRpcMessage>(&sse_event.data) {
                             if tx.send(msg).await.is_err() {
                                 // Receiver dropped
-                                break;
+                                return Ok(());
                             }
                         }
                     }
                 }
                 Err(e) => {
                     tracing::warn!("SSE event stream error: {}", e);
-                    // Attempt to reconnect after a delay
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // Return error to trigger reconnection
+                    return Err(McpError::TransportError(format!(
+                        "SSE event stream error: {}",
+                        e
+                    )));
                 }
             }
         }
 
+        // Stream ended normally (EOF)
         Ok(())
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -659,5 +825,62 @@ mod tests {
         assert_eq!(deserialized.jsonrpc, "2.0");
         assert_eq!(deserialized.id_as_u64(), Some(123));
         assert_eq!(deserialized.method.as_deref(), Some("tools/call"));
+    }
+
+    #[test]
+    fn test_stdio_transport_creation() {
+        let transport = StdioTransport::new(
+            "node".to_string(),
+            vec!["server.js".to_string()],
+            HashMap::new(),
+            None,
+        );
+        assert!(!transport.is_connected());
+        assert!(transport.stderr_rx.is_none());
+    }
+
+    #[test]
+    fn test_stdio_transport_stderr_initially_empty() {
+        let mut transport = StdioTransport::new(
+            "node".to_string(),
+            vec![],
+            HashMap::new(),
+            None,
+        );
+        // Not connected, so no stderr
+        assert!(transport.try_read_stderr().is_none());
+        assert!(transport.read_all_stderr().is_empty());
+    }
+
+    #[test]
+    fn test_sse_transport_creation() {
+        let transport = SseTransport::new(
+            "http://localhost:8080/sse".to_string(),
+            HashMap::new(),
+        );
+        assert!(!transport.is_connected());
+        assert_eq!(transport.max_reconnect_attempts, SSE_DEFAULT_MAX_RECONNECT_ATTEMPTS);
+        assert_eq!(transport.initial_reconnect_delay_ms, SSE_DEFAULT_INITIAL_RECONNECT_DELAY_MS);
+    }
+
+    #[test]
+    fn test_sse_transport_custom_reconnect_settings() {
+        let transport = SseTransport::with_reconnect_settings(
+            "http://localhost:8080/sse".to_string(),
+            HashMap::new(),
+            10,
+            2000,
+        );
+        assert_eq!(transport.max_reconnect_attempts, 10);
+        assert_eq!(transport.initial_reconnect_delay_ms, 2000);
+    }
+
+    #[test]
+    fn test_streamable_http_transport_creation() {
+        let transport = StreamableHttpTransport::new(
+            "http://localhost:8080/mcp".to_string(),
+            HashMap::new(),
+        );
+        assert!(!transport.is_connected());
     }
 }

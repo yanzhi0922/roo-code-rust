@@ -4,6 +4,7 @@
 //! Uses the Bedrock Converse API with SigV4 signing.
 //! Supports cross-region inference and custom model IDs.
 
+mod bedrock_events;
 mod handler;
 mod models;
 mod signing;

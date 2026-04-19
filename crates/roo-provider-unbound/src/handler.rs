@@ -1,4 +1,4 @@
-﻿//! Unbound provider handler.
+//! Unbound provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via Unbound.
 //! Supports custom metadata headers and cache token tracking.
@@ -82,14 +82,6 @@ impl Provider for UnboundHandler {
 
     fn get_model(&self) -> (String, ModelInfo) {
         self.inner.get_model()
-    }
-
-    async fn count_tokens(
-        &self,
-        content: &[roo_types::api::ContentBlock],
-    ) -> Result<u64, roo_provider::ProviderError> {
-        let _ = content;
-        Ok(0)
     }
 
     async fn complete_prompt(

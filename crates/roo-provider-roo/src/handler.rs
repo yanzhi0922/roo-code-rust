@@ -1,4 +1,4 @@
-﻿//! Roo Code Cloud provider handler.
+//! Roo Code Cloud provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via Roo Code Cloud.
 //! Supports session token authentication, dynamic model loading,
@@ -96,14 +96,6 @@ impl Provider for RooHandler {
 
     fn get_model(&self) -> (String, ModelInfo) {
         self.inner.get_model()
-    }
-
-    async fn count_tokens(
-        &self,
-        content: &[roo_types::api::ContentBlock],
-    ) -> Result<u64, roo_provider::ProviderError> {
-        let _ = content;
-        Ok(0)
     }
 
     async fn complete_prompt(

@@ -1,4 +1,4 @@
-﻿//! Requesty provider handler.
+//! Requesty provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API via Requesty router.
 //! Supports trace_id and mode tracking for observability.
@@ -89,14 +89,6 @@ impl Provider for RequestyHandler {
 
     fn get_model(&self) -> (String, ModelInfo) {
         self.inner.get_model()
-    }
-
-    async fn count_tokens(
-        &self,
-        content: &[roo_types::api::ContentBlock],
-    ) -> Result<u64, roo_provider::ProviderError> {
-        let _ = content;
-        Ok(0)
     }
 
     async fn complete_prompt(

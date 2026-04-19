@@ -520,11 +520,20 @@ pub struct GenerateImageParams {
 }
 
 /// Parameters for edit_file tool.
+///
+/// Source: `src/core/tools/EditFileTool.ts` — `EditFileParams`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditFileParams {
-    pub path: String,
-    pub diff: String,
+    /// The path to the file to modify or create.
+    pub file_path: String,
+    /// The exact literal text to replace. Use empty string to create a new file.
+    pub old_string: String,
+    /// The exact literal text to replace old_string with.
+    pub new_string: String,
+    /// Number of replacements expected. Defaults to 1.
+    #[serde(default)]
+    pub expected_replacements: Option<u32>,
 }
 
 /// Parameters for apply_patch tool.

@@ -1,13 +1,19 @@
 //! Task engine core logic.
 //!
 //! Provides [`TaskEngine`] which orchestrates the task lifecycle including
-//! state management, loop control, event emission, and result computation.
+//! state management, loop control, event emission, streaming state, and
+//! result computation.
+//!
+//! Source: `src/core/task/Task.ts` — Task class
 
-use crate::config::{self, validate_config};
+use crate::config::validate_config;
 use crate::events::TaskEventEmitter;
 use crate::loop_control::LoopControl;
 use crate::state::StateMachine;
-use crate::types::{TaskConfig, TaskError, TaskResult, TaskState};
+use crate::types::{
+    StreamingState, TaskConfig, TaskError, TaskResult, TaskState,
+    MAX_EXPONENTIAL_BACKOFF_SECONDS,
+};
 
 // ---------------------------------------------------------------------------
 // TaskEngine
@@ -16,12 +22,48 @@ use crate::types::{TaskConfig, TaskError, TaskResult, TaskState};
 /// The core task engine.
 ///
 /// Manages the task lifecycle: state transitions, loop control, event emission,
-/// and result aggregation.
+/// streaming state, and result aggregation.
+///
+/// Unlike the TypeScript `Task` class (a ~4700-line god object), this Rust
+/// implementation decomposes responsibilities into separate components:
+/// - [`StateMachine`] for state transitions
+/// - [`LoopControl`] for iteration and mistake limits
+/// - [`TaskEventEmitter`] for event-driven communication
+/// - [`StreamingState`] for API streaming state
+/// - [`TaskResult`] for result aggregation
+///
+/// The actual agent loop (API call → parse response → tool execution → loop)
+/// is coordinated at the application layer using these components.
 pub struct TaskEngine {
     config: TaskConfig,
     state_machine: StateMachine,
     loop_control: LoopControl,
+    streaming: StreamingState,
     result: TaskResult,
+    /// API conversation history (messages sent to/from the API).
+    ///
+    /// Source: `src/core/task/Task.ts` — `apiConversationHistory`
+    api_conversation_history: Vec<roo_types::api::ApiMessage>,
+    /// UI-facing conversation messages (ClineMessages).
+    ///
+    /// Source: `src/core/task/Task.ts` — `clineMessages`
+    cline_messages: Vec<roo_types::message::ClineMessage>,
+    /// Whether the task has been initialized.
+    ///
+    /// Source: `src/core/task/Task.ts` — `isInitialized`
+    is_initialized: bool,
+    /// Whether the task has been abandoned (for delegation).
+    ///
+    /// Source: `src/core/task/Task.ts` — `abandoned`
+    abandoned: bool,
+    /// Whether the task is paused.
+    ///
+    /// Source: `src/core/task/Task.ts` — `isPaused`
+    is_paused: bool,
+    /// Abort reason, if any.
+    ///
+    /// Source: `src/core/task/Task.ts` — `abortReason`
+    abort_reason: Option<String>,
 }
 
 impl TaskEngine {
@@ -31,15 +73,23 @@ impl TaskEngine {
 
         let max_iterations = config.max_iterations;
         let task_id = config.task_id.clone();
+        let consecutive_mistake_limit = config.consecutive_mistake_limit;
 
         Ok(Self {
             config,
             state_machine: StateMachine::new(),
             loop_control: LoopControl::with_max_iterations(
-                config::DEFAULT_MAX_MISTAKES,
+                consecutive_mistake_limit,
                 max_iterations.unwrap_or(usize::MAX),
             ),
+            streaming: StreamingState::new(),
             result: TaskResult::new(task_id, TaskState::Idle),
+            api_conversation_history: Vec::new(),
+            cline_messages: Vec::new(),
+            is_initialized: false,
+            abandoned: false,
+            is_paused: false,
+            abort_reason: None,
         })
     }
 
@@ -73,6 +123,89 @@ impl TaskEngine {
         &mut self.loop_control
     }
 
+    /// Get a reference to the streaming state.
+    ///
+    /// Source: `src/core/task/Task.ts` — streaming-related properties
+    pub fn streaming(&self) -> &StreamingState {
+        &self.streaming
+    }
+
+    /// Get a mutable reference to the streaming state.
+    pub fn streaming_mut(&mut self) -> &mut StreamingState {
+        &mut self.streaming
+    }
+
+    /// Get a reference to the API conversation history.
+    ///
+    /// Source: `src/core/task/Task.ts` — `apiConversationHistory`
+    pub fn api_conversation_history(&self) -> &[roo_types::api::ApiMessage] {
+        &self.api_conversation_history
+    }
+
+    /// Get a mutable reference to the API conversation history.
+    pub fn api_conversation_history_mut(&mut self) -> &mut Vec<roo_types::api::ApiMessage> {
+        &mut self.api_conversation_history
+    }
+
+    /// Add a message to the API conversation history.
+    ///
+    /// Source: `src/core/task/Task.ts` — `addToApiConversationHistory`
+    pub fn add_api_message(&mut self, message: roo_types::api::ApiMessage) {
+        self.api_conversation_history.push(message);
+    }
+
+    /// Set the API conversation history (e.g., when loading from persistence).
+    pub fn set_api_conversation_history(&mut self, history: Vec<roo_types::api::ApiMessage>) {
+        self.api_conversation_history = history;
+    }
+
+    /// Clear the API conversation history.
+    pub fn clear_api_conversation_history(&mut self) {
+        self.api_conversation_history.clear();
+    }
+
+    /// Get a reference to the cline messages (UI-facing messages).
+    ///
+    /// Source: `src/core/task/Task.ts` — `clineMessages`
+    pub fn cline_messages(&self) -> &[roo_types::message::ClineMessage] {
+        &self.cline_messages
+    }
+
+    /// Get a mutable reference to the cline messages.
+    pub fn cline_messages_mut(&mut self) -> &mut Vec<roo_types::message::ClineMessage> {
+        &mut self.cline_messages
+    }
+
+    /// Add a cline message.
+    pub fn add_cline_message(&mut self, message: roo_types::message::ClineMessage) {
+        self.cline_messages.push(message);
+    }
+
+    /// Check whether the task is initialized.
+    pub fn is_initialized(&self) -> bool {
+        self.is_initialized
+    }
+
+    /// Mark the task as initialized.
+    pub fn set_initialized(&mut self, initialized: bool) {
+        self.is_initialized = initialized;
+    }
+
+    /// Check whether the task has been abandoned.
+    pub fn is_abandoned(&self) -> bool {
+        self.abandoned
+    }
+
+    /// Mark the task as abandoned (for delegation).
+    pub fn set_abandoned(&mut self, abandoned: bool) {
+        self.abandoned = abandoned;
+    }
+
+    /// Get the abort reason.
+    pub fn abort_reason(&self) -> Option<&str> {
+        self.abort_reason.as_deref()
+    }
+
     /// Start the task.
     pub fn start(&mut self) -> Result<TaskState, TaskError> {
         let state = self.state_machine.start()?;
@@ -83,6 +216,7 @@ impl TaskEngine {
     /// Pause the task.
     pub fn pause(&mut self) -> Result<TaskState, TaskError> {
         let state = self.state_machine.pause()?;
+        self.is_paused = true;
         self.result.status = state;
         Ok(state)
     }
@@ -90,6 +224,7 @@ impl TaskEngine {
     /// Resume the task.
     pub fn resume(&mut self) -> Result<TaskState, TaskError> {
         let state = self.state_machine.resume()?;
+        self.is_paused = false;
         self.result.status = state;
         Ok(state)
     }
@@ -104,6 +239,19 @@ impl TaskEngine {
     /// Abort the task.
     pub fn abort(&mut self) -> Result<TaskState, TaskError> {
         self.loop_control.cancel();
+        self.abort_reason = Some("user_cancelled".to_string());
+        let state = self.state_machine.abort()?;
+        self.result.status = state;
+        Ok(state)
+    }
+
+    /// Abort the task with a specific reason.
+    ///
+    /// Source: `src/core/task/Task.ts` — `abortReason` can be various values
+    /// like "user_cancelled", "rate_limit_hit", "max_tokens_exceeded", etc.
+    pub fn abort_with_reason(&mut self, reason: &str) -> Result<TaskState, TaskError> {
+        self.loop_control.cancel();
+        self.abort_reason = Some(reason.to_string());
         let state = self.state_machine.abort()?;
         self.result.status = state;
         Ok(state)
@@ -169,6 +317,56 @@ impl TaskEngine {
         self.result.token_usage = usage;
     }
 
+    /// Prepare for a new API request by resetting streaming state.
+    ///
+    /// Source: `src/core/task/Task.ts` — streaming state reset block in
+    /// `recursivelyMakeClineRequests`
+    pub fn prepare_for_new_api_request(&mut self) {
+        self.streaming.reset_for_new_request();
+    }
+
+    /// Calculate exponential backoff delay for retry attempts.
+    ///
+    /// Returns the delay in milliseconds.
+    ///
+    /// Source: `src/core/task/Task.ts` — `MAX_EXPONENTIAL_BACKOFF_SECONDS`
+    pub fn calculate_backoff_delay(retry_attempt: u32) -> u64 {
+        let base_delay = 1000u64; // 1 second base
+        let delay = base_delay * 2u64.pow(retry_attempt);
+        delay.min(MAX_EXPONENTIAL_BACKOFF_SECONDS * 1000)
+    }
+
+    /// Resume the task after delegation.
+    ///
+    /// Clears ask states, resets abort/streaming flags, and prepares for
+    /// the next API call.
+    ///
+    /// Source: `src/core/task/Task.ts` — `resumeAfterDelegation`
+    pub fn resume_after_delegation(&mut self) -> Result<TaskState, TaskError> {
+        // Reset abort and streaming state
+        self.loop_control.reset_turn();
+        self.abandoned = false;
+        self.abort_reason = None;
+        self.is_paused = false;
+        self.streaming.reset_for_new_request();
+        self.streaming.did_finish_aborting_stream = false;
+        self.streaming.is_streaming = false;
+        self.streaming.is_waiting_for_first_chunk = false;
+
+        // Transition back to running
+        let state = self.state_machine.resume()?;
+        self.result.status = state;
+        self.is_initialized = true;
+        Ok(state)
+    }
+
+    /// Check whether the task is paused.
+    ///
+    /// Source: `src/core/task/Task.ts` — `isPaused`
+    pub fn is_paused(&self) -> bool {
+        self.is_paused
+    }
+
     /// Finalize the task and return the result.
     pub fn finalize(mut self) -> TaskResult {
         if self.state_machine.current() == TaskState::Running {
@@ -202,6 +400,10 @@ mod tests {
         let engine = make_engine();
         assert_eq!(engine.state(), TaskState::Idle);
         assert_eq!(engine.config().task_id, "test-task");
+        assert!(!engine.is_initialized());
+        assert!(!engine.is_abandoned());
+        assert!(engine.abort_reason().is_none());
+        assert!(engine.api_conversation_history().is_empty());
     }
 
     #[test]
@@ -236,6 +438,7 @@ mod tests {
         engine.abort().unwrap();
         assert_eq!(engine.state(), TaskState::Aborted);
         assert!(!engine.should_continue());
+        assert_eq!(engine.abort_reason(), Some("user_cancelled"));
     }
 
     #[test]
@@ -372,5 +575,236 @@ mod tests {
 
         engine.start().unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    // --- Streaming state tests ---
+
+    #[test]
+    fn test_engine_streaming_state() {
+        let mut engine = make_engine();
+        assert!(!engine.streaming().is_streaming);
+
+        engine.streaming_mut().is_streaming = true;
+        assert!(engine.streaming().is_streaming);
+    }
+
+    #[test]
+    fn test_engine_prepare_for_new_api_request() {
+        let mut engine = make_engine();
+        engine.streaming_mut().assistant_message_saved_to_history = true;
+        engine.streaming_mut().current_streaming_content_index = 5;
+        engine.streaming_mut().did_tool_fail_in_current_turn = true;
+
+        engine.prepare_for_new_api_request();
+
+        assert!(!engine.streaming().assistant_message_saved_to_history);
+        assert_eq!(engine.streaming().current_streaming_content_index, 0);
+        assert!(!engine.streaming().did_tool_fail_in_current_turn);
+    }
+
+    // --- API conversation history tests ---
+
+    #[test]
+    fn test_engine_api_conversation_history() {
+        let mut engine = make_engine();
+        assert!(engine.api_conversation_history().is_empty());
+
+        let msg = roo_types::api::ApiMessage {
+            role: roo_types::api::MessageRole::User,
+            content: vec![roo_types::api::ContentBlock::Text {
+                text: "Hello".to_string(),
+            }],
+            reasoning: None,
+            ts: Some(1000.0),
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        };
+
+        engine.add_api_message(msg.clone());
+        assert_eq!(engine.api_conversation_history().len(), 1);
+
+        engine.clear_api_conversation_history();
+        assert!(engine.api_conversation_history().is_empty());
+    }
+
+    #[test]
+    fn test_engine_set_api_conversation_history() {
+        let mut engine = make_engine();
+        let history = vec![
+            roo_types::api::ApiMessage {
+                role: roo_types::api::MessageRole::User,
+                content: vec![roo_types::api::ContentBlock::Text {
+                    text: "msg1".to_string(),
+                }],
+                reasoning: None,
+                ts: None,
+                truncation_parent: None,
+                is_truncation_marker: None,
+                truncation_id: None,
+                condense_parent: None,
+                is_summary: None,
+                condense_id: None,
+            },
+            roo_types::api::ApiMessage {
+                role: roo_types::api::MessageRole::Assistant,
+                content: vec![roo_types::api::ContentBlock::Text {
+                    text: "msg2".to_string(),
+                }],
+                reasoning: None,
+                ts: None,
+                truncation_parent: None,
+                is_truncation_marker: None,
+                truncation_id: None,
+                condense_parent: None,
+                is_summary: None,
+                condense_id: None,
+            },
+        ];
+
+        engine.set_api_conversation_history(history);
+        assert_eq!(engine.api_conversation_history().len(), 2);
+    }
+
+    // --- Initialization and abandonment tests ---
+
+    #[test]
+    fn test_engine_initialization() {
+        let mut engine = make_engine();
+        assert!(!engine.is_initialized());
+        engine.set_initialized(true);
+        assert!(engine.is_initialized());
+    }
+
+    #[test]
+    fn test_engine_abandonment() {
+        let mut engine = make_engine();
+        assert!(!engine.is_abandoned());
+        engine.set_abandoned(true);
+        assert!(engine.is_abandoned());
+    }
+
+    // --- Backoff calculation tests ---
+
+    #[test]
+    fn test_calculate_backoff_delay() {
+        assert_eq!(TaskEngine::calculate_backoff_delay(0), 1000); // 1s
+        assert_eq!(TaskEngine::calculate_backoff_delay(1), 2000); // 2s
+        assert_eq!(TaskEngine::calculate_backoff_delay(2), 4000); // 4s
+        assert_eq!(TaskEngine::calculate_backoff_delay(3), 8000); // 8s
+        assert_eq!(TaskEngine::calculate_backoff_delay(10), MAX_EXPONENTIAL_BACKOFF_SECONDS * 1000); // capped
+    }
+
+    // --- Resume after delegation tests ---
+
+    #[test]
+    fn test_engine_resume_after_delegation() {
+        let mut engine = make_engine();
+        engine.start().unwrap();
+        engine.pause().unwrap();
+
+        let state = engine.resume_after_delegation().unwrap();
+        assert_eq!(state, TaskState::Running);
+        assert!(engine.is_initialized());
+        assert!(!engine.is_abandoned());
+    }
+
+    // --- Mistake limit tests ---
+
+    #[test]
+    fn test_engine_mistake_limit_with_new_config() {
+        let mut engine = TaskEngine::new(
+            TaskConfig::new("test", "/tmp")
+                .with_mode("code")
+                .with_consecutive_mistake_limit(2),
+        )
+        .unwrap();
+
+        engine.start().unwrap();
+
+        // First mistake
+        engine.record_tool_execution("tool1", false);
+        assert!(engine.should_continue()); // 1 < 2
+
+        // Second mistake hits the limit (>= comparison)
+        engine.record_tool_execution("tool1", false);
+        assert!(!engine.should_continue()); // 2 >= 2 → STOP
+    }
+
+    // --- Cline messages tests ---
+
+    #[test]
+    fn test_engine_cline_messages() {
+        let mut engine = make_engine();
+        assert!(engine.cline_messages().is_empty());
+
+        let msg = roo_types::message::ClineMessage {
+            ts: 1700000000.0,
+            r#type: roo_types::message::MessageType::Say,
+            ask: None,
+            say: Some(roo_types::message::ClineSay::Text),
+            text: Some("Hello".to_string()),
+            images: None,
+            partial: None,
+            reasoning: None,
+            conversation_history_index: None,
+            checkpoint: None,
+            progress_status: None,
+            context_condense: None,
+            context_truncation: None,
+            is_protected: None,
+            api_protocol: None,
+            is_answered: None,
+        };
+
+        engine.add_cline_message(msg);
+        assert_eq!(engine.cline_messages().len(), 1);
+    }
+
+    // --- is_paused tests ---
+
+    #[test]
+    fn test_engine_is_paused() {
+        let mut engine = make_engine();
+        assert!(!engine.is_paused());
+
+        engine.start().unwrap();
+        assert!(!engine.is_paused());
+
+        engine.pause().unwrap();
+        assert!(engine.is_paused());
+
+        engine.resume().unwrap();
+        assert!(!engine.is_paused());
+    }
+
+    // --- abort_with_reason tests ---
+
+    #[test]
+    fn test_engine_abort_with_reason() {
+        let mut engine = make_engine();
+        engine.start().unwrap();
+
+        engine.abort_with_reason("rate_limit_hit").unwrap();
+        assert_eq!(engine.state(), TaskState::Aborted);
+        assert_eq!(engine.abort_reason(), Some("rate_limit_hit"));
+        assert!(!engine.should_continue());
+    }
+
+    // --- resume_after_delegation resets is_paused ---
+
+    #[test]
+    fn test_engine_resume_after_delegation_resets_paused() {
+        let mut engine = make_engine();
+        engine.start().unwrap();
+        engine.pause().unwrap();
+        assert!(engine.is_paused());
+
+        engine.resume_after_delegation().unwrap();
+        assert!(!engine.is_paused());
+        assert_eq!(engine.state(), TaskState::Running);
     }
 }
