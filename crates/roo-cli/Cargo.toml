@@ -1,0 +1,26 @@
+[package]
+name = "roo-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI interface for Roo Code Rust"
+
+[[bin]]
+name = "roo"
+path = "src/main.rs"
+
+[dependencies]
+roo-types = { path = "../roo-types" }
+roo-provider = { path = "../roo-provider" }
+roo-provider-anthropic = { path = "../roo-provider-anthropic" }
+roo-prompt = { path = "../roo-prompt" }
+roo-modes = { path = "../roo-modes" }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

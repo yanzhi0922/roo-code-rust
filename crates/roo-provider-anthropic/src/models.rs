@@ -13,7 +13,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
     m.insert(
         "claude-sonnet-4-20250514".to_string(),
         ModelInfo {
-            max_tokens: Some(16384),
+            max_tokens: Some(64000),
             context_window: 200000,
             supports_images: Some(true),
             supports_prompt_cache: true,
@@ -22,7 +22,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
             cache_writes_price: Some(3.75),
             cache_reads_price: Some(0.3),
             supports_reasoning_budget: Some(true),
-            max_thinking_tokens: Some(1024),
+            max_thinking_tokens: Some(10240),
             description: Some("Anthropic Claude Sonnet 4".to_string()),
             ..Default::default()
         },
@@ -31,7 +31,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
     m.insert(
         "claude-opus-4-20250514".to_string(),
         ModelInfo {
-            max_tokens: Some(16384),
+            max_tokens: Some(32000),
             context_window: 200000,
             supports_images: Some(true),
             supports_prompt_cache: true,
@@ -40,7 +40,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
             cache_writes_price: Some(18.75),
             cache_reads_price: Some(1.5),
             supports_reasoning_budget: Some(true),
-            max_thinking_tokens: Some(1024),
+            max_thinking_tokens: Some(10240),
             description: Some("Anthropic Claude Opus 4".to_string()),
             ..Default::default()
         },
@@ -58,7 +58,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
             cache_writes_price: Some(3.75),
             cache_reads_price: Some(0.3),
             supports_reasoning_budget: Some(true),
-            max_thinking_tokens: Some(1024),
+            max_thinking_tokens: Some(10240),
             description: Some("Anthropic Claude 3.7 Sonnet".to_string()),
             ..Default::default()
         },

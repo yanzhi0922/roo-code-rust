@@ -460,7 +460,7 @@ impl Provider for AnthropicHandler {
         _metadata: CreateMessageMetadata,
     ) -> Result<ApiStream> {
         let body = self.build_request_body(system_prompt, &messages, tools.as_ref());
-        let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
         let response = self
             .http_client
@@ -518,12 +518,37 @@ impl Provider for AnthropicHandler {
         &self,
         content: &[ContentBlock],
     ) -> Result<u64> {
-        let _ = content;
-        Ok(0)
+        // Simple estimation: ~4 characters per token (rough approximation)
+        let mut total_chars: usize = 0;
+        for block in content {
+            match block {
+                ContentBlock::Text { text } => total_chars += text.len(),
+                ContentBlock::ToolUse { input, name, .. } => {
+                    total_chars += name.len();
+                    total_chars += input.to_string().len();
+                }
+                ContentBlock::ToolResult { content: inner, .. } => {
+                    for c in inner {
+                        match c {
+                            roo_types::api::ToolResultContent::Text { text } => {
+                                total_chars += text.len();
+                            }
+                            roo_types::api::ToolResultContent::Image { .. } => {
+                                total_chars += 256; // rough estimate for image token count
+                            }
+                        }
+                    }
+                }
+                ContentBlock::Thinking { thinking, .. } => total_chars += thinking.len(),
+                ContentBlock::Image { .. } => total_chars += 256,
+                ContentBlock::RedactedThinking { data } => total_chars += data.len(),
+            }
+        }
+        Ok(((total_chars as f64) / 4.0).ceil() as u64)
     }
 
     async fn complete_prompt(&self, prompt: &str) -> Result<String> {
-        let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let max_tokens = self.model_info.max_tokens.unwrap_or(8192);
 
         let body = json!({
@@ -604,7 +629,7 @@ mod tests {
     fn test_config_default_url() {
         assert_eq!(
             AnthropicConfig::DEFAULT_BASE_URL,
-            "https://api.anthropic.com/v1"
+            "https://api.anthropic.com"
         );
     }
 
@@ -811,5 +836,65 @@ mod tests {
             }
             _ => panic!("Expected Usage chunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_count_tokens_estimation() {
+        let config = AnthropicConfig {
+            api_key: "sk-ant-test".to_string(),
+            base_url: AnthropicConfig::DEFAULT_BASE_URL.to_string(),
+            model_id: None,
+            temperature: None,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+            request_timeout: None,
+        };
+        let handler = AnthropicHandler::new(config).unwrap();
+
+        let content = vec![ContentBlock::Text {
+            text: "Hello, world!".to_string(),
+        }];
+        let tokens = handler.count_tokens(&content).await.unwrap();
+        // "Hello, world!" = 13 chars → ceil(13/4) = 4 tokens
+        assert_eq!(tokens, 4);
+
+        // Empty content
+        let empty: Vec<ContentBlock> = vec![];
+        let tokens = handler.count_tokens(&empty).await.unwrap();
+        assert_eq!(tokens, 0);
+
+        // Mixed content blocks
+        let mixed = vec![
+            ContentBlock::Text {
+                text: "abc".to_string(),
+            },
+            ContentBlock::Image {
+                source: roo_types::api::ImageSource::Url {
+                    url: "http://example.com/img.png".to_string(),
+                },
+            },
+        ];
+        let tokens = handler.count_tokens(&mixed).await.unwrap();
+        // "abc" = 3 chars + image estimate 256 = 259 → ceil(259/4) = 65
+        assert_eq!(tokens, 65);
+    }
+
+    #[test]
+    fn test_build_request_body_url() {
+        // Verify the URL construction uses /v1/messages
+        let config = AnthropicConfig {
+            api_key: "sk-ant-test".to_string(),
+            base_url: "https://api.minimaxi.com/anthropic".to_string(),
+            model_id: Some("minimax-m2.7".to_string()),
+            temperature: None,
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
+            request_timeout: None,
+        };
+        let handler = AnthropicHandler::new(config).unwrap();
+        let (model_id, _) = handler.get_model();
+        assert_eq!(model_id, "minimax-m2.7");
+        // The handler uses unknown model, so it gets fallback ModelInfo
+        assert!(handler.model_info.max_tokens.unwrap_or(0) > 0);
     }
 }

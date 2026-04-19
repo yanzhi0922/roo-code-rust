@@ -24,7 +24,7 @@ pub struct AnthropicConfig {
 
 impl AnthropicConfig {
     /// Default Anthropic API base URL.
-    pub const DEFAULT_BASE_URL: &'static str = "https://api.anthropic.com/v1";
+    pub const DEFAULT_BASE_URL: &'static str = "https://api.anthropic.com";
 
     /// Create configuration from provider settings.
     pub fn from_settings(settings: &ProviderSettings) -> Option<Self> {

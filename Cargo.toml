@@ -66,6 +66,7 @@ members = [
     "crates/roo-auto-approval",
     "crates/roo-app",
     "crates/roo-server",
+    "crates/roo-cli",
 ]
 
 [workspace.package]

@@ -321,97 +321,87 @@ impl Provider for OpenAiCompatibleProvider {
         let (_, model_info) = self.base.get_model();
 
         // Process the stream into ApiStreamChunks
-        let active_tool_call_ids: HashSet<String> = HashSet::new();
+        let mut active_tool_call_ids: HashSet<String> = HashSet::new();
         let model_info = model_info.clone();
 
-        let processed = stream.filter_map(move |chunk_result| {
-            let model_info = model_info.clone();
-            let mut active_tool_call_ids = active_tool_call_ids.clone();
+        let processed = stream.flat_map(move |chunk_result| {
+            let results: Vec<Result<ApiStreamChunk>> = match chunk_result {
+                Ok(chunk) => {
+                    let delta = chunk.choices.as_ref().and_then(|c| c.first()).and_then(|c| c.delta.as_ref());
+                    let finish_reason = chunk
+                        .choices
+                        .as_ref()
+                        .and_then(|c| c.first())
+                        .and_then(|c| c.finish_reason.as_ref())
+                        .cloned();
 
-            async move {
-                let chunk = match chunk_result {
-                    Ok(c) => c,
-                    Err(e) => return Some(Err(e)),
-                };
+                    let mut results: Vec<Result<ApiStreamChunk>> = Vec::new();
 
-                let delta = chunk.choices.as_ref().and_then(|c| c.first()).and_then(|c| c.delta.as_ref());
-                let finish_reason = chunk
-                    .choices
-                    .as_ref()
-                    .and_then(|c| c.first())
-                    .and_then(|c| c.finish_reason.as_ref())
-                    .cloned();
-
-                let mut results: Vec<Result<ApiStreamChunk>> = Vec::new();
-
-                // Handle content
-                if let Some(delta) = delta {
-                    if let Some(ref content) = delta.content {
-                        results.push(Ok(ApiStreamChunk::Text {
-                            text: content.clone(),
-                        }));
-                    }
-
-                    // Handle reasoning content
-                    if let Some(ref reasoning) = delta.reasoning_content {
-                        if !reasoning.trim().is_empty() {
-                            results.push(Ok(ApiStreamChunk::Reasoning {
-                                text: reasoning.clone(),
-                                signature: None,
+                    // Handle content
+                    if let Some(delta) = delta {
+                        if let Some(ref content) = delta.content {
+                            results.push(Ok(ApiStreamChunk::Text {
+                                text: content.clone(),
                             }));
                         }
-                    } else if let Some(ref reasoning) = delta.reasoning {
-                        if !reasoning.trim().is_empty() {
-                            results.push(Ok(ApiStreamChunk::Reasoning {
-                                text: reasoning.clone(),
-                                signature: None,
-                            }));
-                        }
-                    }
 
-                    // Handle tool calls
-                    if let Some(ref tool_calls) = delta.tool_calls {
-                        for tool_call in tool_calls {
-                            if let Some(ref id) = tool_call.id {
-                                active_tool_call_ids.insert(id.clone());
+                        // Handle reasoning content
+                        if let Some(ref reasoning) = delta.reasoning_content {
+                            if !reasoning.trim().is_empty() {
+                                results.push(Ok(ApiStreamChunk::Reasoning {
+                                    text: reasoning.clone(),
+                                    signature: None,
+                                }));
                             }
-                            results.push(Ok(ApiStreamChunk::ToolCallPartial {
-                                index: tool_call.index,
-                                id: tool_call.id.clone(),
-                                name: tool_call
-                                    .function
-                                    .as_ref()
-                                    .and_then(|f| f.name.clone()),
-                                arguments: tool_call
-                                    .function
-                                    .as_ref()
-                                    .and_then(|f| f.arguments.clone()),
-                            }));
+                        } else if let Some(ref reasoning) = delta.reasoning {
+                            if !reasoning.trim().is_empty() {
+                                results.push(Ok(ApiStreamChunk::Reasoning {
+                                    text: reasoning.clone(),
+                                    signature: None,
+                                }));
+                            }
+                        }
+
+                        // Handle tool calls
+                        if let Some(ref tool_calls) = delta.tool_calls {
+                            for tool_call in tool_calls {
+                                if let Some(ref id) = tool_call.id {
+                                    active_tool_call_ids.insert(id.clone());
+                                }
+                                results.push(Ok(ApiStreamChunk::ToolCallPartial {
+                                    index: tool_call.index,
+                                    id: tool_call.id.clone(),
+                                    name: tool_call
+                                        .function
+                                        .as_ref()
+                                        .and_then(|f| f.name.clone()),
+                                    arguments: tool_call
+                                        .function
+                                        .as_ref()
+                                        .and_then(|f| f.arguments.clone()),
+                                }));
+                            }
                         }
                     }
-                }
 
-                // Emit tool_call_end events when finish_reason is "tool_calls"
-                if finish_reason.as_deref() == Some("tool_calls") && !active_tool_call_ids.is_empty() {
-                    for id in &active_tool_call_ids {
-                        results.push(Ok(ApiStreamChunk::ToolCallEnd { id: id.clone() }));
+                    // Emit tool_call_end events when finish_reason is "tool_calls"
+                    if finish_reason.as_deref() == Some("tool_calls") && !active_tool_call_ids.is_empty() {
+                        for id in active_tool_call_ids.drain() {
+                            results.push(Ok(ApiStreamChunk::ToolCallEnd { id }));
+                        }
                     }
-                    active_tool_call_ids.clear();
-                }
 
-                // Handle usage
-                if let Some(ref usage) = chunk.usage {
-                    results.push(Ok(process_usage_metrics(usage, &model_info)));
-                }
+                    // Handle usage
+                    if let Some(ref usage) = chunk.usage {
+                        results.push(Ok(process_usage_metrics(usage, &model_info)));
+                    }
 
-                if results.is_empty() {
-                    None
-                } else {
-                    // Return the first result; remaining would need a different approach
-                    // For simplicity, we yield each as a separate stream item
-                    results.into_iter().next()
+                    results
                 }
-            }
+                Err(e) => vec![Err(e)],
+            };
+
+            futures::stream::iter(results)
         });
 
         Ok(Box::pin(processed))
