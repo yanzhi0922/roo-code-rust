@@ -526,6 +526,29 @@ async fn collect_stream(
         }
     }
 
+    // Deduplicate tool call IDs — some providers (e.g. MiniMax) may return
+    // multiple tool calls with the same ID. Append a suffix to duplicates so
+    // that subsequent API calls don't fail with "duplicate tool_call id".
+    {
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for tc in &mut tool_calls {
+            if seen_ids.contains(&tc.id) {
+                let original_id = tc.id.clone();
+                let mut suffix = 2u32;
+                loop {
+                    let new_id = format!("{}_dedup{}", original_id, suffix);
+                    if !seen_ids.contains(&new_id) {
+                        tc.id = new_id;
+                        break;
+                    }
+                    suffix += 1;
+                }
+                eprintln!("\n\x1b[33m[warn] deduplicated tool call id: {} -> {}\x1b[0m", original_id, tc.id);
+            }
+            seen_ids.insert(tc.id.clone());
+        }
+    }
+
     Ok((collected_text, tool_calls))
 }
 
