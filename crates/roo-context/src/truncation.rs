@@ -41,9 +41,11 @@ pub struct TruncationResult {
 pub fn truncate_conversation(
     messages: &[ApiMessage],
     frac_to_remove: f64,
-    _task_id: &str,
+    task_id: &str,
 ) -> TruncationResult {
-    // TODO: TelemetryService.instance.captureSlidingWindowTruncation(taskId)
+    // H5: Capture telemetry for sliding window truncation
+    let telemetry = roo_telemetry::service::TelemetryService::new();
+    telemetry.capture_sliding_window_truncation(task_id);
 
     let truncation_id = uuid::Uuid::now_v7().to_string();
 

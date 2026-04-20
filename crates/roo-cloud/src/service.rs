@@ -21,23 +21,69 @@ impl CloudService {
         }
     }
 
-    /// Simulate a login by transitioning to an active session.
+    /// Attempt to log in by sending an authentication request to the given
+    /// API endpoint.
     ///
-    /// In a real implementation this would interact with an OAuth flow.
-    pub fn login(&mut self) -> Result<(), CloudError> {
+    /// If no endpoint is provided or the endpoint is unreachable, returns a
+    /// meaningful error instead of falling back to simulated data.
+    pub async fn login(
+        &mut self,
+        api_endpoint: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<(), CloudError> {
         self.auth_state = AuthState::AttemptingSession;
 
-        // Simulate successful authentication
+        let endpoint = api_endpoint.unwrap_or("https://api.roocode.com/v1/auth/session");
+
+        let client = reqwest::Client::new();
+        let mut request = client.get(endpoint);
+
+        if let Some(t) = token {
+            request = request.bearer_auth(t);
+        }
+
+        let response = request.send().await.map_err(|e| {
+            self.auth_state = AuthState::LoggedOut;
+            CloudError::NetworkError(format!(
+                "Failed to reach authentication endpoint '{}': {}",
+                endpoint, e
+            ))
+        })?;
+
+        if !response.status().is_success() {
+            self.auth_state = AuthState::LoggedOut;
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CloudError::AuthenticationFailed(format!(
+                "Authentication endpoint returned {}: {}",
+                status, body
+            )));
+        }
+
+        let user_data: serde_json::Value = response.json().await.map_err(|e| {
+            self.auth_state = AuthState::LoggedOut;
+            CloudError::SerializationError(format!("Failed to parse auth response: {}", e))
+        })?;
+
+        // Parse user info from response
+        let user_info = CloudUserInfo {
+            id: user_data["id"].as_str().unwrap_or_default().to_string(),
+            email: user_data["email"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            name: user_data["name"].as_str().unwrap_or_default().to_string(),
+            avatar_url: user_data["avatarUrl"].as_str().map(|s| s.to_string()),
+        };
+
         self.auth_state = AuthState::ActiveSession;
-        self.user_info = Some(CloudUserInfo {
-            id: "simulated-user-id".to_string(),
-            email: "user@example.com".to_string(),
-            name: "Simulated User".to_string(),
-            avatar_url: None,
-        });
+        self.user_info = Some(user_info);
         self.user_settings = Some(UserSettings {
-            task_sync_enabled: true,
-            telemetry_setting: "enabled".to_string(),
+            task_sync_enabled: user_data["taskSyncEnabled"].as_bool().unwrap_or(true),
+            telemetry_setting: user_data["telemetrySetting"]
+                .as_str()
+                .unwrap_or("enabled")
+                .to_string(),
         });
 
         Ok(())
@@ -141,28 +187,51 @@ mod tests {
         assert_eq!(AuthState::LoggedOut, *svc.get_auth_state());
     }
 
-    #[test]
-    fn test_login_success() {
+    /// Helper to simulate a logged-in state without making real HTTP calls.
+    fn simulate_login(svc: &mut CloudService) {
+        svc.set_auth_state(AuthState::ActiveSession);
+        svc.set_user_info(CloudUserInfo {
+            id: "test-user-id".to_string(),
+            email: "test@example.com".to_string(),
+            name: "Test User".to_string(),
+            avatar_url: None,
+        });
+        svc.set_user_settings(UserSettings {
+            task_sync_enabled: true,
+            telemetry_setting: "enabled".to_string(),
+        });
+    }
+
+    #[tokio::test]
+    async fn test_login_network_error() {
         let mut svc = CloudService::new();
-        let result = svc.login();
-        assert!(result.is_ok());
+        // Using an unreachable endpoint to verify error handling
+        let result = svc.login(Some("http://127.0.0.1:1/nonexistent"), None).await;
+        assert!(result.is_err());
+        assert!(!svc.is_authenticated());
+    }
+
+    #[test]
+    fn test_simulated_login_success() {
+        let mut svc = CloudService::new();
+        simulate_login(&mut svc);
         assert!(svc.is_authenticated());
         assert_eq!(AuthState::ActiveSession, *svc.get_auth_state());
     }
 
     #[test]
-    fn test_login_sets_user_info() {
+    fn test_simulated_login_sets_user_info() {
         let mut svc = CloudService::new();
-        svc.login().unwrap();
+        simulate_login(&mut svc);
         let info = svc.get_user_info().unwrap();
-        assert_eq!("simulated-user-id", info.id);
-        assert_eq!("user@example.com", info.email);
+        assert_eq!("test-user-id", info.id);
+        assert_eq!("test@example.com", info.email);
     }
 
     #[test]
     fn test_logout_success() {
         let mut svc = CloudService::new();
-        svc.login().unwrap();
+        simulate_login(&mut svc);
         let result = svc.logout();
         assert!(result.is_ok());
         assert!(!svc.is_authenticated());
@@ -179,7 +248,7 @@ mod tests {
     #[test]
     fn test_logout_clears_org() {
         let mut svc = CloudService::new();
-        svc.login().unwrap();
+        simulate_login(&mut svc);
         svc.set_organization_id("org-1".to_string());
         svc.logout().unwrap();
         assert!(svc.get_organization_id().is_none());
@@ -189,7 +258,7 @@ mod tests {
     fn test_is_authenticated_after_login() {
         let mut svc = CloudService::new();
         assert!(!svc.is_authenticated());
-        svc.login().unwrap();
+        simulate_login(&mut svc);
         assert!(svc.is_authenticated());
     }
 
@@ -237,7 +306,7 @@ mod tests {
     #[test]
     fn test_is_task_sync_enabled_after_login() {
         let mut svc = CloudService::new();
-        svc.login().unwrap();
+        simulate_login(&mut svc);
         assert!(svc.is_task_sync_enabled());
     }
 
@@ -274,7 +343,7 @@ mod tests {
         let mut svc = CloudService::new();
         assert!(!svc.is_authenticated());
 
-        svc.login().unwrap();
+        simulate_login(&mut svc);
         assert!(svc.is_authenticated());
         assert!(svc.get_user_info().is_some());
 

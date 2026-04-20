@@ -50,14 +50,11 @@ pub fn check_todo_guard(todos: &[TodoItem]) -> Option<String> {
 /// Emit a telemetry event for task completion.
 ///
 /// In the TS source, this calls `TelemetryService.instance.captureTaskCompleted(task.taskId)`.
-/// In Rust, this is a stub that records the event. When `roo-telemetry` is integrated,
-/// this should forward to the telemetry service.
-///
-/// TODO: Integrate with `roo-telemetry` crate when available.
-pub fn emit_task_completed_event(_task_id: &str) {
-    // Stub: no-op. Replace with actual telemetry integration when roo-telemetry is available.
-    // In production, this would call something like:
-    //   TelemetryService::instance().capture_task_completed(task_id);
+/// H4: Now integrated with `roo-telemetry` crate. Creates a telemetry service
+/// and captures the task completed event.
+pub fn emit_task_completed_event(task_id: &str) {
+    let service = roo_telemetry::service::TelemetryService::new();
+    service.capture_task_completed(task_id);
 }
 
 /// Process an attempt_completion request.

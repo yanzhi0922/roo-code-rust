@@ -15,6 +15,13 @@ roo-mcp = { path = "../roo-mcp" }
 roo-tools-search = { path = "../roo-tools-search" }
 roo-task = { path = "../roo-task" }
 roo-task-persistence = { path = "../roo-task-persistence" }
+roo-condense = { path = "../roo-condense" }
+roo-checkpoint = { path = "../roo-checkpoint" }
+roo-command = { path = "../roo-command" }
+roo-terminal = { path = "../roo-terminal" }
+roo-telemetry = { path = "../roo-telemetry" }
+roo-provider = { path = "../roo-provider" }
+roo-message-queue = { path = "../roo-message-queue" }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -139,6 +139,20 @@ impl TelemetryService {
         self.capture_event(TelemetryEventName::ToolUsed, Some(props));
     }
 
+    /// Capture a sliding window truncation event.
+    pub fn capture_sliding_window_truncation(&self, task_id: &str) {
+        let mut props = HashMap::new();
+        props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        self.capture_event(TelemetryEventName::SlidingWindowTruncation, Some(props));
+    }
+
+    /// Capture a context condensed event.
+    pub fn capture_context_condensed(&self, task_id: &str) {
+        let mut props = HashMap::new();
+        props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        self.capture_event(TelemetryEventName::ContextCondensed, Some(props));
+    }
+
     /// Check if telemetry is enabled on any client.
     pub fn is_telemetry_enabled(&self) -> bool {
         self.is_ready() && self.clients.iter().any(|c| c.is_telemetry_enabled())

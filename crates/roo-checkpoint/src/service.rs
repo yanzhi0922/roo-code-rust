@@ -403,13 +403,20 @@ impl ShadowCheckpointService {
         self.checkpoints.push(to_hash.clone());
         let duration_ms = start.elapsed().as_millis() as u64;
 
+        // Compute real insertions/deletions from diff stats.
+        let diff_stats = diff
+            .stats()
+            .map_err(|e| CheckpointError::GitError(e.message().to_string()))?;
+        let insertions = diff_stats.insertions();
+        let deletions = diff_stats.deletions();
+
         let result = CheckpointResult {
             commit: to_hash.clone(),
             branch: None,
             summary: Some(CommitSummary {
                 changes: diff.deltas().len(),
-                insertions: 0, // TODO: detailed stats
-                deletions: 0,  // TODO: detailed stats
+                insertions,
+                deletions,
             }),
         };
 

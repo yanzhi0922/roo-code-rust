@@ -175,8 +175,10 @@ pub async fn summarize_conversation(
     let mut messages_with_tool_results = inject_synthetic_tool_results(&messages_to_summarize);
     messages_with_tool_results.push(final_request_message);
 
-    // TODO: maybeRemoveImageBlocks — remove image blocks based on provider capabilities
-    // For now, we skip this step as it requires provider model info
+    // Remove image blocks if the provider's model does not support images.
+    let (_, model_info) = api_handler.get_model();
+    let messages_with_tool_results =
+        roo_provider::transform::maybe_remove_image_blocks(messages_with_tool_results, &model_info);
 
     // Transform tool_use and tool_result blocks to text representations.
     let messages_with_text_tool_blocks =
@@ -273,9 +275,56 @@ pub async fn summarize_conversation(
         });
     }
 
-    // TODO: Generate and add folded file context (smart code folding)
-    // This requires the generateFoldedFileContext function which depends on tree-sitter
-    // For now, we skip this step
+    // Generate simplified folded file context.
+    // A full implementation would use tree-sitter for smart code folding;
+    // this simplified version reads the first N lines of referenced files.
+    if let Some(ref file_paths) = files_read_by_roo {
+        if !file_paths.is_empty() {
+            const MAX_LINES_PER_FILE: usize = 20;
+            let mut file_contexts = Vec::new();
+
+            for file_path in file_paths.iter().take(10) {
+                let resolved = if let Some(ref workdir) = cwd {
+                    std::path::Path::new(workdir).join(file_path)
+                } else {
+                    std::path::PathBuf::from(file_path)
+                };
+
+                match std::fs::read_to_string(&resolved) {
+                    Ok(content) => {
+                        let lines: Vec<&str> = content.lines().take(MAX_LINES_PER_FILE).collect();
+                        let total_lines = content.lines().count();
+                        let preview = lines.join("\n");
+                        let suffix = if total_lines > MAX_LINES_PER_FILE {
+                            format!(
+                                "\n... ({} more lines)",
+                                total_lines - MAX_LINES_PER_FILE
+                            )
+                        } else {
+                            String::new()
+                        };
+                        file_contexts.push(format!("### {file_path}\n```\n{preview}{suffix}\n```"));
+                    }
+                    Err(_) => {
+                        // File may no longer exist; skip silently.
+                    }
+                }
+            }
+
+            if !file_contexts.is_empty() {
+                summary_content.push(ContentBlock::Text {
+                    text: format!(
+                        "<system-reminder>\n\
+                         ## File Context\n\
+                         Key files referenced during the conversation:\n\
+                         {}\n\
+                         </system-reminder>",
+                        file_contexts.join("\n\n")
+                    ),
+                });
+            }
+        }
+    }
     let _ = (files_read_by_roo, cwd);
 
     // Add environment details as a separate text block if provided AND this is an automatic trigger

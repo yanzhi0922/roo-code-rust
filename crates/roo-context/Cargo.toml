@@ -10,6 +10,7 @@ description = "Context management for Roo Code Rust"
 roo-types = { workspace = true }
 roo-condense = { workspace = true }
 roo-provider = { workspace = true }
+roo-telemetry = { path = "../roo-telemetry" }
 tokio = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }

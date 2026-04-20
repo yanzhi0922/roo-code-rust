@@ -28,6 +28,7 @@ pub mod stream_parser;
 pub mod tool_dispatcher;
 pub mod message_builder;
 pub mod agent_loop;
+pub mod task_manager;
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -43,3 +44,4 @@ pub use stream_parser::{StreamParser, ParsedStreamContent, ParsedToolCall, Strea
 pub use tool_dispatcher::{ToolDispatcher, ToolExecutionResult, ToolContext, ToolHandler};
 pub use message_builder::MessageBuilder;
 pub use agent_loop::{AgentLoop, AgentLoopConfig};
+pub use task_manager::TaskManager;
