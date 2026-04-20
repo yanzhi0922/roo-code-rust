@@ -14,18 +14,120 @@ use crate::types::TaskState;
 // ---------------------------------------------------------------------------
 
 /// Events emitted during task execution.
+///
+/// Source: `src/core/task/Task.ts` — all `emit()` calls and `RooCodeEventName`
 #[derive(Debug, Clone)]
 pub enum TaskEvent {
+    // --- Message events ---
     /// A new message was created.
+    /// Source: TS `addToClineMessages()` → emit
     MessageCreated { message: ClineMessage },
     /// An existing message was updated.
+    /// Source: TS `updateClineMessage()` → emit
     MessageUpdated { message: ClineMessage },
     /// The task state changed.
+    /// Source: TS state transitions → emit
     StateChanged { from: TaskState, to: TaskState },
     /// A tool was executed.
+    /// Source: TS `executeTool()` → emit
     ToolExecuted { tool_name: String, success: bool },
     /// Token usage was updated.
+    /// Source: TS `recursivelyMakeClineRequests()` → debounced emit
     TokenUsageUpdated { usage: TokenUsage },
+
+    // --- Task lifecycle events ---
+    /// Task started.
+    /// Source: TS `initiateTaskLoop()` → `emit(RooCodeEventName.TaskStarted)`
+    TaskStarted { task_id: String },
+    /// Task completed (attempt_completion or no more tools).
+    /// Source: TS `attemptCompletion` flow
+    TaskCompleted { task_id: String },
+    /// Task aborted by user or error.
+    /// Source: TS `abortTask()` flow
+    TaskAborted { task_id: String, reason: Option<String> },
+    /// Task paused.
+    /// Source: TS `pause()` flow
+    TaskPaused { task_id: String },
+    /// Task resumed from pause.
+    /// Source: TS `resume()` flow
+    TaskResumed { task_id: String },
+    /// Task delegated to subtask.
+    /// Source: TS `startSubtask()` flow
+    TaskDelegated {
+        parent_task_id: String,
+        child_task_id: String,
+    },
+
+    // --- Interactive events ---
+    /// Task is waiting for user interaction.
+    /// Source: TS `ask()` → `emit(RooCodeEventName.TaskInteractive)`
+    TaskInteractive { task_id: String },
+    /// Task is idle and waiting for user input.
+    /// Source: TS `ask()` → `emit(RooCodeEventName.TaskIdle)`
+    TaskIdle { task_id: String },
+    /// Task is resumable (can be resumed from history).
+    /// Source: TS `ask()` → `emit(RooCodeEventName.TaskResumable)`
+    TaskResumable { task_id: String },
+
+    // --- API events ---
+    /// API request started.
+    /// Source: TS `recursivelyMakeClineRequests()` → `say("api_req_started")`
+    ApiRequestStarted { task_id: String },
+    /// API request finished.
+    /// Source: TS `recursivelyMakeClineRequests()` → update api_req_started
+    ApiRequestFinished {
+        task_id: String,
+        cost: Option<f64>,
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+    },
+
+    // --- Context events ---
+    /// Context condensation requested.
+    /// Source: TS `condenseContext()` → emit
+    ContextCondensationRequested { task_id: String },
+    /// Context condensation completed.
+    /// Source: TS `manageContext()` → after condense
+    ContextCondensationCompleted {
+        task_id: String,
+        messages_removed: usize,
+    },
+    /// Context truncation performed.
+    /// Source: TS `maybeTruncateMessages()` → emit
+    ContextTruncationPerformed {
+        task_id: String,
+        messages_removed: usize,
+    },
+
+    // --- Checkpoint events ---
+    /// Checkpoint saved.
+    /// Source: TS `checkpointSave()` → emit
+    CheckpointSaved {
+        task_id: String,
+        commit: Option<String>,
+    },
+    /// Checkpoint restored.
+    /// Source: TS `checkpointRestore()` → emit
+    CheckpointRestored { task_id: String },
+
+    // --- Subtask events ---
+    /// Subtask created.
+    /// Source: TS `startSubtask()` → emit
+    SubtaskCreated {
+        parent_task_id: String,
+        child_task_id: String,
+    },
+    /// Subtask completed.
+    /// Source: TS subtask completion flow
+    SubtaskCompleted {
+        parent_task_id: String,
+        child_task_id: String,
+    },
+
+    // --- Mode events ---
+    /// Mode switched.
+    /// Source: TS `switch_mode` tool → emit
+    ModeSwitched { task_id: String, mode: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -87,8 +189,165 @@ impl TaskEventEmitter {
         self.emit(&TaskEvent::TokenUsageUpdated { usage });
     }
 
+    // --- Task lifecycle emit methods ---
+
+    /// Emit a task started event.
+    pub fn emit_task_started(&self, task_id: &str) {
+        self.emit(&TaskEvent::TaskStarted {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    /// Emit a task completed event.
+    pub fn emit_task_completed(&self, task_id: &str) {
+        self.emit(&TaskEvent::TaskCompleted {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    /// Emit a task aborted event.
+    pub fn emit_task_aborted(&self, task_id: &str, reason: Option<String>) {
+        self.emit(&TaskEvent::TaskAborted {
+            task_id: task_id.to_string(),
+            reason,
+        });
+    }
+
+    /// Emit a task paused event.
+    pub fn emit_task_paused(&self, task_id: &str) {
+        self.emit(&TaskEvent::TaskPaused {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    /// Emit a task resumed event.
+    pub fn emit_task_resumed(&self, task_id: &str) {
+        self.emit(&TaskEvent::TaskResumed {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    /// Emit a task delegated event.
+    pub fn emit_task_delegated(&self, parent_task_id: &str, child_task_id: &str) {
+        self.emit(&TaskEvent::TaskDelegated {
+            parent_task_id: parent_task_id.to_string(),
+            child_task_id: child_task_id.to_string(),
+        });
+    }
+
+    // --- Interactive emit methods ---
+
+    /// Emit a task interactive event.
+    pub fn emit_task_interactive(&self, task_id: &str) {
+        self.emit(&TaskEvent::TaskInteractive {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    /// Emit a task idle event.
+    pub fn emit_task_idle(&self, task_id: &str) {
+        self.emit(&TaskEvent::TaskIdle {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    /// Emit a task resumable event.
+    pub fn emit_task_resumable(&self, task_id: &str) {
+        self.emit(&TaskEvent::TaskResumable {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    // --- API emit methods ---
+
+    /// Emit an API request started event.
+    pub fn emit_api_request_started(&self, task_id: &str) {
+        self.emit(&TaskEvent::ApiRequestStarted {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    /// Emit an API request finished event.
+    pub fn emit_api_request_finished(
+        &self,
+        task_id: &str,
+        cost: Option<f64>,
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+    ) {
+        self.emit(&TaskEvent::ApiRequestFinished {
+            task_id: task_id.to_string(),
+            cost,
+            tokens_in,
+            tokens_out,
+        });
+    }
+
+    // --- Context emit methods ---
+
+    /// Emit a context condensation completed event.
+    pub fn emit_context_condensation_completed(&self, task_id: &str, messages_removed: usize) {
+        self.emit(&TaskEvent::ContextCondensationCompleted {
+            task_id: task_id.to_string(),
+            messages_removed,
+        });
+    }
+
+    /// Emit a context truncation performed event.
+    pub fn emit_context_truncation_performed(&self, task_id: &str, messages_removed: usize) {
+        self.emit(&TaskEvent::ContextTruncationPerformed {
+            task_id: task_id.to_string(),
+            messages_removed,
+        });
+    }
+
+    // --- Checkpoint emit methods ---
+
+    /// Emit a checkpoint saved event.
+    pub fn emit_checkpoint_saved(&self, task_id: &str, commit: Option<String>) {
+        self.emit(&TaskEvent::CheckpointSaved {
+            task_id: task_id.to_string(),
+            commit,
+        });
+    }
+
+    /// Emit a checkpoint restored event.
+    pub fn emit_checkpoint_restored(&self, task_id: &str) {
+        self.emit(&TaskEvent::CheckpointRestored {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    // --- Subtask emit methods ---
+
+    /// Emit a subtask created event.
+    pub fn emit_subtask_created(&self, parent_task_id: &str, child_task_id: &str) {
+        self.emit(&TaskEvent::SubtaskCreated {
+            parent_task_id: parent_task_id.to_string(),
+            child_task_id: child_task_id.to_string(),
+        });
+    }
+
+    /// Emit a subtask completed event.
+    pub fn emit_subtask_completed(&self, parent_task_id: &str, child_task_id: &str) {
+        self.emit(&TaskEvent::SubtaskCompleted {
+            parent_task_id: parent_task_id.to_string(),
+            child_task_id: child_task_id.to_string(),
+        });
+    }
+
+    // --- Mode emit methods ---
+
+    /// Emit a mode switched event.
+    pub fn emit_mode_switched(&self, task_id: &str, mode: &str) {
+        self.emit(&TaskEvent::ModeSwitched {
+            task_id: task_id.to_string(),
+            mode: mode.to_string(),
+        });
+    }
+
     /// Emit an event to all registered listeners.
-    fn emit(&self, event: &TaskEvent) {
+    pub fn emit(&self, event: &TaskEvent) {
         let listeners = self.listeners.lock().unwrap();
         for listener in listeners.iter() {
             listener(event);

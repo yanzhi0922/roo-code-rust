@@ -173,8 +173,26 @@ pub fn build_read_result(
     let returned_lines = truncated_lines.lines().count();
     let end_line = start_line + returned_lines.saturating_sub(1);
 
+    // Build final content with truncation message (matching TS format)
+    let final_content = if truncated {
+        let effective_limit = limit.unwrap_or(DEFAULT_READ_LIMIT as u64) as usize;
+        let next_offset = end_line + 1;
+        format!(
+            "IMPORTANT: File content truncated.\n\
+             \tStatus: Showing lines {}-{} of {} total lines.\n\
+             \tTo read more: Use the read_file tool with offset={} and limit={}.\n\
+             \t\n\
+             \t{}",
+            start_line, end_line, total, next_offset, effective_limit, numbered
+        )
+    } else if returned_lines == 0 {
+        "Note: File is empty".to_string()
+    } else {
+        numbered
+    };
+
     Ok(ReadResult {
-        content: numbered,
+        content: final_content,
         path: path.to_string(),
         total_lines: total,
         truncated,
@@ -229,8 +247,24 @@ pub fn build_read_result_indentation(
     let returned_lines = truncated_content.lines().count();
     let end_line = start_line + returned_lines.saturating_sub(1);
 
+    // Build final content with truncation message (matching TS format)
+    let effective_limit = params.max_lines.unwrap_or(DEFAULT_READ_LIMIT as u64) as usize;
+    let final_content = if truncated {
+        let next_offset = end_line + 1;
+        format!(
+            "IMPORTANT: File content truncated.\n\
+             \tStatus: Showing lines {}-{} of {} total lines.\n\
+             \tTo read more: Use the read_file tool with offset={} and limit={}.\n\
+             \t\n\
+             \t{}",
+            start_line, end_line, total_lines, next_offset, effective_limit, numbered
+        )
+    } else {
+        numbered
+    };
+
     Ok(ReadResult {
-        content: numbered,
+        content: final_content,
         path: path.to_string(),
         total_lines,
         truncated,

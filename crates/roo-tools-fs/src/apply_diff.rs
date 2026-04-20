@@ -74,6 +74,39 @@ pub fn count_diff_blocks(diff: &str) -> usize {
     diff.matches("<<<<<<< SEARCH").count()
 }
 
+/// Generate a notice when only a single SEARCH/REPLACE block is used.
+///
+/// Matches TS behavior:
+/// ```text
+/// \n<notice>Making multiple related changes in a single apply_diff is more efficient.
+/// If other changes are needed in this file, please include them as additional SEARCH/REPLACE blocks.</notice>
+/// ```
+pub fn single_block_notice(diff: &str) -> String {
+    let block_count = count_diff_blocks(diff);
+    if block_count == 1 {
+        "\n<notice>Making multiple related changes in a single apply_diff is more efficient. If other changes are needed in this file, please include them as additional SEARCH/REPLACE blocks.</notice>".to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Generate a part-fail hint when some diff blocks could not be applied.
+///
+/// Matches TS behavior:
+/// ```text
+/// But unable to apply all diff parts to file: {path}. Use the read_file tool to check the newest file version and re-apply diffs.\n
+/// ```
+pub fn part_fail_hint(absolute_path: &str, total_blocks: usize, applied_blocks: usize) -> String {
+    if applied_blocks < total_blocks {
+        format!(
+            "But unable to apply all diff parts to file: {}. Use the read_file tool to check the newest file version and re-apply diffs.\n",
+            absolute_path
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// Parse diff blocks from the diff string.
 /// Returns a vector of (search_content, replace_content) tuples.
 ///
@@ -699,5 +732,36 @@ bar
         let content = "short";
         let result = apply_fuzzy_diff(content, "line1\nline2\nline3\nline4\nline5\nline6", "replacement");
         assert!(result.is_err());
+    }
+
+    // --- Tests for single_block_notice and part_fail_hint ---
+
+    #[test]
+    fn test_single_block_notice_single() {
+        let diff = "<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE";
+        let notice = single_block_notice(diff);
+        assert!(notice.contains("<notice>"));
+        assert!(notice.contains("Making multiple related changes"));
+    }
+
+    #[test]
+    fn test_single_block_notice_multiple() {
+        let diff = "<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE\n<<<<<<< SEARCH\nbaz\n=======\nqux\n>>>>>>> REPLACE";
+        let notice = single_block_notice(diff);
+        assert!(notice.is_empty());
+    }
+
+    #[test]
+    fn test_part_fail_hint_all_applied() {
+        let hint = part_fail_hint("/path/to/file.txt", 3, 3);
+        assert!(hint.is_empty());
+    }
+
+    #[test]
+    fn test_part_fail_hint_some_failed() {
+        let hint = part_fail_hint("/path/to/file.txt", 3, 2);
+        assert!(hint.contains("unable to apply all diff parts"));
+        assert!(hint.contains("/path/to/file.txt"));
+        assert!(hint.contains("read_file tool"));
     }
 }

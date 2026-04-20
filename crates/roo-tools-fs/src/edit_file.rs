@@ -109,14 +109,32 @@ fn try_exact_replace(content: &str, old: &str, new: &str, expected: usize) -> Op
 
 /// Build a whitespace-tolerant regex from a pattern.
 ///
-/// Splits the pattern by whitespace sequences, escapes each non-whitespace
-/// part for regex, then joins them with `\s+` so that any whitespace
-/// differences (tabs vs spaces, multiple spaces) are tolerated.
+/// Matches TS `buildWhitespaceTolerantRegex` exactly:
+/// 1. Splits the pattern into alternating runs of whitespace and non-whitespace.
+/// 2. For whitespace runs that include `\n`, uses `\s+` (matches any whitespace
+///    including newlines, to tolerate wrapping changes across lines).
+/// 3. For whitespace runs without `\n`, uses `[\t ]+` (horizontal only, to avoid
+///    accidentally consuming line breaks that precede indentation).
+/// 4. For non-whitespace parts, escapes them for regex.
 fn build_whitespace_tolerant_regex(pattern: &str) -> Result<Regex, regex::Error> {
-    let parts: Vec<&str> = pattern
-        .split(|c: char| c.is_whitespace())
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Split into alternating runs of whitespace and non-whitespace,
+    // matching TS: `oldLF.match(/(\s+|\S+)/g) ?? []`
+    let mut parts: Vec<PatternRun> = Vec::new();
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let is_ws = chars[i].is_whitespace();
+        let start = i;
+        while i < chars.len() && chars[i].is_whitespace() == is_ws {
+            i += 1;
+        }
+        let run: String = chars[start..i].iter().collect();
+        parts.push(PatternRun {
+            is_whitespace: is_ws,
+            content: run,
+        });
+    }
 
     if parts.is_empty() {
         return Err(regex::Error::Syntax(
@@ -124,10 +142,39 @@ fn build_whitespace_tolerant_regex(pattern: &str) -> Result<Regex, regex::Error>
         ));
     }
 
-    let regex_parts: Vec<String> = parts.iter().map(|t| regex::escape(t)).collect();
-    let regex_str = regex_parts.join(r"\s+");
+    // Check that there's at least one non-whitespace part
+    let has_non_ws = parts.iter().any(|p| !p.is_whitespace);
+    if !has_non_ws {
+        return Err(regex::Error::Syntax(
+            "Pattern has no non-whitespace content".to_string(),
+        ));
+    }
+
+    let regex_str: String = parts
+        .iter()
+        .map(|part| {
+            if part.is_whitespace {
+                // Match TS: if the whitespace run includes a newline, allow matching
+                // any whitespace (including newlines); otherwise limit to horizontal
+                // whitespace so we don't accidentally consume line breaks.
+                if part.content.contains('\n') {
+                    r"\s+".to_string()
+                } else {
+                    r"[\t ]+".to_string()
+                }
+            } else {
+                regex::escape(&part.content)
+            }
+        })
+        .collect();
 
     Regex::new(&regex_str)
+}
+
+/// A run of characters that are either all whitespace or all non-whitespace.
+struct PatternRun {
+    is_whitespace: bool,
+    content: String,
 }
 
 /// Try whitespace-tolerant match and replacement.

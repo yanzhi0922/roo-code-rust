@@ -212,17 +212,13 @@ pub async fn execute_command(
         (full_output, None)
     };
 
-    // 8. Format final result
-    let exit_code_str = match result.exit_code {
-        Some(0) => "Exit code: 0".to_string(),
-        Some(code) => format!("Exit code: {}", code),
-        None => "Process terminated".to_string(),
-    };
+    // 8. Format final result (matching TS format)
+    let exit_status = crate::helpers::format_exit_status(result.exit_code);
 
     let final_output = if output.is_empty() {
-        format!("Command executed. {}", exit_code_str)
+        format!("Command executed in terminal within working directory '{}'. {}", resolved_cwd.display(), exit_status)
     } else {
-        format!("{}\n{}", exit_code_str, output)
+        format!("Command executed in terminal within working directory '{}'. {}\nOutput:\n{}", resolved_cwd.display(), exit_status, output)
     };
 
     Ok(ExecuteCommandResult {

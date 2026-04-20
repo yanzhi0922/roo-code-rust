@@ -74,15 +74,19 @@ impl TaskState {
                 TaskState::Paused | TaskState::Completed | TaskState::Aborted | TaskState::Delegated
             ),
             TaskState::Paused => matches!(target, TaskState::Running | TaskState::Aborted),
-            TaskState::Completed | TaskState::Aborted | TaskState::Delegated => false,
+            TaskState::Delegated => matches!(target, TaskState::Running),
+            TaskState::Completed | TaskState::Aborted => false,
         }
     }
 
     /// Returns `true` if this state is terminal (no further transitions).
+    ///
+    /// Note: `Delegated` is NOT terminal because it can transition back to
+    /// `Running` via `resumeAfterDelegation()`. This matches the TS behavior.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            TaskState::Completed | TaskState::Aborted | TaskState::Delegated
+            TaskState::Completed | TaskState::Aborted
         )
     }
 
@@ -480,7 +484,8 @@ mod tests {
         assert!(!TaskState::Paused.is_terminal());
         assert!(TaskState::Completed.is_terminal());
         assert!(TaskState::Aborted.is_terminal());
-        assert!(TaskState::Delegated.is_terminal());
+        // Delegated is NOT terminal — can resume after delegation
+        assert!(!TaskState::Delegated.is_terminal());
     }
 
     #[test]
@@ -523,7 +528,8 @@ mod tests {
 
     #[test]
     fn test_no_transitions_from_terminal_states() {
-        for terminal in [TaskState::Completed, TaskState::Aborted, TaskState::Delegated] {
+        // Completed and Aborted are truly terminal — no transitions allowed
+        for terminal in [TaskState::Completed, TaskState::Aborted] {
             for target in [
                 TaskState::Idle,
                 TaskState::Running,
@@ -535,6 +541,12 @@ mod tests {
                 assert!(!terminal.can_transition_to(&target), "{terminal:?} should not transition to {target:?}");
             }
         }
+        // Delegated can transition back to Running (resumeAfterDelegation)
+        assert!(TaskState::Delegated.can_transition_to(&TaskState::Running));
+        assert!(!TaskState::Delegated.can_transition_to(&TaskState::Idle));
+        assert!(!TaskState::Delegated.can_transition_to(&TaskState::Paused));
+        assert!(!TaskState::Delegated.can_transition_to(&TaskState::Completed));
+        assert!(!TaskState::Delegated.can_transition_to(&TaskState::Aborted));
     }
 
     #[test]

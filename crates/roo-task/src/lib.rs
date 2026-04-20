@@ -29,6 +29,8 @@ pub mod tool_dispatcher;
 pub mod message_builder;
 pub mod agent_loop;
 pub mod task_manager;
+pub mod ask_say;
+pub mod task_lifecycle;
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -45,3 +47,5 @@ pub use tool_dispatcher::{ToolDispatcher, ToolExecutionResult, ToolContext, Tool
 pub use message_builder::MessageBuilder;
 pub use agent_loop::{AgentLoop, AgentLoopConfig};
 pub use task_manager::TaskManager;
+pub use ask_say::{AskSayHandler, AskResponse, AskResult, AskIgnoredError};
+pub use task_lifecycle::TaskLifecycle;

@@ -81,6 +81,71 @@ pub fn format_command_output(output: &str, max_bytes: usize) -> (String, bool) {
     (format!("{truncated}{notice}"), true)
 }
 
+/// Format bytes to human-readable string.
+///
+/// Matches TS `formatBytes()`:
+/// - `< 1024` → `{}B`
+/// - `< 1024*1024` → `{:.1}KB`
+/// - `>= 1024*1024` → `{:.1}MB`
+pub fn format_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Format persisted output result for tool response when output was truncated.
+///
+/// Matches TS `formatPersistedOutput()`:
+/// ```text
+/// Command executed in '{workingDir}'. {exitStatus}
+///
+/// Output ({sizeStr}) persisted. Artifact ID: {artifactId}
+///
+/// Preview:
+/// {preview}
+///
+/// Use read_command_output tool to view full output if needed.
+/// ```
+pub fn format_persisted_output(
+    working_dir: &str,
+    exit_code: Option<i32>,
+    total_bytes: usize,
+    artifact_id: &str,
+    preview: &str,
+) -> String {
+    let exit_status = format_exit_status(exit_code);
+    let size_str = format_bytes(total_bytes);
+
+    format!(
+        "Command executed in '{}'. {}\n\n\
+         Output ({}) persisted. Artifact ID: {}\n\n\
+         Preview:\n{}\n\n\
+         Use read_command_output tool to view full output if needed.",
+        working_dir, exit_status, size_str, artifact_id, preview
+    )
+}
+
+/// Format exit status from exit code.
+///
+/// Matches TS `formatExitStatus()`:
+/// - `None` → "Exit code: <undefined, notify user>"
+/// - `Some(0)` → "Exit code: 0"
+/// - `Some(non-zero)` → "Command execution was not successful, inspect the cause and adjust as needed.\nExit code: {code}"
+pub fn format_exit_status(exit_code: Option<i32>) -> String {
+    match exit_code {
+        None => "Exit code: <undefined, notify user>".to_string(),
+        Some(0) => "Exit code: 0".to_string(),
+        Some(code) => format!(
+            "Command execution was not successful, inspect the cause and adjust as needed.\nExit code: {}",
+            code
+        ),
+    }
+}
+
 /// Filter output lines by a search pattern (regex or literal).
 ///
 /// Returns the matching lines and the count of matches.
@@ -368,5 +433,73 @@ mod tests {
 
         let err = CommandToolError::InvalidArtifactId("../etc".to_string());
         assert!(format!("{err}").contains("../etc"));
+    }
+
+    // ---- format_bytes tests ----
+
+    #[test]
+    fn test_format_bytes_under_1k() {
+        assert_eq!(format_bytes(512), "512B");
+    }
+
+    #[test]
+    fn test_format_bytes_exactly_1k() {
+        assert_eq!(format_bytes(1024), "1.0KB");
+    }
+
+    #[test]
+    fn test_format_bytes_kilobytes() {
+        assert_eq!(format_bytes(1536), "1.5KB");
+    }
+
+    #[test]
+    fn test_format_bytes_megabytes() {
+        let result = format_bytes(2 * 1024 * 1024);
+        assert_eq!(result, "2.0MB");
+    }
+
+    #[test]
+    fn test_format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0B");
+    }
+
+    // ---- format_exit_status tests ----
+
+    #[test]
+    fn test_format_exit_status_none() {
+        let result = format_exit_status(None);
+        assert!(result.contains("undefined"));
+    }
+
+    #[test]
+    fn test_format_exit_status_zero() {
+        let result = format_exit_status(Some(0));
+        assert_eq!(result, "Exit code: 0");
+    }
+
+    #[test]
+    fn test_format_exit_status_nonzero() {
+        let result = format_exit_status(Some(1));
+        assert!(result.contains("not successful"));
+        assert!(result.contains("Exit code: 1"));
+    }
+
+    // ---- format_persisted_output tests ----
+
+    #[test]
+    fn test_format_persisted_output_basic() {
+        let result = format_persisted_output(
+            "/home/user/project",
+            Some(0),
+            2048,
+            "cmd-abc123.txt",
+            "first line\nsecond line",
+        );
+        assert!(result.contains("/home/user/project"));
+        assert!(result.contains("Exit code: 0"));
+        assert!(result.contains("2.0KB"));
+        assert!(result.contains("cmd-abc123.txt"));
+        assert!(result.contains("first line"));
+        assert!(result.contains("read_command_output"));
     }
 }
