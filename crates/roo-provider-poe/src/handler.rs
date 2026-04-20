@@ -3,6 +3,9 @@
 //! Uses the OpenAI-compatible chat completions API via Poe.
 //! Supports reasoning budget/effort for models that support extended thinking.
 //! Source: `src/api/providers/poe.ts`
+//!
+//! Note: Poe uses a static model list in TS (no `fetchModel()`).
+//! This implementation adds fallback logic for unknown models.
 
 use async_trait::async_trait;
 use roo_provider::{
@@ -20,6 +23,10 @@ use crate::types::PoeConfig;
 /// It follows the OpenAI API format for compatibility.
 pub struct PoeHandler {
     inner: OpenAiCompatibleProvider,
+    /// The configured model ID.
+    model_id: String,
+    /// The model info (static or fallback).
+    model_info: ModelInfo,
 }
 
 impl PoeHandler {
@@ -38,7 +45,7 @@ impl PoeHandler {
                 supports_prompt_cache: false,
                 input_price: Some(0.0),
                 output_price: Some(0.0),
-                description: Some("Poe model (unknown)".to_string()),
+                description: Some(format!("Poe model: {}", model_id)),
                 ..Default::default()
             });
 
@@ -52,15 +59,19 @@ impl PoeHandler {
             api_key: config.api_key,
             default_model_id: models::default_model_id(),
             default_temperature: config.temperature.unwrap_or(0.0),
-            model_id: Some(model_id),
-            model_info,
+            model_id: Some(model_id.clone()),
+            model_info: model_info.clone(),
             provider_name_enum: ProviderName::Poe,
             request_timeout: config.request_timeout,
         };
 
         let inner = OpenAiCompatibleProvider::new(compatible_config)?;
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            model_id,
+            model_info,
+        })
     }
 
     /// Create a new Poe handler from provider settings.
@@ -96,7 +107,12 @@ impl Provider for PoeHandler {
     }
 
     fn get_model(&self) -> (String, ModelInfo) {
-        self.inner.get_model()
+        // Re-resolve from static list in case the model_id matches a known model
+        if let Some(info) = models::models().get(&self.model_id) {
+            return (self.model_id.clone(), info.clone());
+        }
+        // Fallback to stored model info (includes description with model name)
+        (self.model_id.clone(), self.model_info.clone())
     }
 
     async fn complete_prompt(
@@ -264,6 +280,9 @@ mod tests {
         let handler = PoeHandler::new(config).unwrap();
         let (_, info) = handler.get_model();
         assert!(info.max_tokens.is_some());
+        // Fallback should include a description with the model name
+        assert!(info.description.is_some());
+        assert!(info.description.as_ref().unwrap().contains("unknown-poe-model"));
     }
 
     #[test]
@@ -296,5 +315,43 @@ mod tests {
                 id
             );
         }
+    }
+
+    // --- Fallback tests ---
+
+    #[test]
+    fn test_fallback_description_contains_model_name() {
+        let config = PoeConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            model_id: Some("my-custom-poe-bot".to_string()),
+            temperature: None,
+            max_thinking_tokens: None,
+            reasoning_effort: None,
+            request_timeout: None,
+        };
+        let handler = PoeHandler::new(config).unwrap();
+        let (model_id, info) = handler.get_model();
+        assert_eq!(model_id, "my-custom-poe-bot");
+        assert_eq!(info.input_price, Some(0.0));
+        assert_eq!(info.output_price, Some(0.0));
+    }
+
+    #[test]
+    fn test_known_model_not_using_fallback() {
+        let config = PoeConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            model_id: Some(models::DEFAULT_MODEL_ID.to_string()),
+            temperature: None,
+            max_thinking_tokens: None,
+            reasoning_effort: None,
+            request_timeout: None,
+        };
+        let handler = PoeHandler::new(config).unwrap();
+        let (_, info) = handler.get_model();
+        // The static model should have a specific description, not the fallback one
+        let desc = info.description.as_ref().unwrap();
+        assert!(!desc.contains("Poe model: "));
     }
 }

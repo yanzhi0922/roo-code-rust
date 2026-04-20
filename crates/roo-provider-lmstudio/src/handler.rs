@@ -3,8 +3,10 @@
 //! Uses the OpenAI-compatible chat completions API provided by LM Studio.
 //! Supports `<think/>` tag processing via [`TagMatcher`] for reasoning
 //! content classification.
+//! Supports dynamic model loading from the LM Studio `/v1/models` endpoint.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -12,7 +14,7 @@ use roo_provider::error::Result;
 use roo_provider::handler::{ApiStream, CreateMessageMetadata, Provider};
 use roo_provider::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 use roo_types::api::{ApiStreamChunk, ProviderName};
-use roo_types::model::ModelInfo;
+use roo_types::model::{ModelInfo, ModelRecord};
 
 use crate::models;
 use crate::types::LmStudioConfig;
@@ -160,10 +162,14 @@ pub struct LmStudioHandler {
     inner: OpenAiCompatibleProvider,
     model_id: String,
     model_info: ModelInfo,
+    /// Base URL for API requests.
+    base_url: String,
     #[allow(dead_code)]
     speculative_decoding_enabled: bool,
     #[allow(dead_code)]
     draft_model_id: Option<String>,
+    /// Cache for dynamically fetched models.
+    dynamic_models: RwLock<Option<ModelRecord>>,
 }
 
 impl LmStudioHandler {
@@ -176,7 +182,7 @@ impl LmStudioHandler {
 
         let compatible_config = OpenAiCompatibleConfig {
             provider_name: "lmstudio".to_string(),
-            base_url: config.base_url,
+            base_url: config.base_url.clone(),
             api_key: LmStudioConfig::PLACEHOLDER_API_KEY.to_string(),
             default_model_id: models::default_model_id(),
             default_temperature: config.temperature.unwrap_or(models::DEFAULT_TEMPERATURE),
@@ -192,8 +198,10 @@ impl LmStudioHandler {
             inner,
             model_id,
             model_info,
+            base_url: config.base_url,
             speculative_decoding_enabled: config.speculative_decoding_enabled,
             draft_model_id: config.draft_model_id,
+            dynamic_models: RwLock::new(None),
         })
     }
 
@@ -203,6 +211,92 @@ impl LmStudioHandler {
     ) -> Result<Self> {
         let config = LmStudioConfig::from_settings(settings);
         Self::new(config)
+    }
+
+    /// Fetches available models from the LM Studio API.
+    ///
+    /// Uses the OpenAI-compatible `/v1/models` endpoint.
+    /// Results are cached in memory; subsequent calls return the cached list.
+    ///
+    /// For local LM Studio instances, connection failures are handled gracefully.
+    pub async fn fetch_models(&self) -> Result<ModelRecord> {
+        // Check cache first
+        {
+            let cache = self.dynamic_models.read().unwrap();
+            if let Some(ref models) = *cache {
+                return Ok(models.clone());
+            }
+        }
+
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(roo_provider::ProviderError::Reqwest)?;
+
+        let response = match client.get(&url).send().await {
+            Ok(r) => r,
+            Err(_) => {
+                // For local providers, connection failure is expected if not running
+                let empty: ModelRecord = HashMap::new();
+                *self.dynamic_models.write().unwrap() = Some(empty.clone());
+                return Ok(empty);
+            }
+        };
+
+        if !response.status().is_success() {
+            let empty: ModelRecord = HashMap::new();
+            *self.dynamic_models.write().unwrap() = Some(empty.clone());
+            return Ok(empty);
+        }
+
+        let body = response.text().await?;
+        let parsed: serde_json::Value = serde_json::from_str(&body)?;
+
+        let mut model_map: ModelRecord = HashMap::new();
+
+        if let Some(data) = parsed.get("data").and_then(|d| d.as_array()) {
+            for entry in data {
+                let id = entry["id"].as_str().unwrap_or("").to_string();
+                if id.is_empty() {
+                    continue;
+                }
+
+                let info = ModelInfo {
+                    max_tokens: Some(8192),
+                    context_window: 200_000,
+                    description: Some(format!("LM Studio model: {}", id)),
+                    input_price: Some(0.0),
+                    output_price: Some(0.0),
+                    ..Default::default()
+                };
+                model_map.insert(id, info);
+            }
+        }
+
+        // Cache result
+        *self.dynamic_models.write().unwrap() = Some(model_map.clone());
+
+        Ok(model_map)
+    }
+
+    /// Resolves model info for the configured model ID.
+    ///
+    /// LM Studio uses dynamic models, so we skip static lookup and
+    /// check dynamic cache first, then fall back to defaults.
+    fn resolve_model_info(&self) -> (String, ModelInfo) {
+        // Try dynamic cache first (LM Studio models are loaded dynamically)
+        if let Ok(cache) = self.dynamic_models.read() {
+            if let Some(ref dynamic) = *cache {
+                if let Some(info) = dynamic.get(&self.model_id) {
+                    return (self.model_id.clone(), info.clone());
+                }
+            }
+        }
+
+        // Fallback to stored model info (set at construction from defaults)
+        (self.model_id.clone(), self.model_info.clone())
     }
 }
 
@@ -253,7 +347,7 @@ impl Provider for LmStudioHandler {
     }
 
     fn get_model(&self) -> (String, ModelInfo) {
-        (self.model_id.clone(), self.model_info.clone())
+        self.resolve_model_info()
     }
 
     async fn complete_prompt(&self, prompt: &str) -> Result<String> {
@@ -439,5 +533,73 @@ mod tests {
     #[test]
     fn test_placeholder_api_key() {
         assert_eq!(LmStudioConfig::PLACEHOLDER_API_KEY, "noop");
+    }
+
+    // --- Dynamic model loading tests ---
+
+    #[test]
+    fn test_dynamic_models_cache_initially_empty() {
+        let config = LmStudioConfig {
+            base_url: LmStudioConfig::DEFAULT_BASE_URL.to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            speculative_decoding_enabled: false,
+            draft_model_id: None,
+        };
+        let handler = LmStudioHandler::new(config).unwrap();
+        let cache = handler.dynamic_models.read().unwrap();
+        assert!(cache.is_none());
+    }
+
+    #[test]
+    fn test_resolve_model_uses_dynamic_when_not_in_static() {
+        let config = LmStudioConfig {
+            base_url: LmStudioConfig::DEFAULT_BASE_URL.to_string(),
+            model_id: Some("downloaded-model".to_string()),
+            temperature: None,
+            request_timeout: None,
+            speculative_decoding_enabled: false,
+            draft_model_id: None,
+        };
+        let handler = LmStudioHandler::new(config).unwrap();
+
+        // Populate dynamic cache
+        let mut dynamic = HashMap::new();
+        dynamic.insert(
+            "downloaded-model".to_string(),
+            ModelInfo {
+                max_tokens: Some(4096),
+                context_window: 32768,
+                description: Some("Downloaded LM Studio model".to_string()),
+                input_price: Some(0.0),
+                output_price: Some(0.0),
+                ..Default::default()
+            },
+        );
+        *handler.dynamic_models.write().unwrap() = Some(dynamic);
+
+        let (model_id, info) = handler.get_model();
+        assert_eq!(model_id, "downloaded-model");
+        assert_eq!(info.context_window, 32768);
+        assert_eq!(info.max_tokens, Some(4096));
+    }
+
+    #[test]
+    fn test_fetch_models_handles_connection_failure_gracefully() {
+        let config = LmStudioConfig {
+            base_url: "http://localhost:19998/v1".to_string(),
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+            speculative_decoding_enabled: false,
+            draft_model_id: None,
+        };
+        let handler = LmStudioHandler::new(config).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(handler.fetch_models());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 }

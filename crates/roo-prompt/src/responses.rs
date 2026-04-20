@@ -229,6 +229,76 @@ pub struct ImageSource {
     pub data: String,
 }
 
+/// Natural sort comparison that handles numeric parts.
+///
+/// Matches the TypeScript `localeCompare` with `{ numeric: true, sensitivity: "base" }`
+/// behavior: numeric substrings are compared by value, non-numeric by case-insensitive
+/// lexicographic order.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let mut a_chars = a.chars().peekable();
+    let mut b_chars = b.chars().peekable();
+
+    loop {
+        let a_ch = a_chars.next();
+        let b_ch = b_chars.next();
+
+        match (a_ch, b_ch) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(ac), Some(bc)) => {
+                let a_is_digit = ac.is_ascii_digit();
+                let b_is_digit = bc.is_ascii_digit();
+
+                if a_is_digit && b_is_digit {
+                    // Both are digits — consume the full numeric run and compare by value
+                    let mut a_num: u64 = ac.to_digit(10).unwrap() as u64;
+                    let mut b_num: u64 = bc.to_digit(10).unwrap() as u64;
+
+                    while let Some(&d) = a_chars.peek() {
+                        if d.is_ascii_digit() {
+                            a_num = a_num * 10 + d.to_digit(10).unwrap() as u64;
+                            a_chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    while let Some(&d) = b_chars.peek() {
+                        if d.is_ascii_digit() {
+                            b_num = b_num * 10 + d.to_digit(10).unwrap() as u64;
+                            b_chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    match a_num.cmp(&b_num) {
+                        Ordering::Equal => continue,
+                        ord => return ord,
+                    }
+                } else if !a_is_digit && !b_is_digit {
+                    // Both non-digit — case-insensitive comparison (sensitivity: "base")
+                    let a_lower = ac.to_lowercase().next().unwrap();
+                    let b_lower = bc.to_lowercase().next().unwrap();
+                    match a_lower.cmp(&b_lower) {
+                        Ordering::Equal => continue,
+                        ord => return ord,
+                    }
+                } else {
+                    // One digit, one non-digit — digits sort before letters
+                    return if a_is_digit {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    };
+                }
+            }
+        }
+    }
+}
+
 /// Formats a list of files for display.
 ///
 /// Source: `src/core/prompts/responses.ts` — `formatResponse.formatFilesList`
@@ -248,8 +318,8 @@ pub fn format_files_list(entries: &[FileEntry], did_hit_limit: bool) -> String {
                 if i + 1 == b_parts.len() && i + 1 < a_parts.len() {
                     return std::cmp::Ordering::Greater;
                 }
-                // Otherwise, sort alphabetically
-                return a_parts[i].cmp(b_parts[i]);
+                // Otherwise, sort with natural/numeric comparison (matches TS localeCompare numeric:true)
+                return natural_cmp(a_parts[i], b_parts[i]);
             }
         }
         a_parts.len().cmp(&b_parts.len())
@@ -273,7 +343,8 @@ pub fn format_files_list(entries: &[FileEntry], did_hit_limit: bool) -> String {
             "{}\n\n(File list truncated. Use list_files on specific subdirectories if you need to explore further.)",
             formatted.join("\n")
         )
-    } else if formatted.is_empty() {
+    } else if formatted.is_empty() || (formatted.len() == 1 && formatted[0].is_empty()) {
+        // Matches TS: rooIgnoreParsed.length === 0 || (rooIgnoreParsed.length === 1 && rooIgnoreParsed[0] === "")
         "No files found.".to_string()
     } else {
         formatted.join("\n")
@@ -398,5 +469,105 @@ mod tests {
         let new = "line1\nline2_modified\nline3\n";
         let patch = create_pretty_patch("test.txt", Some(old), Some(new));
         assert!(patch.contains("line2"));
+    }
+
+    #[test]
+    fn test_natural_cmp_numeric() {
+        // Numeric: 2 < 10 (not lexicographic "2" > "10")
+        assert_eq!(natural_cmp("file2", "file10"), std::cmp::Ordering::Less);
+        assert_eq!(natural_cmp("file10", "file2"), std::cmp::Ordering::Greater);
+        assert_eq!(natural_cmp("file2", "file2"), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn test_natural_cmp_case_insensitive() {
+        // Case-insensitive (sensitivity: "base")
+        assert_eq!(natural_cmp("File", "file"), std::cmp::Ordering::Equal);
+        assert_eq!(natural_cmp("ABC", "abc"), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn test_natural_cmp_mixed() {
+        // Mixed numeric and non-numeric
+        assert_eq!(natural_cmp("a1b", "a2b"), std::cmp::Ordering::Less);
+        assert_eq!(natural_cmp("a10b", "a2b"), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn test_format_files_list_numeric_sort() {
+        let entries = vec![
+            FileEntry { relative_path: "file10.txt".to_string(), is_ignored: false, is_protected: false },
+            FileEntry { relative_path: "file2.txt".to_string(), is_ignored: false, is_protected: false },
+            FileEntry { relative_path: "file1.txt".to_string(), is_ignored: false, is_protected: false },
+        ];
+        let result = format_files_list(&entries, false);
+        // Should be sorted: file1, file2, file10 (numeric order)
+        let pos1 = result.find("file1.txt").unwrap();
+        let pos2 = result.find("file2.txt").unwrap();
+        let pos10 = result.find("file10.txt").unwrap();
+        assert!(pos1 < pos2);
+        assert!(pos2 < pos10);
+    }
+
+    #[test]
+    fn test_format_files_list_single_empty() {
+        let entries = vec![FileEntry {
+            relative_path: "".to_string(),
+            is_ignored: false,
+            is_protected: false,
+        }];
+        let result = format_files_list(&entries, false);
+        assert_eq!(result, "No files found.");
+    }
+
+    #[test]
+    fn test_tool_denied_with_feedback() {
+        let result: Value = serde_json::from_str(&tool_denied_with_feedback(Some("try again"))).unwrap();
+        assert_eq!(result["status"], "denied");
+        assert_eq!(result["feedback"], "try again");
+    }
+
+    #[test]
+    fn test_tool_approved_with_feedback() {
+        let result: Value = serde_json::from_str(&tool_approved_with_feedback(Some("looks good"))).unwrap();
+        assert_eq!(result["status"], "approved");
+        assert_eq!(result["feedback"], "looks good");
+    }
+
+    #[test]
+    fn test_invalid_mcp_tool_argument_error() {
+        let result: Value = serde_json::from_str(&invalid_mcp_tool_argument_error("server1", "tool1")).unwrap();
+        assert_eq!(result["status"], "error");
+        assert_eq!(result["type"], "invalid_argument");
+        assert_eq!(result["server"], "server1");
+        assert_eq!(result["tool"], "tool1");
+    }
+
+    #[test]
+    fn test_unknown_mcp_tool_error() {
+        let result: Value = serde_json::from_str(
+            &unknown_mcp_tool_error("server1", "tool1", &[String::from("tool2")])
+        ).unwrap();
+        assert_eq!(result["status"], "error");
+        assert_eq!(result["type"], "unknown_tool");
+        assert_eq!(result["server"], "server1");
+        assert_eq!(result["tool"], "tool1");
+    }
+
+    #[test]
+    fn test_unknown_mcp_server_error() {
+        let result: Value = serde_json::from_str(
+            &unknown_mcp_server_error("server1", &[String::from("server2")])
+        ).unwrap();
+        assert_eq!(result["status"], "error");
+        assert_eq!(result["type"], "unknown_server");
+        assert_eq!(result["server"], "server1");
+    }
+
+    #[test]
+    fn test_too_many_mistakes() {
+        let result: Value = serde_json::from_str(&too_many_mistakes(Some("slow down"))).unwrap();
+        assert_eq!(result["status"], "guidance");
+        assert_eq!(result["feedback"], "slow down");
     }
 }

@@ -67,13 +67,12 @@ pub fn filter_non_anthropic_blocks(messages: Vec<ApiMessage>) -> Vec<ApiMessage>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roo_types::api::MessageRole;
+    use roo_types::api::{ImageSource, MessageRole, ToolResultContent};
 
-    #[test]
-    fn test_filters_empty_messages() {
-        let messages = vec![ApiMessage {
-            role: MessageRole::User,
-            content: vec![],
+    fn make_message(role: MessageRole, content: Vec<ContentBlock>) -> ApiMessage {
+        ApiMessage {
+            role,
+            content,
             reasoning: None,
             ts: None,
             truncation_parent: None,
@@ -82,20 +81,113 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
-        }];
+        }
+    }
+
+    #[test]
+    fn test_filters_empty_messages() {
+        let messages = vec![make_message(MessageRole::User, vec![])];
         let result = filter_non_anthropic_blocks(messages);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_keeps_valid_blocks() {
+        let messages = vec![make_message(
+            MessageRole::User,
+            vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        )];
+        let result = filter_non_anthropic_blocks(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 1);
+    }
+
+    #[test]
+    fn test_keeps_tool_use_blocks() {
+        let messages = vec![make_message(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "test.rs"}),
+            }],
+        )];
+        let result = filter_non_anthropic_blocks(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 1);
+    }
+
+    #[test]
+    fn test_keeps_tool_result_blocks() {
+        let messages = vec![make_message(
+            MessageRole::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: vec![ToolResultContent::Text {
+                    text: "result".to_string(),
+                }],
+                is_error: None,
+            }],
+        )];
+        let result = filter_non_anthropic_blocks(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 1);
+    }
+
+    #[test]
+    fn test_keeps_thinking_blocks() {
+        let messages = vec![make_message(
+            MessageRole::Assistant,
+            vec![ContentBlock::Thinking {
+                thinking: "deep thoughts".to_string(),
+                signature: "sig123".to_string(),
+            }],
+        )];
+        let result = filter_non_anthropic_blocks(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 1);
+    }
+
+    #[test]
+    fn test_keeps_redacted_thinking_blocks() {
+        let messages = vec![make_message(
+            MessageRole::Assistant,
+            vec![ContentBlock::RedactedThinking {
+                data: "encrypted_data".to_string(),
+            }],
+        )];
+        let result = filter_non_anthropic_blocks(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 1);
+    }
+
+    #[test]
+    fn test_keeps_image_blocks() {
+        let messages = vec![make_message(
+            MessageRole::User,
+            vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    data: "iVBORw0KGgo=".to_string(),
+                    media_type: "image/png".to_string(),
+                },
+            }],
+        )];
+        let result = filter_non_anthropic_blocks(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 1);
+    }
+
+    #[test]
+    fn test_preserves_message_fields() {
         let messages = vec![ApiMessage {
             role: MessageRole::User,
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
             }],
-            reasoning: None,
-            ts: None,
+            reasoning: Some("some reasoning".to_string()),
+            ts: Some(12345.0),
             truncation_parent: None,
             is_truncation_marker: None,
             truncation_id: None,
@@ -104,7 +196,31 @@ mod tests {
             condense_id: None,
         }];
         let result = filter_non_anthropic_blocks(messages);
+        assert_eq!(result[0].reasoning, Some("some reasoning".to_string()));
+        assert_eq!(result[0].ts, Some(12345.0));
+    }
+
+    #[test]
+    fn test_mixed_valid_and_invalid_keeps_valid() {
+        let messages = vec![make_message(
+            MessageRole::Assistant,
+            vec![
+                ContentBlock::Text {
+                    text: "response".to_string(),
+                },
+                ContentBlock::Thinking {
+                    thinking: "thoughts".to_string(),
+                    signature: "sig".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "test".to_string(),
+                    input: serde_json::json!({}),
+                },
+            ],
+        )];
+        let result = filter_non_anthropic_blocks(messages);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content.len(), 1);
+        assert_eq!(result[0].content.len(), 3);
     }
 }

@@ -516,3 +516,422 @@ pub fn convert_to_openai_messages(
 
     Ok(openai_messages)
 }
+
+// ---------------------------------------------------------------------------
+// Reasoning detail helpers
+// ---------------------------------------------------------------------------
+
+/// Strips the `id` field from `openai-responses-v1` reasoning detail blocks.
+///
+/// OpenAI's Responses API requires `store: true` to persist reasoning blocks.
+/// Since we manage conversation state client-side, we don't use `store: true`,
+/// and sending back the `id` field causes a 404 error.
+///
+/// Source: `src/api/transform/openai-format.ts` — `mapReasoningDetails`
+pub fn map_reasoning_details(details: &[Value]) -> Option<Vec<Value>> {
+    if details.is_empty() {
+        return None;
+    }
+
+    let mapped: Vec<Value> = details
+        .iter()
+        .map(|detail| {
+            // Strip `id` from openai-responses-v1 blocks
+            if detail.get("format").and_then(|f| f.as_str()) == Some("openai-responses-v1")
+                && detail.get("id").is_some()
+            {
+                let mut obj = detail
+                    .as_object()
+                    .cloned()
+                    .expect("detail should be an object");
+                obj.remove("id");
+                Value::Object(obj)
+            } else {
+                detail.clone()
+            }
+        })
+        .collect();
+
+    Some(mapped)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roo_types::api::{ContentBlock, ImageSource, MessageRole, ToolResultContent};
+
+    // -- Helper builders -------------------------------------------------------
+
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_string(),
+        }
+    }
+
+    fn tool_use_block(id: &str, name: &str, input: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: serde_json::from_str(input).unwrap_or(json!(input)),
+        }
+    }
+
+    fn tool_result_block(tool_use_id: &str, text: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: vec![ToolResultContent::Text {
+                text: text.to_string(),
+            }],
+            is_error: None,
+        }
+    }
+
+    fn image_block(data: &str, media_type: &str) -> ContentBlock {
+        ContentBlock::Image {
+            source: ImageSource::Base64 {
+                data: data.to_string(),
+                media_type: media_type.to_string(),
+            },
+        }
+    }
+
+    fn make_user_message(content: Vec<ContentBlock>) -> ApiMessage {
+        ApiMessage {
+            role: MessageRole::User,
+            content,
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        }
+    }
+
+    fn make_assistant_message(content: Vec<ContentBlock>) -> ApiMessage {
+        ApiMessage {
+            role: MessageRole::Assistant,
+            content,
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        }
+    }
+
+    // -- convert_to_openai_messages tests --------------------------------------
+
+    #[test]
+    fn test_simple_user_message() {
+        let messages = vec![make_user_message(vec![text_block("Hello")])];
+        let result = convert_to_openai_messages(&messages, None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "user");
+        let content = result[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_simple_assistant_message() {
+        let messages = vec![make_assistant_message(vec![text_block("Hi there!")])];
+        let result = convert_to_openai_messages(&messages, None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "assistant");
+        assert_eq!(result[0]["content"], "Hi there!");
+    }
+
+    #[test]
+    fn test_assistant_with_tool_calls() {
+        let messages = vec![make_assistant_message(vec![
+            text_block("Let me check."),
+            tool_use_block("call_123", "read_file", r#"{"path":"test.rs"}"#),
+        ])];
+        let result = convert_to_openai_messages(&messages, None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "assistant");
+        assert_eq!(result[0]["content"], "Let me check.");
+
+        let tool_calls = result[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call_123");
+        assert_eq!(tool_calls[0]["type"], "function");
+        assert_eq!(tool_calls[0]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn test_user_with_tool_result() {
+        let messages = vec![make_user_message(vec![
+            tool_result_block("call_123", "file contents here"),
+            text_block("Additional info"),
+        ])];
+        let result = convert_to_openai_messages(&messages, None).unwrap();
+
+        // Should have: tool message + user message
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["role"], "tool");
+        assert_eq!(result[0]["tool_call_id"], "call_123");
+        assert_eq!(result[0]["content"], "file contents here");
+
+        assert_eq!(result[1]["role"], "user");
+        let content = result[1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["text"], "Additional info");
+    }
+
+    #[test]
+    fn test_empty_tool_result_gets_placeholder() {
+        let messages = vec![make_user_message(vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: vec![],
+            is_error: None,
+        }])];
+        let result = convert_to_openai_messages(&messages, None).unwrap();
+        assert_eq!(result[0]["content"], "(empty)");
+    }
+
+    #[test]
+    fn test_empty_text_blocks_filtered() {
+        let messages = vec![make_user_message(vec![
+            text_block(""),
+            text_block("visible"),
+            text_block(""),
+        ])];
+        let result = convert_to_openai_messages(&messages, None).unwrap();
+        let content = result[0]["content"].as_array().unwrap();
+        // Only non-empty text blocks should be included
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"], "visible");
+    }
+
+    #[test]
+    fn test_image_conversion() {
+        let messages = vec![make_user_message(vec![
+            text_block("See this"),
+            image_block("iVBORw0KGgo=", "image/png"),
+        ])];
+        let result = convert_to_openai_messages(&messages, None).unwrap();
+        let content = result[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "image_url");
+        assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn test_merge_tool_result_text_option() {
+        let messages = vec![make_user_message(vec![
+            tool_result_block("call_1", "result"),
+            text_block("env details"),
+        ])];
+        let options = ConvertToOpenAiMessagesOptions {
+            normalize_tool_call_id: None,
+            merge_tool_result_text: true,
+        };
+        let result = convert_to_openai_messages(&messages, Some(&options)).unwrap();
+
+        // Should merge text into the tool message
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "tool");
+        let content = result[0]["content"].as_str().unwrap();
+        assert!(content.contains("result"));
+        assert!(content.contains("env details"));
+    }
+
+    #[test]
+    fn test_normalize_tool_call_id() {
+        let messages = vec![make_user_message(vec![ContentBlock::ToolResult {
+            tool_use_id: "original_id".to_string(),
+            content: vec![ToolResultContent::Text {
+                text: "result".to_string(),
+            }],
+            is_error: None,
+        }])];
+        let options = ConvertToOpenAiMessagesOptions {
+            normalize_tool_call_id: Some(Box::new(|id| format!("norm_{id}"))),
+            merge_tool_result_text: false,
+        };
+        let result = convert_to_openai_messages(&messages, Some(&options)).unwrap();
+        assert_eq!(result[0]["tool_call_id"], "norm_original_id");
+    }
+
+    // -- consolidate_reasoning_details tests -----------------------------------
+
+    #[test]
+    fn test_consolidate_empty() {
+        let result = consolidate_reasoning_details(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_consolidate_drops_corrupted_encrypted() {
+        let details = vec![ReasoningDetail {
+            detail_type: "reasoning.encrypted".to_string(),
+            text: None,
+            summary: None,
+            data: None, // missing data → corrupted
+            signature: None,
+            id: None,
+            format: None,
+            index: Some(0),
+        }];
+        let result = consolidate_reasoning_details(&details);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_consolidate_text_blocks() {
+        let details = vec![
+            ReasoningDetail {
+                detail_type: "reasoning.text".to_string(),
+                text: Some("Hello ".to_string()),
+                summary: None,
+                data: None,
+                signature: None,
+                id: None,
+                format: Some("anthropic-claude-v1".to_string()),
+                index: Some(0),
+            },
+            ReasoningDetail {
+                detail_type: "reasoning.text".to_string(),
+                text: Some("World".to_string()),
+                summary: None,
+                data: None,
+                signature: None,
+                id: None,
+                format: Some("anthropic-claude-v1".to_string()),
+                index: Some(0),
+            },
+        ];
+        let result = consolidate_reasoning_details(&details);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text.as_deref(), Some("Hello World"));
+        assert_eq!(result[0].format.as_deref(), Some("anthropic-claude-v1"));
+    }
+
+    #[test]
+    fn test_consolidate_encrypted_keeps_last() {
+        let details = vec![
+            ReasoningDetail {
+                detail_type: "reasoning.encrypted".to_string(),
+                text: None,
+                summary: None,
+                data: Some("data1".to_string()),
+                signature: None,
+                id: None,
+                format: None,
+                index: Some(0),
+            },
+            ReasoningDetail {
+                detail_type: "reasoning.encrypted".to_string(),
+                text: None,
+                summary: None,
+                data: Some("data2".to_string()),
+                signature: None,
+                id: None,
+                format: None,
+                index: Some(0),
+            },
+        ];
+        let result = consolidate_reasoning_details(&details);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].data.as_deref(), Some("data2"));
+    }
+
+    // -- sanitize_gemini_messages tests ----------------------------------------
+
+    #[test]
+    fn test_sanitize_non_gemini_unchanged() {
+        let messages = vec![json!({"role": "user", "content": "hello"})];
+        let result = sanitize_gemini_messages(&messages, "gpt-4");
+        assert_eq!(result, messages);
+    }
+
+    #[test]
+    fn test_sanitize_gemini_drops_tool_calls_without_reasoning() {
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "text",
+            "tool_calls": [{"id": "tc1", "function": {"name": "test"}}]
+        })];
+        let result = sanitize_gemini_messages(&messages, "gemini-2.5-pro");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].get("tool_calls").is_none());
+        assert_eq!(result[0]["content"], "text");
+    }
+
+    #[test]
+    fn test_sanitize_gemini_keeps_matched_tool_calls() {
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc1", "function": {"name": "test"}}],
+            "reasoning_details": [{"type": "reasoning.text", "text": "thinking", "id": "tc1"}]
+        })];
+        let result = sanitize_gemini_messages(&messages, "gemini-2.5-pro");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn test_sanitize_gemini_drops_orphaned_tool_results() {
+        let messages = vec![
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "tc1", "function": {"name": "test"}}]
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "tc1",
+                "content": "result"
+            }),
+        ];
+        let result = sanitize_gemini_messages(&messages, "gemini-2.5-pro");
+        // The tool result for tc1 should be dropped since tc1 was dropped
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["role"], "assistant");
+    }
+
+    // -- map_reasoning_details tests -------------------------------------------
+
+    #[test]
+    fn test_map_reasoning_details_empty() {
+        assert!(map_reasoning_details(&[]).is_none());
+    }
+
+    #[test]
+    fn test_map_reasoning_details_strips_openai_responses_v1_id() {
+        let details = vec![json!({
+            "type": "reasoning.text",
+            "text": "thinking",
+            "format": "openai-responses-v1",
+            "id": "rs_abc123"
+        })];
+        let result = map_reasoning_details(&details).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].get("id").is_none());
+        assert_eq!(result[0]["text"], "thinking");
+    }
+
+    #[test]
+    fn test_map_reasoning_details_preserves_non_openai_format() {
+        let details = vec![json!({
+            "type": "reasoning.text",
+            "text": "thinking",
+            "format": "anthropic-claude-v1",
+            "id": "rs_abc123"
+        })];
+        let result = map_reasoning_details(&details).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["id"], "rs_abc123");
+    }
+}

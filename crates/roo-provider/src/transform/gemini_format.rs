@@ -339,3 +339,217 @@ pub fn build_tool_id_to_name_map(messages: &[ApiMessage]) -> std::collections::H
     }
     map
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roo_types::api::{ImageSource, MessageRole, ToolResultContent};
+
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_string(),
+        }
+    }
+
+    fn tool_use_block(id: &str, name: &str, input: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: serde_json::from_str(input).unwrap_or(serde_json::json!(input)),
+        }
+    }
+
+    fn tool_result_block(tool_use_id: &str, text: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: vec![ToolResultContent::Text {
+                text: text.to_string(),
+            }],
+            is_error: None,
+        }
+    }
+
+    fn make_message(role: MessageRole, content: Vec<ContentBlock>) -> ApiMessage {
+        ApiMessage {
+            role,
+            content,
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        }
+    }
+
+    // -- convert_anthropic_content_to_gemini tests -----------------------------
+
+    #[test]
+    fn test_text_conversion() {
+        let content = vec![text_block("Hello")];
+        let options = GeminiConversionOptions::default();
+        let parts = convert_anthropic_content_to_gemini(&content, &options);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].text.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn test_image_conversion() {
+        let content = vec![ContentBlock::Image {
+            source: ImageSource::Base64 {
+                data: "iVBORw0KGgo=".to_string(),
+                media_type: "image/png".to_string(),
+            },
+        }];
+        let options = GeminiConversionOptions::default();
+        let parts = convert_anthropic_content_to_gemini(&content, &options);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].inline_data.is_some());
+        let inline = parts[0].inline_data.as_ref().unwrap();
+        assert_eq!(inline.mime_type, "image/png");
+        assert_eq!(inline.data, "iVBORw0KGgo=");
+    }
+
+    #[test]
+    fn test_tool_use_conversion() {
+        let content = vec![tool_use_block("call_1", "read_file", r#"{"path":"test.rs"}"#)];
+        let options = GeminiConversionOptions::default();
+        let parts = convert_anthropic_content_to_gemini(&content, &options);
+        assert_eq!(parts.len(), 1);
+        let fc = parts[0].function_call.as_ref().unwrap();
+        assert_eq!(fc.name, "read_file");
+        assert_eq!(fc.args["path"], "test.rs");
+    }
+
+    #[test]
+    fn test_tool_result_conversion() {
+        let content = vec![
+            tool_use_block("call_1", "read_file", "{}"),
+            tool_result_block("call_1", "file contents"),
+        ];
+        let mut tool_id_map = std::collections::HashMap::new();
+        tool_id_map.insert("call_1".to_string(), "read_file".to_string());
+        let options = GeminiConversionOptions {
+            include_thought_signatures: false,
+            tool_id_to_name: tool_id_map,
+        };
+        let parts = convert_anthropic_content_to_gemini(&content, &options);
+        // Should have function_call + function_response
+        assert!(parts.len() >= 2);
+        let fr = parts.iter().find(|p| p.function_response.is_some()).unwrap();
+        let resp = fr.function_response.as_ref().unwrap();
+        assert_eq!(resp.name, "read_file");
+        assert!(resp.response.content.contains("file contents"));
+    }
+
+    #[test]
+    fn test_thinking_blocks_skipped() {
+        let content = vec![
+            ContentBlock::Thinking {
+                thinking: "deep thoughts".to_string(),
+                signature: "sig123".to_string(),
+            },
+            text_block("response"),
+        ];
+        let options = GeminiConversionOptions::default();
+        let parts = convert_anthropic_content_to_gemini(&content, &options);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].text.as_deref(), Some("response"));
+    }
+
+    #[test]
+    fn test_thought_signature_attached_to_function_call() {
+        let content = vec![
+            ContentBlock::Thinking {
+                thinking: "thoughts".to_string(),
+                signature: "sig_abc".to_string(),
+            },
+            tool_use_block("call_1", "read_file", "{}"),
+        ];
+        let options = GeminiConversionOptions {
+            include_thought_signatures: true,
+            ..Default::default()
+        };
+        let parts = convert_anthropic_content_to_gemini(&content, &options);
+        // Find the function_call part
+        let fc_part = parts.iter().find(|p| p.function_call.is_some()).unwrap();
+        assert_eq!(fc_part.thought_signature.as_deref(), Some("sig_abc"));
+    }
+
+    #[test]
+    fn test_thought_signature_fallback_to_skip() {
+        let content = vec![tool_use_block("call_1", "read_file", "{}")];
+        let options = GeminiConversionOptions {
+            include_thought_signatures: true,
+            ..Default::default()
+        };
+        let parts = convert_anthropic_content_to_gemini(&content, &options);
+        let fc_part = parts.iter().find(|p| p.function_call.is_some()).unwrap();
+        // Should use fallback "skip_thought_signature_validator"
+        assert_eq!(
+            fc_part.thought_signature.as_deref(),
+            Some("skip_thought_signature_validator")
+        );
+    }
+
+    // -- convert_anthropic_message_to_gemini tests -----------------------------
+
+    #[test]
+    fn test_user_message_role_mapping() {
+        let msg = make_message(MessageRole::User, vec![text_block("hello")]);
+        let options = GeminiConversionOptions::default();
+        let result = convert_anthropic_message_to_gemini(&msg, &options);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+    }
+
+    #[test]
+    fn test_assistant_message_role_mapping() {
+        let msg = make_message(MessageRole::Assistant, vec![text_block("response")]);
+        let options = GeminiConversionOptions::default();
+        let result = convert_anthropic_message_to_gemini(&msg, &options);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "model");
+    }
+
+    #[test]
+    fn test_empty_content_returns_empty() {
+        let msg = make_message(MessageRole::User, vec![]);
+        let options = GeminiConversionOptions::default();
+        let result = convert_anthropic_message_to_gemini(&msg, &options);
+        assert!(result.is_empty());
+    }
+
+    // -- build_tool_id_to_name_map tests ---------------------------------------
+
+    #[test]
+    fn test_build_tool_id_map() {
+        let messages = vec![
+            make_message(
+                MessageRole::Assistant,
+                vec![
+                    tool_use_block("call_1", "read_file", "{}"),
+                    tool_use_block("call_2", "write_file", "{}"),
+                ],
+            ),
+            make_message(MessageRole::User, vec![text_block("hello")]),
+        ];
+        let map = build_tool_id_to_name_map(&messages);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("call_1"), Some(&"read_file".to_string()));
+        assert_eq!(map.get("call_2"), Some(&"write_file".to_string()));
+    }
+
+    #[test]
+    fn test_build_tool_id_map_empty() {
+        let messages: Vec<ApiMessage> = vec![];
+        let map = build_tool_id_to_name_map(&messages);
+        assert!(map.is_empty());
+    }
+}

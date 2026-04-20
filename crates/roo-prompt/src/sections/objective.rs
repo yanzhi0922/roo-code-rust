@@ -18,3 +18,38 @@ You accomplish a given task iteratively, breaking it down into clear steps and w
 4. Once you've completed the user's task, you must use the attempt_completion tool to present the result of the task to the user.
 5. The user may provide feedback, which you can use to make improvements and try again. But DO NOT continue in pointless back and forth conversations, i.e. don't end your responses with questions or offers for further assistance."#
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_objective_section() {
+        let result = get_objective_section();
+        assert!(result.starts_with("====\n\nOBJECTIVE"));
+        assert!(result.contains("breaking it down into clear steps"));
+        assert!(result.contains("working through them methodically"));
+    }
+
+    #[test]
+    fn test_get_objective_section_all_steps() {
+        let result = get_objective_section();
+        assert!(result.contains("1. Analyze the user's task"));
+        assert!(result.contains("2. Work through these goals sequentially"));
+        assert!(result.contains("3. Remember, you have extensive capabilities"));
+        assert!(result.contains("4. Once you've completed the user's task"));
+        assert!(result.contains("5. The user may provide feedback"));
+    }
+
+    #[test]
+    fn test_get_objective_section_key_phrases() {
+        let result = get_objective_section();
+        // Key phrases from TS source
+        assert!(result.contains("ask_followup_question tool"));
+        assert!(result.contains("attempt_completion tool"));
+        assert!(result.contains("DO NOT invoke the tool"));
+        assert!(result.contains("not even with fillers"));
+        assert!(result.contains("DO NOT ask for more information on optional parameters"));
+        assert!(result.contains("pointless back and forth conversations"));
+    }
+}

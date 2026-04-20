@@ -26,8 +26,8 @@ pub use model_params::{
     ModelParams,
 };
 pub use openai_format::{
-    consolidate_reasoning_details, convert_to_openai_messages, sanitize_gemini_messages,
-    ConvertToOpenAiMessagesOptions, ReasoningDetail,
+    consolidate_reasoning_details, convert_to_openai_messages, map_reasoning_details,
+    sanitize_gemini_messages, ConvertToOpenAiMessagesOptions, ReasoningDetail,
 };
 pub use r1_zai_format::{convert_to_r1_zai_messages, R1ZaiOptions};
 pub use reasoning::{

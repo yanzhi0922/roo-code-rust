@@ -7,6 +7,48 @@ fn to_posix(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_capabilities_section_basic() {
+        let result = get_capabilities_section("/home/user/project", false);
+        assert!(result.starts_with("====\n\nCAPABILITIES"));
+        assert!(result.contains("execute CLI commands"));
+        assert!(result.contains("list files"));
+        assert!(result.contains("read and write files"));
+        assert!(result.contains("/home/user/project"));
+    }
+
+    #[test]
+    fn test_get_capabilities_section_no_mcp() {
+        let result = get_capabilities_section("/home/user/project", false);
+        assert!(!result.contains("MCP servers"));
+    }
+
+    #[test]
+    fn test_get_capabilities_section_with_mcp() {
+        let result = get_capabilities_section("/home/user/project", true);
+        assert!(result.contains("MCP servers"));
+        assert!(result.contains("additional tools and resources"));
+    }
+
+    #[test]
+    fn test_get_capabilities_section_windows_paths() {
+        let result = get_capabilities_section(r"C:\Users\test\project", false);
+        assert!(result.contains("C:/Users/test/project"));
+    }
+
+    #[test]
+    fn test_get_capabilities_section_execute_command_description() {
+        let result = get_capabilities_section("/home/user/project", false);
+        assert!(result.contains("execute_command tool"));
+        assert!(result.contains("VSCode terminal"));
+        assert!(result.contains("new terminal instance"));
+    }
+}
+
 /// Returns the capabilities section.
 ///
 /// Source: `src/core/prompts/sections/capabilities.ts` — `getCapabilitiesSection`

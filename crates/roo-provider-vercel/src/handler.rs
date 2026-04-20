@@ -2,14 +2,18 @@
 //!
 //! Uses the OpenAI-compatible chat completions API via Vercel AI Gateway.
 //! Supports prompt caching and has a default temperature of 0.5.
+//! Supports dynamic model loading from the Vercel AI Gateway API.
 //! Source: `src/api/providers/vercel-ai-gateway.ts`
+
+use std::collections::HashMap;
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 use roo_provider::{
     ApiStream, CreateMessageMetadata, OpenAiCompatibleConfig, OpenAiCompatibleProvider, Provider,
 };
 use roo_types::api::ProviderName;
-use roo_types::model::ModelInfo;
+use roo_types::model::{ModelInfo, ModelRecord};
 
 use crate::models;
 use crate::types::VercelConfig;
@@ -23,6 +27,14 @@ const DEFAULT_TEMPERATURE: f64 = 0.5;
 /// It follows the OpenAI API format for compatibility.
 pub struct VercelHandler {
     inner: OpenAiCompatibleProvider,
+    /// The configured model ID.
+    model_id: String,
+    /// API key for authentication.
+    api_key: String,
+    /// Base URL for API requests.
+    base_url: String,
+    /// Cache for dynamically fetched models.
+    dynamic_models: RwLock<Option<ModelRecord>>,
 }
 
 impl VercelHandler {
@@ -51,11 +63,11 @@ impl VercelHandler {
 
         let compatible_config = OpenAiCompatibleConfig {
             provider_name: "vercel".to_string(),
-            base_url,
-            api_key: config.api_key,
+            base_url: base_url.clone(),
+            api_key: config.api_key.clone(),
             default_model_id: models::default_model_id(),
             default_temperature: config.temperature.unwrap_or(DEFAULT_TEMPERATURE),
-            model_id: Some(model_id),
+            model_id: Some(model_id.clone()),
             model_info,
             provider_name_enum: ProviderName::VercelAiGateway,
             request_timeout: config.request_timeout,
@@ -63,7 +75,13 @@ impl VercelHandler {
 
         let inner = OpenAiCompatibleProvider::new(compatible_config)?;
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            model_id,
+            api_key: config.api_key,
+            base_url,
+            dynamic_models: RwLock::new(None),
+        })
     }
 
     /// Create a new Vercel handler from provider settings.
@@ -79,6 +97,83 @@ impl VercelHandler {
             request_timeout: None,
         });
         Self::new(config)
+    }
+
+    /// Fetches available models from the Vercel AI Gateway API.
+    ///
+    /// Results are cached in memory; subsequent calls return the cached list.
+    pub async fn fetch_models(&self) -> roo_provider::error::Result<ModelRecord> {
+        // Check cache first
+        {
+            let cache = self.dynamic_models.read().unwrap();
+            if let Some(ref models) = *cache {
+                return Ok(models.clone());
+            }
+        }
+
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(roo_provider::ProviderError::api_error_response(
+                "vercel", status, body,
+            ));
+        }
+
+        let body = response.text().await?;
+        let parsed: serde_json::Value = serde_json::from_str(&body)?;
+
+        let mut model_map: ModelRecord = HashMap::new();
+
+        if let Some(data) = parsed.get("data").and_then(|d| d.as_array()) {
+            for entry in data {
+                let id = entry["id"].as_str().unwrap_or("").to_string();
+                if id.is_empty() {
+                    continue;
+                }
+
+                let info = ModelInfo {
+                    max_tokens: Some(4096),
+                    context_window: 128000,
+                    description: Some(format!("Vercel AI Gateway model: {}", id)),
+                    ..Default::default()
+                };
+                model_map.insert(id, info);
+            }
+        }
+
+        // Cache result
+        *self.dynamic_models.write().unwrap() = Some(model_map.clone());
+
+        Ok(model_map)
+    }
+
+    /// Resolves model info for the configured model ID.
+    fn resolve_model_info(&self) -> (String, ModelInfo) {
+        // Try static models first
+        if let Some(info) = models::models().get(&self.model_id) {
+            return (self.model_id.clone(), info.clone());
+        }
+
+        // Try dynamic cache
+        if let Ok(cache) = self.dynamic_models.read() {
+            if let Some(ref dynamic) = *cache {
+                if let Some(info) = dynamic.get(&self.model_id) {
+                    return (self.model_id.clone(), info.clone());
+                }
+            }
+        }
+
+        // Fallback to inner provider
+        self.inner.get_model()
     }
 }
 
@@ -97,7 +192,7 @@ impl Provider for VercelHandler {
     }
 
     fn get_model(&self) -> (String, ModelInfo) {
-        self.inner.get_model()
+        self.resolve_model_info()
     }
 
     async fn complete_prompt(
@@ -284,5 +379,80 @@ mod tests {
                 id
             );
         }
+    }
+
+    // --- Dynamic model loading tests ---
+
+    #[test]
+    fn test_dynamic_models_cache_initially_empty() {
+        let config = VercelConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            model_id: None,
+            temperature: None,
+            request_timeout: None,
+        };
+        let handler = VercelHandler::new(config).unwrap();
+        let cache = handler.dynamic_models.read().unwrap();
+        assert!(cache.is_none());
+    }
+
+    #[test]
+    fn test_resolve_model_uses_dynamic_when_not_in_static() {
+        let config = VercelConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            model_id: Some("anthropic/dynamic-model".to_string()),
+            temperature: None,
+            request_timeout: None,
+        };
+        let handler = VercelHandler::new(config).unwrap();
+
+        // Populate dynamic cache
+        let mut dynamic = HashMap::new();
+        dynamic.insert(
+            "anthropic/dynamic-model".to_string(),
+            ModelInfo {
+                max_tokens: Some(8192),
+                context_window: 200000,
+                description: Some("Dynamically loaded Vercel model".to_string()),
+                ..Default::default()
+            },
+        );
+        *handler.dynamic_models.write().unwrap() = Some(dynamic);
+
+        let (model_id, info) = handler.get_model();
+        assert_eq!(model_id, "anthropic/dynamic-model");
+        assert_eq!(info.context_window, 200000);
+        assert_eq!(info.max_tokens, Some(8192));
+    }
+
+    #[test]
+    fn test_resolve_model_prefers_static_over_dynamic() {
+        let config = VercelConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            model_id: Some(models::DEFAULT_MODEL_ID.to_string()),
+            temperature: None,
+            request_timeout: None,
+        };
+        let handler = VercelHandler::new(config).unwrap();
+
+        // Populate dynamic cache with different info
+        let mut dynamic = HashMap::new();
+        dynamic.insert(
+            models::DEFAULT_MODEL_ID.to_string(),
+            ModelInfo {
+                max_tokens: Some(999),
+                context_window: 999,
+                description: Some("dynamic override".to_string()),
+                ..Default::default()
+            },
+        );
+        *handler.dynamic_models.write().unwrap() = Some(dynamic);
+
+        // Static model info should take priority
+        let (_, info) = handler.get_model();
+        assert_ne!(info.context_window, 999);
     }
 }
