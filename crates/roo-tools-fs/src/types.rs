@@ -15,6 +15,10 @@ pub struct ReadResult {
     pub truncated: bool,
     /// Whether the file was detected as binary.
     pub is_binary: bool,
+    /// The first line number shown (1-based). 0 for binary files.
+    pub start_line: usize,
+    /// The last line number shown (1-based). 0 for binary files.
+    pub end_line: usize,
 }
 
 /// Result of a write_to_file operation.
@@ -91,6 +95,9 @@ pub enum FsToolError {
 
     #[error("Diff apply error: {0}")]
     DiffApply(String),
+
+    #[error("Access denied by .rooignore: {0}")]
+    AccessDenied(String),
 }
 
 /// Maximum default line length for read operations.

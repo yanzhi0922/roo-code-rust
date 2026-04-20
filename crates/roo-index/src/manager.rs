@@ -61,7 +61,25 @@ impl CodeIndexManager {
     ///
     /// Returns up to `limit` results. In this implementation, search is
     /// simulated by matching against indexed file paths and contents.
+    /// Populates `start_line`, `end_line`, and `code_chunk` fields.
     pub fn search(&self, query: &str, limit: usize) -> Vec<VectorStoreSearchResult> {
+        self.search_with_prefix(query, None, limit)
+    }
+
+    /// Search the index for the given query, optionally filtered by directory prefix.
+    ///
+    /// Returns up to `limit` results sorted by relevance score (descending).
+    /// When `directory_prefix` is `Some`, only files whose path starts with
+    /// the prefix are included.
+    ///
+    /// TODO: Replace simulated matching with actual vector embedding +
+    /// cosine similarity search when the embedding backend is integrated.
+    pub fn search_with_prefix(
+        &self,
+        query: &str,
+        directory_prefix: Option<&str>,
+        limit: usize,
+    ) -> Vec<VectorStoreSearchResult> {
         if self.state == IndexingState::NotInitialized || self.state == IndexingState::Error {
             return vec![];
         }
@@ -70,13 +88,24 @@ impl CodeIndexManager {
         let mut results: Vec<VectorStoreSearchResult> = self
             .indexed_files
             .iter()
-            .filter(|path| path.to_lowercase().contains(&query_lower))
+            .filter(|path| {
+                // Filter by directory prefix if provided
+                if let Some(prefix) = directory_prefix {
+                    if !path.starts_with(prefix) {
+                        return false;
+                    }
+                }
+                path.to_lowercase().contains(&query_lower)
+            })
             .take(limit)
             .map(|path| VectorStoreSearchResult {
                 file_path: path.clone(),
                 line_number: Some(1),
                 content: format!("content of {path}"),
                 score: 1.0,
+                start_line: Some(1),
+                end_line: Some(1),
+                code_chunk: Some(format!("// matched content from {path}")),
             })
             .collect();
 

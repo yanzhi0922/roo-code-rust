@@ -324,7 +324,7 @@ impl ToolHandler for ReadFileHandler {
             indentation,
         };
 
-        match roo_tools_fs::process_read_file(&read_params, &context.cwd) {
+        match roo_tools_fs::process_read_file(&read_params, &context.cwd, None) {
             Ok(result) => ToolExecutionResult::success(result.content),
             Err(e) => ToolExecutionResult::error(format!("read_file error: {}", e)),
         }
@@ -352,7 +352,7 @@ impl ToolHandler for WriteToFileHandler {
 
         let write_params = roo_types::tool::WriteToFileParams { path, content };
 
-        match roo_tools_fs::process_write_to_file(&write_params, &context.cwd) {
+        match roo_tools_fs::process_write_to_file(&write_params, &context.cwd, None) {
             Ok(result) => {
                 let msg = if result.is_new_file {
                     format!(
@@ -495,7 +495,7 @@ impl ToolHandler for EditFileHandler {
                 .map(|v| v as u32),
         };
 
-        match roo_tools_fs::process_edit_file(&edit_params, &context.cwd) {
+        match roo_tools_fs::process_edit_file(&edit_params, &context.cwd, None) {
             Ok(result) => {
                 let msg = result
                     .message
@@ -976,8 +976,14 @@ impl ToolHandler for AttemptCompletionHandler {
             command,
         };
 
-        match roo_tools_misc::process_attempt_completion(&completion_params) {
-            Ok(_result) => ToolExecutionResult::success(completion_params.result.clone()),
+        match roo_tools_misc::process_attempt_completion(&completion_params, &[]) {
+            Ok(result) => {
+                let mut output = completion_params.result.clone();
+                if let Some(warning) = &result.todo_warning {
+                    output = format!("{}\n\n{}", warning, output);
+                }
+                ToolExecutionResult::success(output)
+            }
             Err(e) => ToolExecutionResult::error(format!("attempt_completion error: {}", e)),
         }
     }

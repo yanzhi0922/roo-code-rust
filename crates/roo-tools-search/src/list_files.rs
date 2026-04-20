@@ -6,7 +6,8 @@
 
 use crate::types::*;
 use roo_types::tool::ListFilesParams;
-use std::path::Path;
+use roo_ignore::RooIgnoreController;
+use std::path::{Path, PathBuf};
 
 /// Validate list_files parameters.
 pub fn validate_list_files_params(params: &ListFilesParams) -> Result<(), SearchToolError> {
@@ -14,6 +15,45 @@ pub fn validate_list_files_params(params: &ListFilesParams) -> Result<(), Search
         return Err(SearchToolError::Validation(
             "path must not be empty".to_string(),
         ));
+    }
+
+    if params.path.contains("..") {
+        return Err(SearchToolError::Validation(
+            "path must not contain '..' — path traversal is not allowed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate that the given directory path exists and is accessible.
+///
+/// Returns a detailed error message if the path does not exist or is not a directory.
+pub fn validate_list_path_exists(path: &str, cwd: &Path) -> Result<(), SearchToolError> {
+    let full_path = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        cwd.join(path)
+    };
+
+    if !full_path.exists() {
+        return Err(SearchToolError::Validation(format!(
+            "Path '{}' does not exist. \
+             Please check that the path is correct. \
+             If using a relative path, it is resolved against the current working directory. \
+             Tried absolute path: '{}'",
+            path,
+            full_path.display()
+        )));
+    }
+
+    if !full_path.is_dir() {
+        return Err(SearchToolError::Validation(format!(
+            "Path '{}' is not a directory. \
+             list_files can only list directory contents. \
+             Please provide a directory path.",
+            path
+        )));
     }
 
     Ok(())
@@ -244,6 +284,27 @@ fn should_ignore(relative_path: &str, patterns: &[String]) -> bool {
     false
 }
 
+/// Filter a list of file entries, removing those matched by .rooignore rules.
+///
+/// Entries whose paths (without trailing `/`) are not accessible according to
+/// the controller are removed from the list.
+pub fn filter_entries_by_rooignore(
+    entries: Vec<String>,
+    controller: Option<&RooIgnoreController>,
+) -> Vec<String> {
+    match controller {
+        Some(ctrl) => entries
+            .into_iter()
+            .filter(|entry| {
+                // Strip trailing slash for directory entries before checking
+                let path = entry.trim_end_matches('/');
+                ctrl.validate_access(path)
+            })
+            .collect(),
+        None => entries,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +465,70 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let patterns = load_gitignore_patterns(dir.path());
         assert!(patterns.is_empty());
+    }
+
+    // --- RooIgnore filtering tests ---
+
+    #[test]
+    fn test_filter_entries_by_rooignore_no_controller() {
+        let entries = vec![
+            "src/main.rs".to_string(),
+            "secret.txt".to_string(),
+            "node_modules/".to_string(),
+        ];
+        let filtered = filter_entries_by_rooignore(entries, None);
+        assert_eq!(filtered.len(), 3);
+    }
+
+    #[test]
+    fn test_filter_entries_by_rooignore_blocks_ignored() {
+        let mut ctrl = roo_ignore::RooIgnoreController::new("/tmp");
+        ctrl.load_patterns("secret.txt\nnode_modules/");
+        let entries = vec![
+            "src/main.rs".to_string(),
+            "secret.txt".to_string(),
+            "node_modules/".to_string(),
+        ];
+        let filtered = filter_entries_by_rooignore(entries, Some(&ctrl));
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].contains("src/main.rs"));
+    }
+
+    // --- Detailed error message tests ---
+
+    #[test]
+    fn test_validate_list_path_not_found_detailed_error() {
+        let result = validate_list_path_exists("/nonexistent/path", Path::new("."));
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("does not exist"), "Error should mention path not found");
+        assert!(err.contains("check that the path"), "Error should suggest checking path");
+    }
+
+    #[test]
+    fn test_validate_list_path_is_file_detailed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        let result = validate_list_path_exists(
+            file_path.to_str().unwrap(),
+            Path::new("."),
+        );
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("not a directory"), "Error should mention not a directory");
+    }
+
+    #[test]
+    fn test_validate_list_path_traversal_rejected() {
+        let params = ListFilesParams {
+            path: "../etc".to_string(),
+            recursive: false,
+        };
+        let result = validate_list_files_params(&params);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("path traversal"), "Error should mention path traversal");
     }
 }

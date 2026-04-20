@@ -12,6 +12,7 @@
 use crate::helpers::*;
 use crate::types::*;
 use regex::Regex;
+use roo_ignore::RooIgnoreController;
 use roo_types::tool::EditFileParams;
 
 /// Validate edit_file parameters.
@@ -308,8 +309,12 @@ fn build_detailed_error(
 pub fn process_edit_file(
     params: &EditFileParams,
     cwd: &std::path::Path,
+    ignore_controller: Option<&RooIgnoreController>,
 ) -> Result<EditFileResult, FsToolError> {
     validate_edit_file_params(params)?;
+
+    // Check .rooignore before any file I/O
+    check_roo_ignore(&params.file_path, ignore_controller)?;
 
     // Resolve file path (can be absolute or relative)
     let file_path = if std::path::Path::new(&params.file_path).is_absolute() {
@@ -480,7 +485,7 @@ mod tests {
             new_string: "bar".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new("."));
+        let result = process_edit_file(&params, std::path::Path::new("."), None);
         assert!(result.is_err());
     }
 
@@ -495,7 +500,7 @@ mod tests {
             new_string: "hello world\n".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
         assert!(result.message.unwrap().contains("Created new file"));
 
@@ -515,7 +520,7 @@ mod tests {
             new_string: "new content".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new("."));
+        let result = process_edit_file(&params, std::path::Path::new("."), None);
         assert!(result.is_err());
     }
 
@@ -531,7 +536,7 @@ mod tests {
             new_string: "HELLO WORLD".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
         assert!(result.message.unwrap().contains("exact match"));
 
@@ -552,7 +557,7 @@ mod tests {
             new_string: "replacement".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new("."));
+        let result = process_edit_file(&params, std::path::Path::new("."), None);
         assert!(result.is_err());
         // Verify detailed error message
         let err_msg = result.unwrap_err().to_string();
@@ -572,7 +577,7 @@ mod tests {
             new_string: "bar".to_string(),
             expected_replacements: Some(1),
         };
-        let result = process_edit_file(&params, std::path::Path::new("."));
+        let result = process_edit_file(&params, std::path::Path::new("."), None);
         assert!(result.is_err());
     }
 
@@ -588,7 +593,7 @@ mod tests {
             new_string: "bar".to_string(),
             expected_replacements: Some(3),
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
 
         let content = std::fs::read_to_string(&file_path).unwrap();
@@ -607,7 +612,7 @@ mod tests {
             new_string: "hello".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new("."));
+        let result = process_edit_file(&params, std::path::Path::new("."), None);
         assert!(result.is_err());
     }
 
@@ -631,7 +636,7 @@ mod tests {
             new_string: "HELLO\nWORLD".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
 
         let content = std::fs::read_to_string(&file_path).unwrap();
@@ -649,7 +654,7 @@ mod tests {
             new_string: "deep content".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
         assert!(file_path.exists());
     }
@@ -670,7 +675,7 @@ mod tests {
             new_string: "HELLO WORLD".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
         assert!(result.message.unwrap().contains("exact match"));
     }
@@ -689,7 +694,7 @@ mod tests {
             new_string: "HELLO WORLD".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
         assert!(result.message.unwrap().contains("whitespace-tolerant match"));
 
@@ -711,7 +716,7 @@ mod tests {
             new_string: "HELLO WORLD".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
 
         let content = std::fs::read_to_string(&file_path).unwrap();
@@ -732,7 +737,7 @@ mod tests {
             new_string: "def myFunc".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_edit_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.success);
         assert!(result.message.unwrap().contains("token-based match"));
 
@@ -752,7 +757,7 @@ mod tests {
             new_string: "fn baz() { qux }".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new("."));
+        let result = process_edit_file(&params, std::path::Path::new("."), None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("<error_details>"));
@@ -854,7 +859,7 @@ mod tests {
             new_string: "fn baz() { qux }".to_string(),
             expected_replacements: None,
         };
-        let result = process_edit_file(&params, std::path::Path::new("."));
+        let result = process_edit_file(&params, std::path::Path::new("."), None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("read_file"));

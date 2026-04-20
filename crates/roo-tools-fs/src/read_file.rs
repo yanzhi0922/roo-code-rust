@@ -9,6 +9,7 @@
 
 use crate::helpers::*;
 use crate::types::*;
+use roo_ignore::RooIgnoreController;
 use roo_types::tool_params::{IndentationParams, ReadFileMode, ReadFileParams};
 
 /// Validate read_file parameters.
@@ -75,8 +76,12 @@ pub fn validate_read_file_params(params: &ReadFileParams) -> Result<(), FsToolEr
 pub fn process_read_file(
     params: &ReadFileParams,
     cwd: &std::path::Path,
+    ignore_controller: Option<&RooIgnoreController>,
 ) -> Result<ReadResult, FsToolError> {
     validate_read_file_params(params)?;
+
+    // Check .rooignore before any file I/O
+    check_roo_ignore(&params.path, ignore_controller)?;
 
     let file_path = resolve_path(&params.path, cwd)?;
 
@@ -110,6 +115,8 @@ pub fn process_read_file(
             total_lines: 0,
             truncated: false,
             is_binary: true,
+            start_line: 0,
+            end_line: 0,
         });
     }
 
@@ -163,12 +170,17 @@ pub fn build_read_result(
     let start_line = offset.unwrap_or(1) as usize;
     let numbered = add_line_numbers_from(&truncated_lines, start_line);
 
+    let returned_lines = truncated_lines.lines().count();
+    let end_line = start_line + returned_lines.saturating_sub(1);
+
     Ok(ReadResult {
         content: numbered,
         path: path.to_string(),
         total_lines: total,
         truncated,
         is_binary: false,
+        start_line,
+        end_line,
     })
 }
 
@@ -214,12 +226,17 @@ pub fn build_read_result_indentation(
     let start_line = find_extraction_start_line(&content, anchor, params);
     let numbered = add_line_numbers_from(&truncated_content, start_line);
 
+    let returned_lines = truncated_content.lines().count();
+    let end_line = start_line + returned_lines.saturating_sub(1);
+
     Ok(ReadResult {
         content: numbered,
         path: path.to_string(),
         total_lines,
         truncated,
         is_binary: false,
+        start_line,
+        end_line,
     })
 }
 
@@ -621,7 +638,7 @@ mod tests {
     fn test_process_read_file_not_found() {
         let params = slice_params("nonexistent.txt", None, None);
         let cwd = std::env::current_dir().unwrap();
-        let result = process_read_file(&params, &cwd);
+        let result = process_read_file(&params, &cwd, None);
         assert!(result.is_err());
     }
 
@@ -629,7 +646,7 @@ mod tests {
     fn test_process_read_file_directory() {
         let dir = tempfile::tempdir().unwrap();
         let params = slice_params(dir.path().to_str().unwrap(), None, None);
-        let result = process_read_file(&params, std::path::Path::new("."));
+        let result = process_read_file(&params, std::path::Path::new("."), None);
         assert!(result.is_err());
     }
 
@@ -640,7 +657,7 @@ mod tests {
         std::fs::write(&file_path, "hello\nworld\nfoo\nbar\n").unwrap();
 
         let params = slice_params(file_path.to_str().unwrap(), None, None);
-        let result = process_read_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_read_file(&params, std::path::Path::new("."), None).unwrap();
         assert_eq!(result.total_lines, 4);
         assert!(!result.is_binary);
         assert!(result.content.contains("hello"));
@@ -653,7 +670,7 @@ mod tests {
         std::fs::write(&file_path, b"hello\x00world").unwrap();
 
         let params = slice_params(file_path.to_str().unwrap(), None, None);
-        let result = process_read_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_read_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(result.is_binary);
     }
 
@@ -664,7 +681,7 @@ mod tests {
         std::fs::write(&file_path, "line1\nline2\nline3\nline4\nline5\n").unwrap();
 
         let params = slice_params(file_path.to_str().unwrap(), Some(3), Some(2));
-        let result = process_read_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_read_file(&params, std::path::Path::new("."), None).unwrap();
         assert_eq!(result.total_lines, 5);
         assert!(result.truncated);
         assert!(result.content.contains("3 | line3"));
@@ -812,7 +829,7 @@ struct Foo {
         .unwrap();
 
         let params = indent_params(file_path.to_str().unwrap(), 5, Some(0), false);
-        let result = process_read_file(&params, std::path::Path::new(".")).unwrap();
+        let result = process_read_file(&params, std::path::Path::new("."), None).unwrap();
         assert!(!result.is_binary);
         assert!(result.content.contains("println!"));
     }

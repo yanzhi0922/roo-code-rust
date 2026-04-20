@@ -3,7 +3,9 @@
 //! Handles parsing and validation of diff parameters, coordinating
 //! the actual diff application (delegated to roo-diff).
 
+use crate::helpers::check_roo_ignore;
 use crate::types::*;
+use roo_ignore::RooIgnoreController;
 use roo_types::tool::ApplyDiffParams;
 
 /// Validate apply_diff parameters.
@@ -27,6 +29,16 @@ pub fn validate_apply_diff_params(params: &ApplyDiffParams) -> Result<(), FsTool
     // Validate diff format: must contain SEARCH/REPLACE markers
     validate_diff_format(&params.diff)?;
 
+    Ok(())
+}
+
+/// Validate apply_diff parameters including .rooignore access check.
+pub fn validate_apply_diff_access(
+    params: &ApplyDiffParams,
+    ignore_controller: Option<&RooIgnoreController>,
+) -> Result<(), FsToolError> {
+    validate_apply_diff_params(params)?;
+    check_roo_ignore(&params.path, ignore_controller)?;
     Ok(())
 }
 

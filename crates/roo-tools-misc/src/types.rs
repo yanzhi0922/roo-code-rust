@@ -5,8 +5,29 @@ use serde::{Deserialize, Serialize};
 /// Result of an attempt_completion operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionResult {
+    /// The completion result text.
     pub result: String,
+    /// Whether a command was attached.
     pub has_command: bool,
+    /// The detailed completion result data (text + images), matching TS `attempt_completion_result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_completion_result: Option<CompletionResultData>,
+    /// Warning about incomplete todos, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_warning: Option<String>,
+}
+
+/// Detailed completion result data, matching TS `attempt_completion_result` field.
+///
+/// In the TS source, `attempt_completion_result` contains the text and images
+/// returned from the user interaction after completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionResultData {
+    /// The completion result text.
+    pub text: String,
+    /// Associated image URLs (base64 data URIs).
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 /// Result of an ask_followup_question operation.

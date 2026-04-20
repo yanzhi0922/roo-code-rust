@@ -65,6 +65,14 @@ pub struct LoopControl {
     /// giving the model one extra chance. If the limit is reached again,
     /// the task terminates.
     pub mistake_grace_used: bool,
+    /// Per-tool consecutive error counts.
+    ///
+    /// Tracks how many times each tool has failed consecutively.
+    /// When a tool succeeds, its count is reset to 0.
+    /// Used to abort the task when a tool exceeds its error threshold.
+    ///
+    /// Source: `src/core/task/Task.ts` — consecutive error tracking per tool
+    pub consecutive_errors: HashMap<String, u32>,
 }
 
 impl LoopControl {
@@ -82,6 +90,7 @@ impl LoopControl {
             consecutive_mistake_count_for_apply_diff: HashMap::new(),
             consecutive_mistake_count_for_edit_file: HashMap::new(),
             mistake_grace_used: false,
+            consecutive_errors: HashMap::new(),
         }
     }
 
@@ -99,6 +108,7 @@ impl LoopControl {
             consecutive_mistake_count_for_apply_diff: HashMap::new(),
             consecutive_mistake_count_for_edit_file: HashMap::new(),
             mistake_grace_used: false,
+            consecutive_errors: HashMap::new(),
         }
     }
 
@@ -302,6 +312,47 @@ impl LoopControl {
     pub fn remaining_iterations(&self) -> Option<usize> {
         self.max_iterations.map(|max| max.saturating_sub(self.current_iteration))
     }
+
+    // -----------------------------------------------------------------------
+    // Per-tool consecutive error tracking
+    // -----------------------------------------------------------------------
+
+    /// Record a tool error, incrementing the consecutive error count for the
+    /// given tool name.
+    ///
+    /// Source: `src/core/task/Task.ts` — consecutive error tracking per tool
+    pub fn record_tool_error(&mut self, tool_name: &str) -> u32 {
+        let count = self
+            .consecutive_errors
+            .entry(tool_name.to_string())
+            .or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Record a tool success, resetting the consecutive error count for the
+    /// given tool name to 0.
+    ///
+    /// Source: `src/core/task/Task.ts` — consecutive error tracking per tool
+    pub fn record_tool_success(&mut self, tool_name: &str) {
+        self.consecutive_errors.remove(tool_name);
+    }
+
+    /// Check whether the task should be aborted due to too many consecutive
+    /// errors from a specific tool.
+    ///
+    /// Returns `true` when the consecutive error count for `tool_name` is
+    /// greater than or equal to `max`.
+    ///
+    /// Source: `src/core/task/Task.ts` — consecutive error threshold check
+    pub fn should_abort_on_errors(&self, tool_name: &str, max: u32) -> bool {
+        if max == 0 {
+            return false;
+        }
+        self.consecutive_errors
+            .get(tool_name)
+            .map_or(false, |&count| count >= max)
+    }
 }
 
 impl Default for LoopControl {
@@ -333,6 +384,7 @@ mod tests {
         assert!(lc.consecutive_mistake_count_for_apply_diff.is_empty());
         assert!(lc.consecutive_mistake_count_for_edit_file.is_empty());
         assert!(!lc.mistake_grace_used);
+        assert!(lc.consecutive_errors.is_empty());
     }
 
     #[test]
@@ -686,5 +738,69 @@ mod tests {
         assert!(!granted);
         assert_eq!(lc.consecutive_mistake_count, 3);
         assert!(!lc.should_continue()); // still at limit
+    }
+
+    // ---- consecutive_errors tests ----
+
+    #[test]
+    fn test_consecutive_errors_record_and_check() {
+        let mut lc = LoopControl::new(3);
+
+        // No errors initially
+        assert!(!lc.should_abort_on_errors("read_file", 3));
+
+        // Record errors
+        let count = lc.record_tool_error("read_file");
+        assert_eq!(count, 1);
+        assert!(!lc.should_abort_on_errors("read_file", 3));
+
+        lc.record_tool_error("read_file"); // 2
+        assert!(!lc.should_abort_on_errors("read_file", 3));
+
+        lc.record_tool_error("read_file"); // 3
+        assert!(lc.should_abort_on_errors("read_file", 3));
+    }
+
+    #[test]
+    fn test_consecutive_errors_success_resets() {
+        let mut lc = LoopControl::new(3);
+
+        lc.record_tool_error("write_to_file");
+        lc.record_tool_error("write_to_file");
+        assert_eq!(*lc.consecutive_errors.get("write_to_file").unwrap(), 2);
+
+        // Success resets the count
+        lc.record_tool_success("write_to_file");
+        assert!(lc.consecutive_errors.get("write_to_file").is_none());
+        assert!(!lc.should_abort_on_errors("write_to_file", 2));
+    }
+
+    #[test]
+    fn test_consecutive_errors_per_tool_independent() {
+        let mut lc = LoopControl::new(3);
+
+        lc.record_tool_error("read_file");
+        lc.record_tool_error("read_file");
+        lc.record_tool_error("write_to_file");
+
+        // Each tool has its own count
+        assert_eq!(*lc.consecutive_errors.get("read_file").unwrap(), 2);
+        assert_eq!(*lc.consecutive_errors.get("write_to_file").unwrap(), 1);
+
+        // Resetting one doesn't affect the other
+        lc.record_tool_success("read_file");
+        assert!(lc.consecutive_errors.get("read_file").is_none());
+        assert_eq!(*lc.consecutive_errors.get("write_to_file").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_consecutive_errors_zero_max_never_aborts() {
+        let mut lc = LoopControl::new(3);
+
+        // Even with many errors, max=0 means never abort
+        for _ in 0..100 {
+            lc.record_tool_error("apply_diff");
+        }
+        assert!(!lc.should_abort_on_errors("apply_diff", 0));
     }
 }

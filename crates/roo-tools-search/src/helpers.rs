@@ -77,8 +77,8 @@ pub fn format_codebase_results(results: &[crate::types::CodebaseMatch]) -> Strin
     let mut output = String::new();
     for r in results {
         output.push_str(&format!(
-            "{}:{}: {} (score: {:.3})\n",
-            r.file_path, r.line_number, r.line_content, r.score
+            "{}:{}-{}: {} (score: {:.3})\n",
+            r.file_path, r.start_line, r.end_line, r.code_chunk, r.score
         ));
     }
     output
@@ -197,13 +197,14 @@ mod tests {
         let results = vec![
             crate::types::CodebaseMatch {
                 file_path: "src/main.rs".to_string(),
-                line_number: 1,
-                line_content: "hello".to_string(),
                 score: 0.95,
+                start_line: 1,
+                end_line: 10,
+                code_chunk: "fn main() {}".to_string(),
             },
         ];
         let result = format_codebase_results(&results);
-        assert!(result.contains("src/main.rs:1: hello"));
+        assert!(result.contains("src/main.rs:1-10: fn main() {}"));
         assert!(result.contains("score: 0.950"));
     }
 

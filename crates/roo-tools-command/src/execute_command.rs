@@ -119,8 +119,11 @@ pub async fn execute_command(
     // 3. Ensure cwd exists
     if !resolved_cwd.exists() {
         return Err(format!(
-            "Working directory does not exist: {}",
-            resolved_cwd.display()
+            "Working directory does not exist: '{}'. \
+             Please verify the path is correct and the directory exists. \
+             Command: '{}'",
+            resolved_cwd.display(),
+            command
         ));
     }
 
@@ -144,7 +147,12 @@ pub async fn execute_command(
         let callbacks = NoopCallbacks;
         match tokio::time::timeout(timeout_duration, guard.run_command(command, &callbacks)).await {
             Ok(Ok(cmd_result)) => cmd_result,
-            Ok(Err(e)) => return Err(format!("Command execution failed: {}", e)),
+            Ok(Err(e)) => return Err(format!(
+                "Command execution failed for '{}': {}. \
+                 Working directory: '{}'. \
+                 Please check that the command is valid and try again.",
+                command, e, resolved_cwd.display()
+            )),
             Err(_) => {
                 // Timeout
                 return Ok(ExecuteCommandResult {
@@ -169,11 +177,19 @@ pub async fn execute_command(
             // Persist full output to disk
             let cmd_output_dir = dir.join("command-output");
             if let Err(e) = tokio::fs::create_dir_all(&cmd_output_dir).await {
-                return Err(format!("Failed to create output directory: {}", e));
+                return Err(format!(
+                    "Failed to create output directory '{}': {}. \
+                     Command: '{}'",
+                    cmd_output_dir.display(), e, command
+                ));
             }
             let file_path = cmd_output_dir.join(&artifact_id);
             if let Err(e) = tokio::fs::write(&file_path, &full_output).await {
-                return Err(format!("Failed to persist output: {}", e));
+                return Err(format!(
+                    "Failed to persist command output to '{}': {}. \
+                     Command: '{}'",
+                    file_path.display(), e, command
+                ));
             }
 
             // Build truncated preview
@@ -394,5 +410,39 @@ mod tests {
 
         assert!(result.artifact_id.is_some(), "output should be truncated and persisted");
         assert!(result.output.contains("OUTPUT TRUNCATED"), "should contain truncation notice");
+    }
+
+    // --- Detailed error message tests ---
+
+    #[tokio::test]
+    async fn test_execute_command_nonexistent_cwd_detailed_error() {
+        let registry = Arc::new(TerminalRegistry::new());
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+        let result = execute_command(
+            "echo hello",
+            Some(std::path::Path::new("/nonexistent/path/that/does/not/exist")),
+            Some(5000),
+            registry,
+            dir.path(),
+            Some(dir.path()),
+            100,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("does not exist"), "Error should mention missing path");
+        assert!(err.contains("echo hello"), "Error should include the command");
+        assert!(err.contains("verify the path"), "Error should suggest checking path");
+    }
+
+    #[test]
+    fn test_prepare_command_validation_detailed_error() {
+        let params = ExecuteCommandParams {
+            command: "".to_string(),
+        };
+        let result = validate_execute_command_params(&params);
+        assert!(result.is_err());
     }
 }

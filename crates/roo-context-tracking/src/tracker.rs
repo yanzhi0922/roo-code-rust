@@ -162,6 +162,79 @@ impl<S: MetadataStore> FileContextTracker<S> {
         self.recently_edited_by_roo.contains(file_path)
     }
 
+    /// Convenience method: track a file edit operation by Roo.
+    ///
+    /// Records that Roo has edited the given file at the specified timestamp.
+    /// This is equivalent to calling `add_file_to_context_mut` with
+    /// `RecordSource::RooEdited`, but uses an explicit timestamp instead of
+    /// the current time.
+    pub fn track_file_edit(&mut self, path: &str, timestamp: i64) -> Result<()> {
+        let mut metadata = self.store.load(&self.task_id)?;
+
+        // Mark existing active entries for this file as stale
+        for entry in metadata.files_in_context.iter_mut() {
+            if entry.path == path && entry.record_state == RecordState::Active {
+                entry.record_state = RecordState::Stale;
+            }
+        }
+
+        let _roo_read_date = get_latest_date_for_field(&metadata, path, |e| e.roo_read_date);
+        let _roo_edit_date = get_latest_date_for_field(&metadata, path, |e| e.roo_edit_date);
+        let user_edit_date = get_latest_date_for_field(&metadata, path, |e| e.user_edit_date);
+
+        let new_entry = FileMetadataEntry {
+            path: path.to_string(),
+            record_state: RecordState::Active,
+            record_source: RecordSource::RooEdited,
+            roo_read_date: Some(timestamp),
+            roo_edit_date: Some(timestamp),
+            user_edit_date,
+        };
+
+        metadata.files_in_context.push(new_entry);
+        self.store.save(&self.task_id, &metadata)?;
+
+        self.checkpoint_possible_files.insert(path.to_string());
+        self.recently_edited_by_roo.insert(path.to_string());
+
+        Ok(())
+    }
+
+    /// Convenience method: track a file read operation by Roo.
+    ///
+    /// Records that Roo has read the given file at the specified timestamp.
+    /// This is equivalent to calling `add_file_to_context_mut` with
+    /// `RecordSource::ReadTool`, but uses an explicit timestamp instead of
+    /// the current time.
+    pub fn track_file_read(&mut self, path: &str, timestamp: i64) -> Result<()> {
+        let mut metadata = self.store.load(&self.task_id)?;
+
+        // Mark existing active entries for this file as stale
+        for entry in metadata.files_in_context.iter_mut() {
+            if entry.path == path && entry.record_state == RecordState::Active {
+                entry.record_state = RecordState::Stale;
+            }
+        }
+
+        let _roo_read_date = get_latest_date_for_field(&metadata, path, |e| e.roo_read_date);
+        let roo_edit_date = get_latest_date_for_field(&metadata, path, |e| e.roo_edit_date);
+        let user_edit_date = get_latest_date_for_field(&metadata, path, |e| e.user_edit_date);
+
+        let new_entry = FileMetadataEntry {
+            path: path.to_string(),
+            record_state: RecordState::Active,
+            record_source: RecordSource::ReadTool,
+            roo_read_date: Some(timestamp),
+            roo_edit_date,
+            user_edit_date,
+        };
+
+        metadata.files_in_context.push(new_entry);
+        self.store.save(&self.task_id, &metadata)?;
+
+        Ok(())
+    }
+
     /// Get a list of unique file paths that Roo has read during this task.
     ///
     /// Files are sorted by most recently read first. If `since_timestamp` is
@@ -961,5 +1034,49 @@ mod tests {
         // Timestamp just above roo_read_date -> should be excluded
         let files = tracker.get_files_read_by_roo(Some(1001)).unwrap();
         assert!(files.is_empty());
+    }
+
+    // ---- track_file_edit / track_file_read tests ----
+
+    #[test]
+    fn test_track_file_edit_records_correctly() {
+        let mut tracker = make_tracker();
+        tracker.track_file_edit("src/main.rs", 5000).unwrap();
+
+        let metadata = tracker.get_task_metadata("test-task").unwrap();
+        let entry = metadata.files_in_context.last().unwrap();
+        assert_eq!(entry.path, "src/main.rs");
+        assert_eq!(entry.record_source, RecordSource::RooEdited);
+        assert_eq!(entry.roo_edit_date, Some(5000));
+        assert_eq!(entry.roo_read_date, Some(5000));
+        assert!(tracker.is_edited_by_roo("src/main.rs"));
+    }
+
+    #[test]
+    fn test_track_file_read_records_correctly() {
+        let mut tracker = make_tracker();
+        tracker.track_file_read("src/lib.rs", 3000).unwrap();
+
+        let metadata = tracker.get_task_metadata("test-task").unwrap();
+        let entry = metadata.files_in_context.last().unwrap();
+        assert_eq!(entry.path, "src/lib.rs");
+        assert_eq!(entry.record_source, RecordSource::ReadTool);
+        assert_eq!(entry.roo_read_date, Some(3000));
+        assert_eq!(entry.roo_edit_date, None);
+    }
+
+    #[test]
+    fn test_track_file_edit_then_read_preserves_edit_date() {
+        let mut tracker = make_tracker();
+        tracker.track_file_edit("src/app.rs", 1000).unwrap();
+        tracker.track_file_read("src/app.rs", 2000).unwrap();
+
+        let metadata = tracker.get_task_metadata("test-task").unwrap();
+        // The last entry should be the read
+        let read_entry = metadata.files_in_context.iter().rev().find(|e| e.record_state == RecordState::Active).unwrap();
+        assert_eq!(read_entry.record_source, RecordSource::ReadTool);
+        assert_eq!(read_entry.roo_read_date, Some(2000));
+        // roo_edit_date should be preserved from the edit
+        assert_eq!(read_entry.roo_edit_date, Some(1000));
     }
 }

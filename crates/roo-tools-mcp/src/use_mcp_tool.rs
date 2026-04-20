@@ -123,7 +123,15 @@ pub async fn execute_mcp_tool(
     use roo_types::mcp::McpConnectionStatus;
     if server.status != McpConnectionStatus::Connected {
         return McpToolExecutionResult::error(format!(
-            "Server '{}' is not connected (status: {:?})",
+            "Server '{}' is not connected (current status: {:?}). \
+             Possible causes: \
+             (1) The MCP server process crashed or was stopped. \
+             (2) The server configuration is incorrect. \
+             (3) The server is still starting up. \
+             Suggestions: \
+             - Check the server logs for errors. \
+             - Verify the server command and arguments in your MCP configuration. \
+             - Try restarting the server.",
             server_name, server.status
         ));
     }
@@ -169,7 +177,12 @@ pub async fn execute_mcp_tool(
                 e
             );
             McpToolExecutionResult::error(format!(
-                "Tool call '{}' on '{}' failed: {}",
+                "Tool call '{}' on server '{}' failed: {}. \
+                 This may indicate a problem with the MCP server or the tool implementation. \
+                 Suggestions: \
+                 - Check that the tool arguments are correct. \
+                 - Verify the MCP server is running and responsive. \
+                 - Review the server logs for detailed error information.",
                 params.tool_name, server_name, e
             ))
         }

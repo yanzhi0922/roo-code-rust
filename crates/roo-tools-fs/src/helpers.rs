@@ -1,6 +1,7 @@
 //! Helper functions for file system tools.
 
 use crate::types::FsToolError;
+use roo_ignore::RooIgnoreController;
 
 /// Strip leading line numbers from content that may have been formatted as
 /// `  1 | content` or `1→content` or similar patterns.
@@ -260,6 +261,32 @@ fn has_line_number_prefix(line: &str) -> bool {
     }
     let rest = &trimmed[digits_end..];
     rest.starts_with(" | ") || rest.starts_with("\u{2192}") || rest.starts_with(":\t")
+}
+
+/// Check if a file path is blocked by .rooignore rules.
+///
+/// Returns `Ok(())` if the path is accessible (or no controller is provided).
+/// Returns `Err(FsToolError::AccessDenied)` if the path is ignored.
+///
+/// This function is called by file operation tools (read_file, write_to_file,
+/// edit_file, apply_diff) before performing any file I/O, matching the TS
+/// behavior where `.rooignore` validation is enforced at the tool level.
+pub fn check_roo_ignore(
+    path: &str,
+    controller: Option<&RooIgnoreController>,
+) -> Result<(), FsToolError> {
+    if let Some(ctrl) = controller {
+        if !ctrl.validate_access(path) {
+            return Err(FsToolError::AccessDenied(format!(
+                "Access to '{}' is blocked by .rooignore rules. \
+                 This file or directory has been excluded from access. \
+                 If you believe this is an error, check the .rooignore file \
+                 at the project root.",
+                path
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -524,6 +551,8 @@ mod tests {
             total_lines: 1,
             truncated: false,
             is_binary: false,
+            start_line: 1,
+            end_line: 1,
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: crate::types::ReadResult = serde_json::from_str(&json).unwrap();
@@ -570,5 +599,48 @@ mod tests {
 
         let err = crate::types::FsToolError::BinaryFile("image.png".to_string());
         assert_eq!(format!("{err}"), "Binary file detected: image.png");
+    }
+
+    // ---- check_roo_ignore tests ----
+
+    #[test]
+    fn test_check_roo_ignore_no_controller() {
+        // No controller → always allow
+        assert!(check_roo_ignore("secret.txt", None).is_ok());
+        assert!(check_roo_ignore("any/path.rs", None).is_ok());
+    }
+
+    #[test]
+    fn test_check_roo_ignore_allows_accessible_file() {
+        let mut ctrl = roo_ignore::RooIgnoreController::new("/tmp");
+        ctrl.load_patterns("node_modules/\n*.log");
+        assert!(check_roo_ignore("src/main.rs", Some(&ctrl)).is_ok());
+        assert!(check_roo_ignore("README.md", Some(&ctrl)).is_ok());
+    }
+
+    #[test]
+    fn test_check_roo_ignore_blocks_ignored_file() {
+        let mut ctrl = roo_ignore::RooIgnoreController::new("/tmp");
+        ctrl.load_patterns("node_modules/\n*.log\nsecret.txt");
+        assert!(check_roo_ignore("secret.txt", Some(&ctrl)).is_err());
+        assert!(check_roo_ignore("debug.log", Some(&ctrl)).is_err());
+        assert!(check_roo_ignore("node_modules/react/index.js", Some(&ctrl)).is_err());
+    }
+
+    #[test]
+    fn test_check_roo_ignore_error_message_contains_path() {
+        let mut ctrl = roo_ignore::RooIgnoreController::new("/tmp");
+        ctrl.load_patterns("secret.txt");
+        let err = check_roo_ignore("secret.txt", Some(&ctrl)).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("secret.txt"));
+        assert!(msg.contains(".rooignore"));
+    }
+
+    #[test]
+    fn test_check_roo_ignore_empty_patterns_allows_all() {
+        let ctrl = roo_ignore::RooIgnoreController::new("/tmp");
+        // No patterns loaded → all files accessible
+        assert!(check_roo_ignore("anything.txt", Some(&ctrl)).is_ok());
     }
 }

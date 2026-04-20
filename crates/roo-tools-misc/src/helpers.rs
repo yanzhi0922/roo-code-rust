@@ -232,6 +232,8 @@ mod tests {
         let r = crate::types::CompletionResult {
             result: "Done!".to_string(),
             has_command: false,
+            attempt_completion_result: None,
+            todo_warning: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: crate::types::CompletionResult = serde_json::from_str(&json).unwrap();

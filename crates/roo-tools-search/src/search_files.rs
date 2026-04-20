@@ -7,6 +7,7 @@
 use crate::helpers::*;
 use crate::types::*;
 use roo_types::tool::SearchFilesParams;
+use roo_ignore::RooIgnoreController;
 use std::path::Path;
 use std::process::Command;
 
@@ -24,8 +25,8 @@ pub fn validate_search_files_params(params: &SearchFilesParams) -> Result<(), Se
         ));
     }
 
-    // Validate regex
-    validate_regex(&params.regex)?;
+    // Validate regex with detailed error message
+    validate_regex_detailed(&params.regex)?;
 
     // Validate file pattern if provided
     if let Some(ref pattern) = params.file_pattern {
@@ -35,6 +36,30 @@ pub fn validate_search_files_params(params: &SearchFilesParams) -> Result<(), Se
     }
 
     Ok(())
+}
+
+/// Validate a regex pattern with a detailed error message.
+///
+/// Provides suggestions for common regex mistakes.
+fn validate_regex_detailed(pattern: &str) -> Result<regex::Regex, SearchToolError> {
+    regex::Regex::new(pattern).map_err(|e| {
+        let suggestion = if pattern.contains('[') && !pattern.contains(']') {
+            "\nHint: Unmatched '[' — did you forget to close the bracket?"
+        } else if pattern.contains('(') && !pattern.contains(')') {
+            "\nHint: Unmatched '(' — did you forget to close the parenthesis?"
+        } else if pattern.ends_with('\\') {
+            "\nHint: Trailing backslash — did you mean to escape it ('\\\\')?"
+        } else {
+            ""
+        };
+        SearchToolError::InvalidRegex(format!(
+            "Invalid regex pattern '{}': {}.{} \
+             Please use valid Rust regex syntax (https://docs.rs/regex). \
+             Common patterns: '\\d+' for digits, '\\w+' for word characters, \
+             'fn\\s+\\w+' for function definitions.",
+            pattern, e, suggestion
+        ))
+    })
 }
 
 /// Check if ripgrep (`rg`) is available on the system PATH.
@@ -293,6 +318,23 @@ pub fn matches_file_pattern(file_path: &str, pattern: &str) -> bool {
     true
 }
 
+/// Filter search results by removing matches from paths ignored by .rooignore.
+///
+/// Each match's `file_path` is checked against the controller's ignore rules.
+/// Matches to ignored paths are removed from the results.
+pub fn filter_results_by_rooignore(
+    results: Vec<FileMatch>,
+    controller: Option<&RooIgnoreController>,
+) -> Vec<FileMatch> {
+    match controller {
+        Some(ctrl) => results
+            .into_iter()
+            .filter(|m| ctrl.validate_access(&m.file_path))
+            .collect(),
+        None => results,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +501,74 @@ mod tests {
     fn test_parse_ripgrep_output_invalid_json() {
         let result = parse_ripgrep_output("not json\nalso not json").unwrap();
         assert!(result.is_empty());
+    }
+
+    // --- RooIgnore filtering tests ---
+
+    #[test]
+    fn test_filter_results_by_rooignore_no_controller() {
+        let results = vec![FileMatch {
+            file_path: "secret.txt".to_string(),
+            line_number: 1,
+            line_content: "secret".to_string(),
+            context_before: vec![],
+            context_after: vec![],
+        }];
+        let filtered = filter_results_by_rooignore(results, None);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_results_by_rooignore_blocks_ignored() {
+        let mut ctrl = roo_ignore::RooIgnoreController::new("/tmp");
+        ctrl.load_patterns("secret.txt");
+        let results = vec![
+            FileMatch {
+                file_path: "src/main.rs".to_string(),
+                line_number: 1,
+                line_content: "fn main".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+            },
+            FileMatch {
+                file_path: "secret.txt".to_string(),
+                line_number: 1,
+                line_content: "secret".to_string(),
+                context_before: vec![],
+                context_after: vec![],
+            },
+        ];
+        let filtered = filter_results_by_rooignore(results, Some(&ctrl));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].file_path, "src/main.rs");
+    }
+
+    // --- Detailed regex error tests ---
+
+    #[test]
+    fn test_invalid_regex_detailed_error_unmatched_bracket() {
+        let params = SearchFilesParams {
+            path: "src".to_string(),
+            regex: "[invalid".to_string(),
+            file_pattern: None,
+        };
+        let result = validate_search_files_params(&params);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("[invalid"), "Error should include the pattern");
+        assert!(err.contains("regex syntax"), "Error should mention regex syntax");
+    }
+
+    #[test]
+    fn test_invalid_regex_detailed_error_trailing_backslash() {
+        let params = SearchFilesParams {
+            path: "src".to_string(),
+            regex: "test\\".to_string(),
+            file_pattern: None,
+        };
+        let result = validate_search_files_params(&params);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("Trailing backslash"), "Error should hint about trailing backslash");
     }
 }

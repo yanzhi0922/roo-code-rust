@@ -47,13 +47,22 @@ pub struct CodebaseSearchResult {
     pub total_results: usize,
 }
 
-/// A single codebase search match.
+/// A single codebase search match, aligned with TS `CodebaseSearchTool.ts` output.
+///
+/// Each match includes the file path, relevance score, line range, and the
+/// matching code chunk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodebaseMatch {
+    /// Relative file path of the match.
     pub file_path: String,
-    pub line_number: usize,
-    pub line_content: String,
+    /// Cosine similarity score (0.0–1.0).
     pub score: f64,
+    /// Start line of the code chunk (1-based).
+    pub start_line: usize,
+    /// End line of the code chunk (1-based).
+    pub end_line: usize,
+    /// The matching code chunk content.
+    pub code_chunk: String,
 }
 
 /// Search options.

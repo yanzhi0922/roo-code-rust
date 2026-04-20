@@ -17,6 +17,15 @@ pub struct VectorStoreSearchResult {
     pub line_number: Option<u32>,
     pub content: String,
     pub score: f64,
+    /// Start line of the code chunk (1-based).
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    /// End line of the code chunk (1-based).
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// The code chunk content.
+    #[serde(default)]
+    pub code_chunk: Option<String>,
 }
 
 /// Configuration for the code index.
@@ -93,6 +102,9 @@ mod tests {
             line_number: Some(42),
             content: "fn main() {}".to_string(),
             score: 0.95,
+            start_line: Some(42),
+            end_line: Some(50),
+            code_chunk: Some("fn main() {}".to_string()),
         };
         let json = serde_json::to_string(&result).unwrap();
         let deserialized: VectorStoreSearchResult = serde_json::from_str(&json).unwrap();
