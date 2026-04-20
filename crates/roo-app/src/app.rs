@@ -40,6 +40,16 @@ pub struct App {
     /// Terminal registry for managing terminal processes.
     terminal_registry: Option<Arc<roo_terminal::TerminalRegistry>>,
 
+    /// Message queue for buffering user messages.
+    ///
+    /// Source: TS `this.messageQueueService`
+    message_queue: Option<Arc<tokio::sync::Mutex<roo_message_queue::MessageQueueService>>>,
+
+    /// Telemetry service for capturing lifecycle events.
+    ///
+    /// Source: TS `this.telemetryService`
+    telemetry: Option<Arc<std::sync::RwLock<roo_telemetry::TelemetryService>>>,
+
     /// RooIgnore controller for file access control.
     roo_ignore: Option<Arc<roo_ignore::RooIgnoreController>>,
 
@@ -61,6 +71,8 @@ impl App {
             state,
             mcp_hub: None,
             terminal_registry: None,
+            message_queue: None,
+            telemetry: None,
             roo_ignore: None,
             skills_manager: None,
             todos: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -99,6 +111,17 @@ impl App {
         // ── Initialize MCP Hub ──────────────────────────────────────────
         self.mcp_hub = Some(Arc::new(roo_mcp::McpHub::new()));
         tracing::debug!("MCP hub initialized");
+
+        // ── Initialize Message Queue ────────────────────────────────────
+        self.message_queue = Some(Arc::new(tokio::sync::Mutex::new(
+            roo_message_queue::MessageQueueService::new(),
+        )));
+        tracing::debug!("Message queue initialized");
+
+        // ── Initialize Telemetry Service ────────────────────────────────
+        let telemetry = roo_telemetry::TelemetryService::new();
+        self.telemetry = Some(Arc::new(std::sync::RwLock::new(telemetry)));
+        tracing::debug!("Telemetry service initialized");
 
         // ── Initialize Skills Manager ───────────────────────────────────
         let mut skills = roo_skills::SkillsManager::new();
@@ -172,6 +195,18 @@ impl App {
         self.terminal_registry.as_ref()
     }
 
+    /// Get a reference to the message queue, if initialized.
+    pub fn message_queue(
+        &self,
+    ) -> Option<&Arc<tokio::sync::Mutex<roo_message_queue::MessageQueueService>>> {
+        self.message_queue.as_ref()
+    }
+
+    /// Get a reference to the telemetry service, if initialized.
+    pub fn telemetry(&self) -> Option<&Arc<std::sync::RwLock<roo_telemetry::TelemetryService>>> {
+        self.telemetry.as_ref()
+    }
+
     /// Get a reference to the roo-ignore controller, if initialized.
     pub fn roo_ignore(&self) -> Option<&Arc<roo_ignore::RooIgnoreController>> {
         self.roo_ignore.as_ref()
@@ -187,6 +222,32 @@ impl App {
         &self.todos
     }
 
+    /// Build a [`roo_task::ServiceRefs`] from the current service instances.
+    ///
+    /// Returns a `ServiceRefs` with all initialized services. Services that
+    /// haven't been initialized yet will be `None`.
+    pub fn service_refs(&self) -> roo_task::ServiceRefs {
+        roo_task::ServiceRefs {
+            mcp_hub: self.mcp_hub.clone(),
+            terminal_registry: self.terminal_registry.clone(),
+            message_queue: self.message_queue.clone(),
+            telemetry: self.telemetry.clone(),
+        }
+    }
+
+    /// Create a fully-wired [`roo_task::TaskLifecycle`] for the given config.
+    ///
+    /// This creates a `TaskEngine` from the config, wraps it in a
+    /// `TaskLifecycle`, and attaches all available service references.
+    pub fn create_task_lifecycle(
+        &self,
+        config: roo_task::TaskConfig,
+    ) -> Result<roo_task::TaskLifecycle, roo_task::TaskError> {
+        let engine = roo_task::TaskEngine::new(config)?;
+        let services = self.service_refs();
+        Ok(roo_task::TaskLifecycle::new(engine).with_services(services))
+    }
+
     /// Dispose of the application and clean up resources.
     ///
     /// Source: `src/core/ClineProvider.ts` — dispose logic
@@ -198,6 +259,13 @@ impl App {
         // Clean up MCP hub
         if let Some(hub) = &self.mcp_hub {
             let _ = hub.dispose().await;
+        }
+
+        // Shut down telemetry
+        if let Some(telemetry) = &self.telemetry {
+            if let Ok(svc) = telemetry.read() {
+                svc.shutdown();
+            }
         }
 
         tracing::info!("App disposed");
@@ -269,8 +337,48 @@ mod tests {
         assert_eq!(state.current_mode, "code");
         assert!(app.mcp_hub().is_some());
         assert!(app.terminal_registry().is_some());
+        assert!(app.message_queue().is_some());
+        assert!(app.telemetry().is_some());
         assert!(app.roo_ignore().is_some());
         assert!(app.skills_manager().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_app_service_refs() {
+        let config = AppConfig {
+            cwd: "/tmp/test".to_string(),
+            mode: "code".to_string(),
+            ..Default::default()
+        };
+        let mut app = App::new(config);
+        app.initialize().await.unwrap();
+
+        let refs = app.service_refs();
+        assert!(refs.mcp_hub.is_some());
+        assert!(refs.terminal_registry.is_some());
+        assert!(refs.message_queue.is_some());
+        assert!(refs.telemetry.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_app_create_task_lifecycle() {
+        let config = AppConfig {
+            cwd: "/tmp/test".to_string(),
+            mode: "code".to_string(),
+            ..Default::default()
+        };
+        let mut app = App::new(config);
+        app.initialize().await.unwrap();
+
+        let task_config = roo_task::TaskConfig::new("test-task-1", "/tmp/test")
+            .with_mode("code");
+        let lifecycle = app.create_task_lifecycle(task_config).unwrap();
+        assert_eq!(lifecycle.task_id(), "test-task-1");
+        // Services should be wired in
+        assert!(lifecycle.services().mcp_hub.is_some());
+        assert!(lifecycle.services().terminal_registry.is_some());
+        assert!(lifecycle.services().message_queue.is_some());
+        assert!(lifecycle.services().telemetry.is_some());
     }
 
     #[tokio::test]

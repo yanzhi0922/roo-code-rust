@@ -26,6 +26,7 @@ roo-checkpoint = { path = "../roo-checkpoint" }
 roo-skills = { path = "../roo-skills" }
 roo-command = { path = "../roo-command" }
 roo-telemetry = { path = "../roo-telemetry" }
+roo-message-queue = { path = "../roo-message-queue" }
 roo-condense = { path = "../roo-condense" }
 roo-mentions = { path = "../roo-mentions" }
 thiserror = { workspace = true }

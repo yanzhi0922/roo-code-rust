@@ -48,4 +48,4 @@ pub use message_builder::MessageBuilder;
 pub use agent_loop::{AgentLoop, AgentLoopConfig};
 pub use task_manager::TaskManager;
 pub use ask_say::{AskSayHandler, AskResponse, AskResult, AskIgnoredError};
-pub use task_lifecycle::TaskLifecycle;
+pub use task_lifecycle::{TaskLifecycle, ServiceRefs};

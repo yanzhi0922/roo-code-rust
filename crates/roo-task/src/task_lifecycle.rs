@@ -14,6 +14,8 @@
 //!
 //! Source: `src/core/task/Task.ts` — Task class methods
 
+use std::sync::Arc;
+
 use tracing::{debug, info, warn};
 
 use roo_types::message::{ClineAsk, ClineMessage, ClineSay, MessageType};
@@ -22,6 +24,39 @@ use crate::ask_say::{AskResponse, AskSayHandler};
 use crate::engine::TaskEngine;
 use crate::events::TaskEvent;
 use crate::types::{TaskConfig, TaskError, TaskState};
+
+// ---------------------------------------------------------------------------
+// ServiceRefs
+// ---------------------------------------------------------------------------
+
+/// References to external services needed by the task lifecycle.
+///
+/// All fields are optional — if not set, the corresponding functionality
+/// is silently skipped. This allows `TaskLifecycle` to work in tests and
+/// lightweight contexts without requiring the full service stack.
+///
+/// Source: `src/core/task/Task.ts` — constructor injection of services
+/// (`this.mcpHub`, `this.terminal`, `this.messageQueueService`,
+/// `this.telemetryService`).
+#[derive(Clone, Default)]
+pub struct ServiceRefs {
+    /// MCP Hub for MCP server connections.
+    ///
+    /// Source: TS `this.mcpHub`
+    pub mcp_hub: Option<Arc<roo_mcp::McpHub>>,
+    /// Terminal registry for managing terminal processes.
+    ///
+    /// Source: TS `this.terminal`
+    pub terminal_registry: Option<Arc<roo_terminal::TerminalRegistry>>,
+    /// Message queue for buffering user messages during ask states.
+    ///
+    /// Source: TS `this.messageQueueService`
+    pub message_queue: Option<Arc<tokio::sync::Mutex<roo_message_queue::MessageQueueService>>>,
+    /// Telemetry service for capturing lifecycle events.
+    ///
+    /// Source: TS `this.telemetryService`
+    pub telemetry: Option<Arc<std::sync::RwLock<roo_telemetry::TelemetryService>>>,
+}
 
 // ---------------------------------------------------------------------------
 // TaskLifecycle
@@ -45,6 +80,8 @@ pub struct TaskLifecycle {
     engine: TaskEngine,
     /// The ask/say handler for interactive communication.
     ask_say: AskSayHandler,
+    /// External service references (MCP Hub, Terminal, Message Queue, Telemetry).
+    services: ServiceRefs,
     /// Whether the task has been started.
     started: bool,
     /// Whether the task has been disposed.
@@ -66,6 +103,7 @@ impl TaskLifecycle {
         Self {
             engine,
             ask_say: AskSayHandler::new(),
+            services: ServiceRefs::default(),
             started: false,
             disposed: false,
             child_task_id: None,
@@ -73,6 +111,15 @@ impl TaskLifecycle {
             abort: false,
             abort_reason: None,
         }
+    }
+
+    /// Attach external service references to this lifecycle.
+    ///
+    /// Source: `src/core/task/Task.ts` — constructor injection of
+    /// `mcpHub`, `terminal`, `messageQueueService`, `telemetryService`.
+    pub fn with_services(mut self, services: ServiceRefs) -> Self {
+        self.services = services;
+        self
     }
 
     // -------------------------------------------------------------------
@@ -97,6 +144,16 @@ impl TaskLifecycle {
     /// Get a mutable reference to the ask/say handler.
     pub fn ask_say_mut(&mut self) -> &mut AskSayHandler {
         &mut self.ask_say
+    }
+
+    /// Get a reference to the service refs.
+    pub fn services(&self) -> &ServiceRefs {
+        &self.services
+    }
+
+    /// Get a mutable reference to the service refs.
+    pub fn services_mut(&mut self) -> &mut ServiceRefs {
+        &mut self.services
     }
 
     /// Get the task ID.
@@ -220,6 +277,9 @@ impl TaskLifecycle {
         // Emit TaskStarted event
         self.engine.emitter().emit_task_started(self.task_id());
 
+        // Telemetry: task created
+        self.emit_telemetry_task_created();
+
         Ok(())
     }
 
@@ -303,6 +363,9 @@ impl TaskLifecycle {
 
         // Emit TaskStarted event
         self.engine.emitter().emit_task_started(self.task_id());
+
+        // Telemetry: task restarted
+        self.emit_telemetry_task_restarted();
 
         Ok(())
     }
@@ -527,11 +590,22 @@ impl TaskLifecycle {
     ///
     /// Handles the user's response to an ask prompt. Depending on the
     /// current ask type, processes the response appropriately.
+    ///
+    /// If a [`MessageQueueService`] is available, the message is also
+    /// enqueued for ordered processing.
     pub async fn submit_user_message(
         &mut self,
         text: &str,
         images: Option<Vec<String>>,
     ) -> Result<(), TaskError> {
+        // Enqueue message if message queue is available
+        // Source: TS — `this.messageQueueService.addMessage(text, images)`
+        if let Some(ref queue) = self.services.message_queue {
+            let mut q = queue.lock().await;
+            q.add_message(text, images.clone());
+            debug!(text_len = text.len(), "Message enqueued");
+        }
+
         // Add user feedback message
         self.ask_say
             .say(
@@ -549,6 +623,9 @@ impl TaskLifecycle {
                 images,
             )
             .await;
+
+        // Telemetry: conversation message
+        self.emit_telemetry_conversation_message("user");
 
         debug!(text_len = text.len(), "User message submitted");
         Ok(())
@@ -657,7 +734,10 @@ impl TaskLifecycle {
     /// Source: `src/core/task/Task.ts` — `emitFinalTokenUsageUpdate()`
     pub fn emit_final_token_usage_update(&self) {
         let usage = self.engine.result().token_usage.clone();
-        self.engine.emitter().emit_token_usage_updated(usage);
+        self.engine.emitter().emit_token_usage_updated(usage.clone());
+
+        // Telemetry: LLM completion with token counts
+        self.emit_telemetry_llm_completion(&usage);
     }
 
     // -------------------------------------------------------------------
@@ -680,6 +760,8 @@ impl TaskLifecycle {
     /// Source: `src/core/task/Task.ts` — `recordToolUsage()`
     pub fn record_tool_usage(&mut self, tool_name: &str) {
         self.engine.record_tool_execution(tool_name, true);
+        // Telemetry: tool used
+        self.emit_telemetry_tool_usage(tool_name);
     }
 
     /// Record a tool error.
@@ -687,6 +769,8 @@ impl TaskLifecycle {
     /// Source: `src/core/task/Task.ts` — `recordToolError()`
     pub fn record_tool_error(&mut self, tool_name: &str, error: Option<&str>) {
         self.engine.record_tool_execution(tool_name, false);
+        // Telemetry: tool used (even on error)
+        self.emit_telemetry_tool_usage(tool_name);
         if let Some(err) = error {
             debug!(tool = tool_name, error = err, "Tool error recorded");
         }
@@ -713,10 +797,28 @@ impl TaskLifecycle {
     /// Process queued messages.
     ///
     /// Source: `src/core/task/Task.ts` — `processQueuedMessages()`
-    pub fn process_queued_messages(&mut self) {
-        // Source: TS — dequeues messages from messageQueueService
-        // and processes them based on the current ask state
-        debug!("Processing queued messages (no-op in current implementation)");
+    ///
+    /// Dequeues messages from the [`MessageQueueService`] (if available)
+    /// and returns them for processing by the caller.
+    pub async fn process_queued_messages(&mut self) -> Vec<roo_message_queue::QueuedMessage> {
+        let Some(ref queue) = self.services.message_queue else {
+            return Vec::new();
+        };
+
+        let mut q = queue.lock().await;
+        let mut drained = Vec::new();
+        while !q.is_empty() {
+            if let Some(msg) = q.dequeue_message() {
+                drained.push(msg);
+            } else {
+                break;
+            }
+        }
+
+        if !drained.is_empty() {
+            debug!(count = drained.len(), "Dequeued messages from queue");
+        }
+        drained
     }
 
     // -------------------------------------------------------------------
@@ -768,6 +870,66 @@ impl TaskLifecycle {
         self.ask_say
             .say(ClineSay::Error, Some(text), None)
             .await
+    }
+
+    // -------------------------------------------------------------------
+    // Telemetry helpers
+    // -------------------------------------------------------------------
+
+    /// Emit a telemetry "task created" event.
+    fn emit_telemetry_task_created(&self) {
+        if let Some(ref telemetry) = self.services.telemetry {
+            if let Ok(svc) = telemetry.read() {
+                svc.capture_task_created(self.task_id());
+            }
+        }
+    }
+
+    /// Emit a telemetry "task restarted" event.
+    fn emit_telemetry_task_restarted(&self) {
+        if let Some(ref telemetry) = self.services.telemetry {
+            if let Ok(svc) = telemetry.read() {
+                svc.capture_task_restarted(self.task_id());
+            }
+        }
+    }
+
+    /// Emit a telemetry "conversation message" event.
+    fn emit_telemetry_conversation_message(&self, source: &str) {
+        if let Some(ref telemetry) = self.services.telemetry {
+            if let Ok(svc) = telemetry.read() {
+                svc.capture_conversation_message(self.task_id(), source);
+            }
+        }
+    }
+
+    /// Emit a telemetry "tool used" event.
+    fn emit_telemetry_tool_usage(&self, tool: &str) {
+        if let Some(ref telemetry) = self.services.telemetry {
+            if let Ok(svc) = telemetry.read() {
+                svc.capture_tool_usage(self.task_id(), tool);
+            }
+        }
+    }
+
+    /// Emit a telemetry "LLM completion" event with token usage.
+    fn emit_telemetry_llm_completion(&self, usage: &roo_types::message::TokenUsage) {
+        if let Some(ref telemetry) = self.services.telemetry {
+            if let Ok(svc) = telemetry.read() {
+                svc.capture_llm_completion(
+                    self.task_id(),
+                    usage.total_tokens_in,
+                    usage.total_tokens_out,
+                    usage.total_cache_writes.unwrap_or(0),
+                    usage.total_cache_reads.unwrap_or(0),
+                    if usage.total_cost > 0.0 {
+                        Some(usage.total_cost)
+                    } else {
+                        None
+                    },
+                );
+            }
+        }
     }
 }
 

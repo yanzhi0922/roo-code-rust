@@ -30,6 +30,7 @@ roo-context-tracking = { path = "../roo-context-tracking" }
 roo-auto-approval = { path = "../roo-auto-approval" }
 roo-protect = { path = "../roo-protect" }
 roo-telemetry = { path = "../roo-telemetry" }
+roo-message-queue = { path = "../roo-message-queue" }
 roo-custom-tools = { path = "../roo-custom-tools" }
 roo-marketplace = { path = "../roo-marketplace" }
 roo-command = { path = "../roo-command" }
