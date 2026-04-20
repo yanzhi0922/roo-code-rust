@@ -19,7 +19,7 @@ use roo_provider_openai_native::OpenAiNativeConfig;
 use roo_provider_openai_native::OpenAiNativeHandler;
 use roo_provider_openrouter::{OpenRouterConfig, OpenRouterHandler};
 use roo_provider_deepseek::{DeepSeekConfig, DeepSeekHandler};
-use roo_provider_google::{GoogleConfig, GoogleHandler, VertexConfig, VertexHandler};
+use roo_provider_google::{GoogleConfig, GoogleHandler};
 use roo_provider_xai::{XaiConfig, XaiHandler};
 use roo_provider_mistral::{MistralConfig, MistralHandler};
 use roo_provider_fireworks::{FireworksConfig, FireworksHandler};

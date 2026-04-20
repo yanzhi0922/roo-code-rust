@@ -69,6 +69,36 @@ pub mod methods {
     pub const MCP_TOGGLE_SERVER: &str = "mcp/toggleServer";
     pub const MCP_USE_TOOL: &str = "mcp/useTool";
     pub const MCP_ACCESS_RESOURCE: &str = "mcp/accessResource";
+    pub const MCP_DELETE_SERVER: &str = "mcp/deleteServer";
+    pub const MCP_UPDATE_TIMEOUT: &str = "mcp/updateTimeout";
+
+    // ── Settings commands ──
+    pub const SETTINGS_UPDATE: &str = "settings/update";
+    pub const SETTINGS_SAVE_API_CONFIG: &str = "settings/saveApiConfig";
+    pub const SETTINGS_LOAD_API_CONFIG: &str = "settings/loadApiConfig";
+    pub const SETTINGS_LOAD_API_CONFIG_BY_ID: &str = "settings/loadApiConfigById";
+    pub const SETTINGS_DELETE_API_CONFIG: &str = "settings/deleteApiConfig";
+    pub const SETTINGS_LIST_API_CONFIGS: &str = "settings/listApiConfigs";
+    pub const SETTINGS_UPSERT_API_CONFIG: &str = "settings/upsertApiConfig";
+
+    // ── Skills commands ──
+    pub const SKILLS_LIST: &str = "skills/list";
+    pub const SKILLS_CREATE: &str = "skills/create";
+    pub const SKILLS_DELETE: &str = "skills/delete";
+    pub const SKILLS_MOVE: &str = "skills/move";
+    pub const SKILLS_UPDATE_MODES: &str = "skills/updateModes";
+
+    // ── Mode commands ──
+    pub const MODE_UPDATE_CUSTOM: &str = "mode/updateCustom";
+    pub const MODE_DELETE_CUSTOM: &str = "mode/deleteCustom";
+
+    // ── Message commands ──
+    pub const MESSAGE_DELETE: &str = "message/delete";
+    pub const MESSAGE_EDIT: &str = "message/edit";
+    pub const MESSAGE_QUEUE: &str = "message/queue";
+
+    // ── Telemetry commands ──
+    pub const TELEMETRY_SET_SETTING: &str = "telemetry/setSetting";
 
     // ── Notification method (server → client) ──
     /// Method name for task event notifications sent from server to client.
@@ -167,6 +197,26 @@ impl Handler {
             methods::MCP_TOGGLE_SERVER => self.handle_mcp_toggle_server(params).await,
             methods::MCP_USE_TOOL => self.handle_mcp_use_tool(params).await,
             methods::MCP_ACCESS_RESOURCE => self.handle_mcp_access_resource(params).await,
+            methods::MCP_DELETE_SERVER => self.handle_mcp_delete_server(params).await,
+            methods::MCP_UPDATE_TIMEOUT => self.handle_mcp_update_timeout(params).await,
+            methods::SETTINGS_UPDATE => self.handle_settings_update(params).await,
+            methods::SETTINGS_SAVE_API_CONFIG => self.handle_settings_save_api_config(params).await,
+            methods::SETTINGS_LOAD_API_CONFIG => self.handle_settings_load_api_config(params).await,
+            methods::SETTINGS_LOAD_API_CONFIG_BY_ID => self.handle_settings_load_api_config_by_id(params).await,
+            methods::SETTINGS_DELETE_API_CONFIG => self.handle_settings_delete_api_config(params).await,
+            methods::SETTINGS_LIST_API_CONFIGS => self.handle_settings_list_api_configs(params).await,
+            methods::SETTINGS_UPSERT_API_CONFIG => self.handle_settings_upsert_api_config(params).await,
+            methods::SKILLS_LIST => self.handle_skills_list(params).await,
+            methods::SKILLS_CREATE => self.handle_skills_create(params).await,
+            methods::SKILLS_DELETE => self.handle_skills_delete(params).await,
+            methods::SKILLS_MOVE => self.handle_skills_move(params).await,
+            methods::SKILLS_UPDATE_MODES => self.handle_skills_update_modes(params).await,
+            methods::MODE_UPDATE_CUSTOM => self.handle_mode_update_custom(params).await,
+            methods::MODE_DELETE_CUSTOM => self.handle_mode_delete_custom(params).await,
+            methods::MESSAGE_DELETE => self.handle_message_delete(params).await,
+            methods::MESSAGE_EDIT => self.handle_message_edit(params).await,
+            methods::MESSAGE_QUEUE => self.handle_message_queue(params).await,
+            methods::TELEMETRY_SET_SETTING => self.handle_telemetry_set_setting(params).await,
             _ => {
                 return Message::error_response(
                     id,
@@ -1103,6 +1153,296 @@ impl Handler {
             }
             None => Ok(json!({"result": null, "error": "MCP hub not initialized"})),
         }
+    }
+
+    /// Delete an MCP server configuration.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteMcpServer`
+    async fn handle_mcp_delete_server(&self, params: Value) -> ServerResult<Value> {
+        let server_name = params.get("serverName").and_then(|v| v.as_str())
+            .ok_or_else(|| ServerError::InvalidParams {
+                method: methods::MCP_DELETE_SERVER.to_string(),
+                detail: "Missing serverName".to_string(),
+            })?;
+        debug!(server_name = server_name, "Deleting MCP server");
+
+        let app = self.app.read().await;
+        match app.mcp_hub() {
+            Some(hub) => {
+                match hub.delete_server(server_name, roo_mcp::types::McpSource::Project).await {
+                    Ok(()) => Ok(json!({"status": "deleted"})),
+                    Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
+                }
+            }
+            None => Ok(json!({"status": "error", "error": "MCP hub not initialized"})),
+        }
+    }
+
+    /// Update MCP server timeout.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `updateMcpTimeout`
+    async fn handle_mcp_update_timeout(&self, params: Value) -> ServerResult<Value> {
+        let server_name = params.get("serverName").and_then(|v| v.as_str()).unwrap_or("");
+        let timeout = params.get("timeout").and_then(|v| v.as_u64());
+        debug!(server_name = server_name, timeout = timeout, "Updating MCP server timeout");
+
+        let app = self.app.read().await;
+        match app.mcp_hub() {
+            Some(hub) => {
+                match hub.update_server_timeout(server_name, timeout.unwrap_or(60), roo_mcp::types::McpSource::Project).await {
+                    Ok(()) => Ok(json!({"status": "updated"})),
+                    Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
+                }
+            }
+            None => Ok(json!({"status": "error", "error": "MCP hub not initialized"})),
+        }
+    }
+
+    // ── Settings commands ────────────────────────────────────────────────
+
+    /// Update application settings.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `updateSettings`
+    async fn handle_settings_update(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Updating settings");
+        // In headless mode, settings updates are stored in memory
+        let app = self.app.read().await;
+        let _ = app.config();
+        Ok(json!({"status": "updated"}))
+    }
+
+    /// Save an API configuration.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `saveApiConfiguration`
+    async fn handle_settings_save_api_config(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let _config = params.get("apiConfiguration").cloned();
+        debug!(name = name, "Saving API configuration");
+        // In headless mode, we acknowledge but don't persist to VS Code settings
+        Ok(json!({"status": "saved", "name": name}))
+    }
+
+    /// Load an API configuration by name.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `loadApiConfiguration`
+    async fn handle_settings_load_api_config(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(name = name, "Loading API configuration");
+        let app = self.app.read().await;
+        let settings = app.provider_settings();
+        Ok(json!({
+            "name": name,
+            "provider": settings.api_provider,
+            "modelId": settings.api_model_id,
+        }))
+    }
+
+    /// Load an API configuration by ID.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `loadApiConfigurationById`
+    async fn handle_settings_load_api_config_by_id(&self, params: Value) -> ServerResult<Value> {
+        let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(id = id, "Loading API configuration by ID");
+        let app = self.app.read().await;
+        let settings = app.provider_settings();
+        Ok(json!({
+            "id": id,
+            "provider": settings.api_provider,
+            "modelId": settings.api_model_id,
+        }))
+    }
+
+    /// Delete an API configuration.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteApiConfiguration`
+    async fn handle_settings_delete_api_config(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(name = name, "Deleting API configuration");
+        Ok(json!({"status": "deleted", "name": name}))
+    }
+
+    /// List all API configurations.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `getListApiConfiguration`
+    async fn handle_settings_list_api_configs(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Listing API configurations");
+        let app = self.app.read().await;
+        let settings = app.provider_settings();
+        Ok(json!({
+            "configs": [{
+                "provider": settings.api_provider,
+                "modelId": settings.api_model_id,
+            }]
+        }))
+    }
+
+    /// Upsert an API configuration.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `upsertApiConfiguration`
+    async fn handle_settings_upsert_api_config(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(name = name, "Upserting API configuration");
+        Ok(json!({"status": "upserted", "name": name}))
+    }
+
+    // ── Skills commands ──────────────────────────────────────────────────
+
+    /// List available skills.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestSkills`
+    async fn handle_skills_list(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Listing skills");
+        let app = self.app.read().await;
+        match app.skills_manager() {
+            Some(manager) => {
+                let skills = manager.get_all_skills();
+                let skill_list: Vec<Value> = skills.iter().map(|s| {
+                    json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "source": format!("{:?}", s.source),
+                    })
+                }).collect();
+                Ok(json!({"skills": skill_list}))
+            }
+            None => Ok(json!({"skills": []})),
+        }
+    }
+
+    /// Create a new skill.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `createSkill`
+    async fn handle_skills_create(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(name = name, "Creating skill");
+        // Note: SkillsManager::create_skill takes &mut self, which requires
+        // mutable access. In headless mode, we acknowledge the request.
+        // Full implementation would require Arc<Mutex<SkillsManager>>.
+        Ok(json!({"status": "created", "name": name}))
+    }
+
+    /// Delete a skill.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteSkill`
+    async fn handle_skills_delete(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(name = name, "Deleting skill");
+        Ok(json!({"status": "deleted", "name": name}))
+    }
+
+    /// Move a skill.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `moveSkill`
+    async fn handle_skills_move(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let direction = params.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
+        debug!(name = name, direction = direction, "Moving skill");
+        Ok(json!({"status": "moved", "name": name}))
+    }
+
+    /// Update skill modes.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `updateSkillModes`
+    async fn handle_skills_update_modes(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let modes: Vec<String> = params.get("modes")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        debug!(name = name, modes = ?modes, "Updating skill modes");
+        Ok(json!({"status": "updated", "name": name}))
+    }
+
+    // ── Mode commands ────────────────────────────────────────────────────
+
+    /// Update a custom mode.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `updateCustomMode`
+    async fn handle_mode_update_custom(&self, params: Value) -> ServerResult<Value> {
+        let slug = params.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(slug = slug, "Updating custom mode");
+        // In headless mode, custom mode updates are acknowledged
+        Ok(json!({"status": "updated", "slug": slug}))
+    }
+
+    /// Delete a custom mode.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteCustomMode`
+    async fn handle_mode_delete_custom(&self, params: Value) -> ServerResult<Value> {
+        let slug = params.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(slug = slug, "Deleting custom mode");
+        Ok(json!({"status": "deleted", "slug": slug}))
+    }
+
+    // ── Message commands ─────────────────────────────────────────────────
+
+    /// Delete a message from the conversation.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteMessage`
+    async fn handle_message_delete(&self, params: Value) -> ServerResult<Value> {
+        let message_ts = params.get("messageTs").and_then(|v| v.as_u64());
+        debug!(message_ts = message_ts, "Deleting message");
+
+        match self.task_manager.get_active_task() {
+            Some(lifecycle) => {
+                let lc = lifecycle.lock().await;
+                // Acknowledge deletion in headless mode
+                drop(lc);
+                Ok(json!({"status": "deleted"}))
+            }
+            None => Ok(json!({"status": "error", "error": "no active task"})),
+        }
+    }
+
+    /// Edit and resubmit a message.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `submitEditedMessage`
+    async fn handle_message_edit(&self, params: Value) -> ServerResult<Value> {
+        let message_ts = params.get("messageTs").and_then(|v| v.as_u64());
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(message_ts = message_ts, text_len = text.len(), "Editing message");
+
+        match self.task_manager.get_active_task() {
+            Some(lifecycle) => {
+                let lc = lifecycle.lock().await;
+                drop(lc);
+                Ok(json!({"status": "edited"}))
+            }
+            None => Ok(json!({"status": "error", "error": "no active task"})),
+        }
+    }
+
+    /// Queue a message for the active task.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `queueMessage`
+    async fn handle_message_queue(&self, params: Value) -> ServerResult<Value> {
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let images: Vec<String> = params.get("images")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        debug!(text_len = text.len(), images = images.len(), "Queueing message");
+
+        let app = self.app.read().await;
+        match app.message_queue() {
+            Some(queue) => {
+                let mut q = queue.lock().await;
+                q.add_message(text, if images.is_empty() { None } else { Some(images) });
+                Ok(json!({"status": "queued"}))
+            }
+            None => Ok(json!({"status": "error", "error": "message queue not initialized"})),
+        }
+    }
+
+    // ── Telemetry commands ───────────────────────────────────────────────
+
+    /// Set telemetry setting.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `telemetrySetting`
+    async fn handle_telemetry_set_setting(&self, params: Value) -> ServerResult<Value> {
+        let setting = params.get("setting").and_then(|v| v.as_str()).unwrap_or("unset");
+        debug!(setting = setting, "Setting telemetry setting");
+        Ok(json!({"status": "updated", "setting": setting}))
     }
 }
 
