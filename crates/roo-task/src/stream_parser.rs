@@ -138,7 +138,14 @@ pub struct StreamParser {
     /// Complete tool calls (accumulated from ToolCall or ToolCallPartial sequences).
     tool_calls: Vec<ParsedToolCall>,
     /// Pending partial tool calls being accumulated (keyed by index).
+    /// Used for the `ToolCallPartial` chunk type (index-based tracking).
     pending_tool_calls: HashMap<u64, PendingToolCall>,
+    /// Active tool calls being accumulated via start/delta/end pattern.
+    /// Keyed by tool call ID to support multiple concurrent tool calls.
+    /// Used for `ToolCallStart` / `ToolCallDelta` / `ToolCallEnd` chunk types.
+    ///
+    /// Source: TS `NativeToolCallParser` — tracks streaming tool calls by ID
+    active_tool_calls: HashMap<String, PendingToolCall>,
     /// Thinking / reasoning blocks.
     thinking_blocks: Vec<ThinkingBlock>,
     /// Current thinking text being accumulated.
@@ -160,6 +167,7 @@ impl StreamParser {
             text: String::new(),
             tool_calls: Vec::new(),
             pending_tool_calls: HashMap::new(),
+            active_tool_calls: HashMap::new(),
             thinking_blocks: Vec::new(),
             current_thinking: None,
             current_thinking_signature: None,
@@ -238,36 +246,39 @@ impl StreamParser {
             }
 
             ApiStreamChunk::ToolCallStart { id, name } => {
-                // Start tracking a new partial tool call
-                self.pending_tool_calls.insert(
-                    0, // Use 0 as default index for start/end based tracking
-                    PendingToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: String::new(),
-                    },
-                );
+                // Start tracking a new partial tool call using ID-based tracking.
+                // This supports multiple concurrent tool calls via start/delta/end pattern.
+                //
+                // Source: TS `NativeToolCallParser.startStreamingToolCall()` —
+                // guards against duplicate start events for the same ID.
+                if !self.active_tool_calls.contains_key(id) {
+                    self.active_tool_calls.insert(
+                        id.clone(),
+                        PendingToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: String::new(),
+                        },
+                    );
+                }
             }
 
-            ApiStreamChunk::ToolCallDelta { id: _, delta } => {
-                // Find the pending tool call and append the delta
-                // For start/delta/end pattern, there should be exactly one pending
-                if let Some(pending) = self.pending_tool_calls.values_mut().next() {
+            ApiStreamChunk::ToolCallDelta { id, delta } => {
+                // Append the delta to the correct active tool call by ID.
+                // This correctly handles multiple interleaved tool calls.
+                if let Some(pending) = self.active_tool_calls.get_mut(id) {
                     pending.arguments.push_str(delta);
                 }
             }
 
             ApiStreamChunk::ToolCallEnd { id } => {
-                // Finalize the pending tool call
-                // Find by matching on the pending entry (start/delta/end uses single tracking)
-                if let Some(pending) = self.pending_tool_calls.remove(&0) {
-                    if pending.id == *id {
-                        self.tool_calls.push(ParsedToolCall {
-                            id: pending.id,
-                            name: pending.name,
-                            arguments: pending.arguments,
-                        });
-                    }
+                // Finalize the active tool call by ID and move it to completed.
+                if let Some(pending) = self.active_tool_calls.remove(id) {
+                    self.tool_calls.push(ParsedToolCall {
+                        id: pending.id,
+                        name: pending.name,
+                        arguments: pending.arguments,
+                    });
                 }
             }
 
@@ -312,8 +323,21 @@ impl StreamParser {
     /// This flushes any pending partial tool calls and the current thinking
     /// block, then returns the complete aggregated content.
     pub fn finalize(mut self) -> ParsedStreamContent {
-        // Flush pending partial tool calls
+        // Flush pending partial tool calls (index-based tracking)
         for (_, pending) in self.pending_tool_calls.drain() {
+            if !pending.id.is_empty() && !pending.name.is_empty() {
+                self.tool_calls.push(ParsedToolCall {
+                    id: pending.id,
+                    name: pending.name,
+                    arguments: pending.arguments,
+                });
+            }
+        }
+
+        // Flush active tool calls (ID-based start/delta/end tracking).
+        // Source: TS `NativeToolCallParser.finalizeRawChunks()` — finalizes
+        // any streaming tool calls that weren't explicitly ended.
+        for (_, pending) in self.active_tool_calls.drain() {
             if !pending.id.is_empty() && !pending.name.is_empty() {
                 self.tool_calls.push(ParsedToolCall {
                     id: pending.id,
@@ -348,7 +372,9 @@ impl StreamParser {
 
     /// Check whether any tool calls have been accumulated.
     pub fn has_tool_calls(&self) -> bool {
-        !self.tool_calls.is_empty() || !self.pending_tool_calls.is_empty()
+        !self.tool_calls.is_empty()
+            || !self.pending_tool_calls.is_empty()
+            || !self.active_tool_calls.is_empty()
     }
 
     /// Get the current usage info (if received).
@@ -718,5 +744,111 @@ mod tests {
             arguments: "not json".into(),
         };
         assert_eq!(tc.parse_arguments(), serde_json::Value::Null);
+    }
+
+    // --- Multi-tool start/delta/end concurrency tests ---
+
+    #[test]
+    fn test_parser_multiple_concurrent_start_delta_end() {
+        // Two interleaved tool calls using start/delta/end pattern.
+        // This tests the fix for the bug where all calls used key 0.
+        let mut parser = StreamParser::new();
+
+        // Start first tool call
+        parser.feed_chunk(&ApiStreamChunk::ToolCallStart {
+            id: "tc_a".into(),
+            name: "read_file".into(),
+        });
+        // Start second tool call (interleaved)
+        parser.feed_chunk(&ApiStreamChunk::ToolCallStart {
+            id: "tc_b".into(),
+            name: "list_files".into(),
+        });
+        // Delta for first tool
+        parser.feed_chunk(&ApiStreamChunk::ToolCallDelta {
+            id: "tc_a".into(),
+            delta: r#"{"path":"a.rs"}"#.into(),
+        });
+        // Delta for second tool
+        parser.feed_chunk(&ApiStreamChunk::ToolCallDelta {
+            id: "tc_b".into(),
+            delta: r#"{"path":".","recursive":true}"#.into(),
+        });
+        // End first tool
+        parser.feed_chunk(&ApiStreamChunk::ToolCallEnd {
+            id: "tc_a".into(),
+        });
+        // End second tool
+        parser.feed_chunk(&ApiStreamChunk::ToolCallEnd {
+            id: "tc_b".into(),
+        });
+
+        let content = parser.finalize();
+        assert_eq!(content.tool_calls.len(), 2);
+
+        let names: Vec<&str> = content.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+        assert!(names.contains(&"read_file"), "Expected read_file in {:?}", names);
+        assert!(names.contains(&"list_files"), "Expected list_files in {:?}", names);
+
+        // Verify arguments are correct for each tool
+        for tc in &content.tool_calls {
+            if tc.name == "read_file" {
+                assert_eq!(tc.id, "tc_a");
+                assert_eq!(tc.arguments, r#"{"path":"a.rs"}"#);
+            } else if tc.name == "list_files" {
+                assert_eq!(tc.id, "tc_b");
+                assert_eq!(tc.arguments, r#"{"path":".","recursive":true}"#);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parser_duplicate_tool_call_start_ignored() {
+        // Duplicate start events for the same ID should be ignored,
+        // matching TS behavior that guards against duplicate tool_call_start.
+        let mut parser = StreamParser::new();
+
+        parser.feed_chunk(&ApiStreamChunk::ToolCallStart {
+            id: "tc_1".into(),
+            name: "read_file".into(),
+        });
+        // Duplicate start (should be ignored)
+        parser.feed_chunk(&ApiStreamChunk::ToolCallStart {
+            id: "tc_1".into(),
+            name: "read_file".into(),
+        });
+        parser.feed_chunk(&ApiStreamChunk::ToolCallDelta {
+            id: "tc_1".into(),
+            delta: r#"{"path":"x.rs"}"#.into(),
+        });
+        parser.feed_chunk(&ApiStreamChunk::ToolCallEnd {
+            id: "tc_1".into(),
+        });
+
+        let content = parser.finalize();
+        assert_eq!(content.tool_calls.len(), 1);
+        assert_eq!(content.tool_calls[0].arguments, r#"{"path":"x.rs"}"#);
+    }
+
+    #[test]
+    fn test_parser_unfinalized_active_tool_call_flushed() {
+        // Active tool calls that weren't explicitly ended should be flushed
+        // in finalize(), matching TS `finalizeRawChunks()` behavior.
+        let mut parser = StreamParser::new();
+
+        parser.feed_chunk(&ApiStreamChunk::ToolCallStart {
+            id: "tc_unfinished".into(),
+            name: "write_to_file".into(),
+        });
+        parser.feed_chunk(&ApiStreamChunk::ToolCallDelta {
+            id: "tc_unfinished".into(),
+            delta: r#"{"path":"a.rs"}"#.into(),
+        });
+        // No ToolCallEnd — stream ended prematurely
+
+        let content = parser.finalize();
+        assert_eq!(content.tool_calls.len(), 1);
+        assert_eq!(content.tool_calls[0].name, "write_to_file");
+        assert_eq!(content.tool_calls[0].id, "tc_unfinished");
     }
 }

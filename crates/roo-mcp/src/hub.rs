@@ -221,17 +221,33 @@ impl McpHub {
     }
 
     /// Delete a connection by name and source.
+    ///
+    /// Properly closes the transport for connected servers before removing.
+    /// Corresponds to TS: `McpHub.deleteConnection`.
     pub async fn delete_connection(&self, name: &str, source: McpSource) -> McpResult<()> {
         let mut connections = self.connections.write().await;
         let before_len = connections.len();
 
-        connections.retain(|conn| {
-            !(conn.name() == name && conn.source() == source)
-        });
+        // Partition into matching (to delete) and remaining connections
+        let (to_delete, remaining): (Vec<_>, Vec<_>) =
+            connections.drain(..).partition(|conn| {
+                conn.name() == name && conn.source() == source
+            });
+
+        // Close transports for connected servers being deleted (best-effort)
+        for conn in to_delete {
+            if let McpConnection::Connected(mut c) = conn {
+                tracing::debug!("Closing transport for '{}' during deletion", name);
+                let _ = c.transport.close().await;
+            }
+        }
+
+        // Restore remaining connections
+        *connections = remaining;
 
         // Clean up sanitized name registry if no more connections with this name
-        let remaining = connections.iter().any(|c| c.name() == name);
-        if !remaining {
+        let has_remaining = connections.iter().any(|c| c.name() == name);
+        if !has_remaining {
             let sanitized = sanitize_mcp_name(name);
             let mut registry = self.sanitized_name_registry.write().await;
             registry.remove(&sanitized);
@@ -676,6 +692,10 @@ impl McpHub {
     }
 
     /// Handle MCP globally enabled/disabled change.
+    ///
+    /// Corresponds to TS: `McpHub.handleMcpEnabledChange`.
+    /// When disabled, properly closes all transports and converts to disconnected placeholders.
+    /// When enabled, refreshes all connections.
     pub async fn handle_mcp_enabled_change(&self, enabled: bool) -> McpResult<()> {
         *self.mcp_enabled.write().await = enabled;
 
@@ -683,25 +703,25 @@ impl McpHub {
             // Re-connect all servers
             self.refresh_all_connections().await?;
         } else {
-            // Disconnect all servers (but keep placeholders)
+            // Disconnect all servers: close transports and convert to disconnected placeholders
             let mut connections = self.connections.write().await;
-            for conn in connections.iter_mut() {
-                if let McpConnection::Connected(_) = conn {
-                    conn.server_mut().status = McpConnectionStatus::Disconnected;
+            let drained: Vec<McpConnection> = connections.drain(..).collect();
+            let mut new_connections = Vec::with_capacity(drained.len());
+            for conn in drained {
+                match conn {
+                    McpConnection::Connected(mut c) => {
+                        // Properly close the transport
+                        let _ = c.transport.close().await;
+                        c.server.status = McpConnectionStatus::Disconnected;
+                        new_connections.push(McpConnection::Disconnected(
+                            DisconnectedMcpConnection { server: c.server },
+                        ));
+                    }
+                    other => {
+                        new_connections.push(other);
+                    }
                 }
             }
-            // Replace all connected with disconnected
-            let new_connections: Vec<McpConnection> = connections
-                .drain(..)
-                .map(|conn| match conn {
-                    McpConnection::Connected(c) => {
-                        McpConnection::Disconnected(DisconnectedMcpConnection {
-                            server: c.server,
-                        })
-                    }
-                    other => other,
-                })
-                .collect();
             *connections = new_connections;
         }
 
@@ -709,33 +729,69 @@ impl McpHub {
         Ok(())
     }
 
-    /// Get all servers (as McpServerConnection for external consumption).
+    /// Get enabled servers, deduplicating by name with project servers taking priority.
+    ///
+    /// Corresponds to TS: `McpHub.getServers`.
+    /// Only returns enabled (non-disabled) servers. When the same server name exists
+    /// in both global and project sources, the project version takes priority.
     pub fn get_servers(&self) -> Vec<McpServerConnection> {
         // Synchronous version — use try_read to avoid blocking
         match self.connections.try_read() {
-            Ok(connections) => connections
-                .iter()
-                .map(|conn| McpServerConnection {
-                    name: conn.name().to_string(),
-                    status: conn.server().status,
-                    tools: conn.server().tools.clone(),
-                    resources: conn.server().resources.clone(),
-                    resource_templates: conn.server().resource_templates.clone(),
-                    disabled_tools: conn
-                        .server()
-                        .tools
-                        .iter()
-                        .filter(|t| !t.enabled_for_prompt)
-                        .map(|t| t.name.clone())
-                        .collect(),
-                    errors: conn.server().error_history.clone(),
-                })
-                .collect(),
+            Ok(connections) => {
+                let enabled: Vec<_> = connections
+                    .iter()
+                    .filter(|c| !c.server().disabled)
+                    .collect();
+
+                // Deduplicate: project servers override global servers with same name
+                let mut seen = std::collections::HashMap::new();
+                for conn in &enabled {
+                    let name = conn.name().to_string();
+                    match seen.get(&name) {
+                        Some(existing_source) => {
+                            // Project takes priority over global
+                            if conn.source() == McpSource::Project
+                                && *existing_source != McpSource::Project
+                            {
+                                seen.insert(name, conn.source());
+                            }
+                        }
+                        None => {
+                            seen.insert(name, conn.source());
+                        }
+                    }
+                }
+
+                // Build result from deduplicated connections
+                enabled
+                    .into_iter()
+                    .filter(|conn| {
+                        seen.get(conn.name()).map_or(false, |s| *s == conn.source())
+                    })
+                    .map(|conn| McpServerConnection {
+                        name: conn.name().to_string(),
+                        status: conn.server().status,
+                        tools: conn.server().tools.clone(),
+                        resources: conn.server().resources.clone(),
+                        resource_templates: conn.server().resource_templates.clone(),
+                        disabled_tools: conn
+                            .server()
+                            .tools
+                            .iter()
+                            .filter(|t| !t.enabled_for_prompt)
+                            .map(|t| t.name.clone())
+                            .collect(),
+                        errors: conn.server().error_history.clone(),
+                    })
+                    .collect()
+            }
             Err(_) => Vec::new(),
         }
     }
 
-    /// Get all servers asynchronously.
+    /// Get all servers asynchronously (including disabled ones).
+    ///
+    /// Corresponds to TS: `McpHub.getAllServers`.
     pub async fn get_all_servers(&self) -> Vec<McpServerConnection> {
         let connections = self.connections.read().await;
         connections
@@ -759,15 +815,25 @@ impl McpHub {
     }
 
     /// Find a server name by its sanitized name.
+    ///
+    /// Corresponds to TS: `McpHub.findServerNameBySanitizedName`.
+    /// Checks in order: exact match → registry → fuzzy match.
     pub async fn find_server_name_by_sanitized_name(&self, sanitized_name: &str) -> Option<String> {
-        // First try the registry
+        // 1. First try exact match against connection names
+        let connections = self.connections.read().await;
+        if let Some(exact) = connections.iter().find(|c| c.name() == sanitized_name) {
+            return Some(exact.name().to_string());
+        }
+        drop(connections);
+
+        // 2. Check the sanitized name registry
         let registry = self.sanitized_name_registry.read().await;
         if let Some(original) = registry.get(sanitized_name) {
             return Some(original.clone());
         }
         drop(registry);
 
-        // Fallback: fuzzy match against all connection names
+        // 3. Fallback: fuzzy match (treat hyphens and underscores as equivalent)
         let connections = self.connections.read().await;
         for conn in connections.iter() {
             if tool_names_match(conn.name(), sanitized_name) {

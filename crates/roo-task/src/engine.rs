@@ -483,6 +483,50 @@ impl TaskEngine {
         }
         self.result.clone()
     }
+
+    // -------------------------------------------------------------------
+    // Persistence stubs
+    // -------------------------------------------------------------------
+    // Source: TS `Task.ts` — `saveClineMessages()`, `saveApiConversationHistory()`,
+    // `getSavedApiConversationHistory()`, etc.
+    //
+    // TODO: Wire up actual persistence when the storage layer is available.
+    // These stubs provide the interface that the agent loop expects.
+
+    /// Save cline messages (UI-facing messages) to persistent storage.
+    ///
+    /// Source: TS `Task.ts` — `saveClineMessages()`
+    pub async fn save_cline_messages(&self) -> Result<(), TaskError> {
+        // TODO: Implement persistence via roo-task-persistence
+        tracing::debug!(count = self.cline_messages.len(), "save_cline_messages (stub)");
+        Ok(())
+    }
+
+    /// Save API conversation history to persistent storage.
+    ///
+    /// Source: TS `Task.ts` — `saveApiConversationHistory()`
+    pub async fn save_api_conversation_history(&self) -> Result<(), TaskError> {
+        // TODO: Implement persistence via roo-task-persistence
+        tracing::debug!(count = self.api_conversation_history.len(), "save_api_conversation_history (stub)");
+        Ok(())
+    }
+
+    /// Load API conversation history from persistent storage.
+    ///
+    /// Source: TS `Task.ts` — `getSavedApiConversationHistory()`
+    pub async fn load_api_conversation_history(&mut self) -> Result<(), TaskError> {
+        // TODO: Implement loading from roo-task-persistence
+        // For now, history stays in memory
+        Ok(())
+    }
+
+    /// Save task metadata (state, result, config) to persistent storage.
+    ///
+    /// Source: TS `Task.ts` — `saveTask()`
+    pub async fn save_task(&self) -> Result<(), TaskError> {
+        // TODO: Implement task metadata persistence
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

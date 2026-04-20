@@ -21,15 +21,12 @@ pub async fn estimate_token_count(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use roo_types::api::ContentBlock;
-
     #[test]
     fn test_estimate_token_count_empty() {
-        // Empty content should return 0 without calling the provider
-        let content: Vec<ContentBlock> = vec![];
+        // Empty content should return 0 without calling the provider.
         // We can't easily test the async version without a mock provider,
         // but the logic is trivial: empty -> 0
+        let content: Vec<roo_types::api::ContentBlock> = vec![];
         assert!(content.is_empty());
     }
 }

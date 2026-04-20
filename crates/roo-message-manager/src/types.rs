@@ -150,12 +150,22 @@ pub struct ApiMessage {
     /// Links this Summary to its `condense_context` cline message.
     pub condense_id: Option<String>,
 
+    /// Points to the `condense_id` of the summary that replaces this message.
+    /// Messages with `condense_parent` are filtered out when sending to API if
+    /// the summary still exists.
+    pub condense_parent: Option<String>,
+
     /// `true` when this entry is a truncation marker produced by the sliding
     /// window.
     pub is_truncation_marker: bool,
 
     /// Links this marker to its `sliding_window_truncation` cline message.
     pub truncation_id: Option<String>,
+
+    /// Points to the `truncation_id` of the marker that hides this message.
+    /// Messages with `truncation_parent` are filtered out when sending to API
+    /// if the marker still exists.
+    pub truncation_parent: Option<String>,
 }
 
 impl ApiMessage {
@@ -166,8 +176,10 @@ impl ApiMessage {
             role: role.into(),
             is_summary: false,
             condense_id: None,
+            condense_parent: None,
             is_truncation_marker: false,
             truncation_id: None,
+            truncation_parent: None,
         }
     }
 
@@ -182,26 +194,34 @@ impl ApiMessage {
     }
 
     /// Create a Summary message linked to a condense event.
+    ///
+    /// In the TS source, summary messages have `role: "user"` (fresh-start model).
     pub fn summary(ts: Option<i64>, condense_id: impl Into<String>) -> Self {
         Self {
             ts,
-            role: "assistant".into(),
+            role: "user".into(),
             is_summary: true,
             condense_id: Some(condense_id.into()),
+            condense_parent: None,
             is_truncation_marker: false,
             truncation_id: None,
+            truncation_parent: None,
         }
     }
 
     /// Create a truncation marker linked to a sliding-window event.
+    ///
+    /// In the TS source, truncation markers have `role: "user"`.
     pub fn truncation_marker(ts: Option<i64>, truncation_id: impl Into<String>) -> Self {
         Self {
             ts,
-            role: "assistant".into(),
+            role: "user".into(),
             is_summary: false,
             condense_id: None,
+            condense_parent: None,
             is_truncation_marker: true,
             truncation_id: Some(truncation_id.into()),
+            truncation_parent: None,
         }
     }
 }
@@ -269,16 +289,24 @@ mod tests {
     fn api_message_summary() {
         let msg = ApiMessage::summary(Some(300), "condense-1");
         assert!(msg.is_summary);
+        assert_eq!(msg.role, "user"); // TS: fresh-start model uses "user"
         assert_eq!(msg.condense_id.as_deref(), Some("condense-1"));
+        assert!(msg.condense_parent.is_none());
         assert!(!msg.is_truncation_marker);
+        assert!(msg.truncation_id.is_none());
+        assert!(msg.truncation_parent.is_none());
     }
 
     #[test]
     fn api_message_truncation_marker() {
         let msg = ApiMessage::truncation_marker(Some(400), "trunc-1");
         assert!(msg.is_truncation_marker);
+        assert_eq!(msg.role, "user"); // TS: truncation markers use "user"
         assert_eq!(msg.truncation_id.as_deref(), Some("trunc-1"));
+        assert!(msg.truncation_parent.is_none());
         assert!(!msg.is_summary);
+        assert!(msg.condense_id.is_none());
+        assert!(msg.condense_parent.is_none());
     }
 
     #[test]

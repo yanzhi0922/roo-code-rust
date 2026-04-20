@@ -81,18 +81,24 @@ impl McpServerState {
     }
 
     /// Append an error message, truncating to max length and adding to history.
+    ///
+    /// Corresponds to TS: `McpHub.appendErrorMessage`.
+    /// Adds "...(error message truncated)" suffix when truncated.
     pub fn append_error(&mut self, error_msg: &str) {
         let truncated = if error_msg.len() > Self::MAX_ERROR_LENGTH {
-            &error_msg[..Self::MAX_ERROR_LENGTH]
+            format!(
+                "{}...(error message truncated)",
+                &error_msg[..Self::MAX_ERROR_LENGTH]
+            )
         } else {
-            error_msg
+            error_msg.to_string()
         };
 
-        self.error = truncated.to_string();
+        self.error = truncated.clone();
 
         self.error_history.push(McpErrorEntry {
             server_name: self.name.clone(),
-            error: truncated.to_string(),
+            error: truncated,
             hints: Vec::new(),
         });
 

@@ -31,8 +31,20 @@ pub fn read_task_messages(
         return Ok(Vec::new());
     }
 
-    let messages: Vec<ClineMessage> = serde_json::from_str(&content)?;
-    Ok(messages)
+    match serde_json::from_str::<Vec<ClineMessage>>(&content) {
+        Ok(messages) => Ok(messages),
+        Err(e) => {
+            // Match TS behavior: return empty on parse errors rather than
+            // propagating the error. The TS source catches parse errors and
+            // returns `[]`.
+            eprintln!(
+                "[readTaskMessages] Failed to parse {}: {}",
+                path.display(),
+                e
+            );
+            Ok(Vec::new())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,8 +116,9 @@ mod tests {
         std::fs::write(&path, "not valid json").unwrap();
 
         let fs = OsFileSystem;
-        let result = read_task_messages(&fs, &path);
-        assert!(result.is_err());
+        // Matches TS behavior: returns empty vector on parse errors
+        let result = read_task_messages(&fs, &path).unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]

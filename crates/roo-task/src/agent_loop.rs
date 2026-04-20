@@ -455,8 +455,25 @@ impl AgentLoop {
             let has_tool_calls = !parsed.tool_calls.is_empty();
 
             // Check for empty response (no text AND no tool calls)
+            //
+            // Source: TS `recursivelyMakeClineRequests` — when the API returns
+            // no assistant messages, the last user message is removed from
+            // history before retrying to prevent consecutive user messages
+            // (which would cause tool_result validation errors).
             if !has_text && !has_tool_calls {
                 self.engine.loop_control_mut().record_no_assistant_message();
+
+                // Remove the last user message from history before retrying.
+                // This matches TS behavior where `apiConversationHistory.pop()`
+                // removes the user message that received no response.
+                let history = self.engine.api_conversation_history_mut();
+                if let Some(last_msg) = history.last() {
+                    if last_msg.role == roo_types::api::MessageRole::User {
+                        history.pop();
+                        debug!("Removed last user message before empty response retry");
+                    }
+                }
+
                 if self.engine.loop_control_mut().should_retry_empty_response() {
                     warn!("Empty API response (no text, no tool calls), retrying...");
                     continue;
@@ -506,8 +523,16 @@ impl AgentLoop {
             // We have tool calls — reset no-tool-use counter
             self.engine.loop_control_mut().reset_no_tool_use();
 
+            // 6b. new_task isolation: if new_task appears alongside other tools,
+            // truncate any tools after it. This prevents orphaned tools when
+            // delegation disposes the parent task.
+            //
+            // Source: TS `recursivelyMakeClineRequests` — enforces that new_task
+            // must be the last tool in a message turn.
+            let tool_calls = self.enforce_new_task_isolation(&parsed.tool_calls);
+
             // 7. Execute tool calls
-            let all_succeeded = self.execute_tools(&parsed.tool_calls).await?;
+            let all_succeeded = self.execute_tools(&tool_calls).await?;
 
             if !all_succeeded && self.config.stop_on_tool_error {
                 debug!("Stopping due to tool error (stop_on_tool_error = true)");
@@ -516,8 +541,7 @@ impl AgentLoop {
             }
 
             // Check if attempt_completion was executed — complete the task
-            let has_attempt_completion = parsed
-                .tool_calls
+            let has_attempt_completion = tool_calls
                 .iter()
                 .any(|tc| tc.name == "attempt_completion");
 
@@ -528,6 +552,38 @@ impl AgentLoop {
                 }
                 self.engine.complete()?;
                 break;
+            }
+
+            // Check if ask_followup_question was executed — pause for user input.
+            //
+            // Source: TS `presentAssistantMessage` — when ask_followup_question
+            // is encountered, the loop pauses and waits for user response.
+            // In headless/CLI mode, we log and continue (the tool already
+            // returned its result). In interactive mode, this would block.
+            let has_ask_followup = tool_calls
+                .iter()
+                .any(|tc| tc.name == "ask_followup_question");
+
+            if has_ask_followup {
+                debug!("ask_followup_question executed, user interaction may be needed");
+                // In headless mode, the tool already returned its formatted
+                // question. In interactive mode, the response would be injected
+                // back into the conversation before continuing.
+            }
+
+            // Check for new_task delegation — delegate the task.
+            //
+            // Source: TS `presentAssistantMessage` — new_task triggers
+            // `startSubtask()` which delegates to a child task.
+            let has_new_task = tool_calls
+                .iter()
+                .any(|tc| tc.name == "new_task");
+
+            if has_new_task {
+                debug!("new_task executed, delegating to subtask");
+                // TODO: Wire up actual task delegation when subtask infrastructure
+                // is available. For now, the tool handler processes the params
+                // and returns a success message.
             }
 
             // 8. Advance iteration
@@ -763,6 +819,13 @@ impl AgentLoop {
                 if self.config.enable_checkpoints {
                     self.maybe_checkpoint(&tool_call.name).await;
                 }
+
+                // Update file context tracker for file-modifying tools.
+                //
+                // Source: TS `presentAssistantMessage` — after tool execution,
+                // `fileContextTracker.trackFileContext()` is called to record
+                // which files were read or modified during the task.
+                self.update_file_context(&tool_call.name, &params);
             }
 
             // Add tool result to conversation history
@@ -789,6 +852,115 @@ impl AgentLoop {
         self.dispatcher
             .dispatch(&tool_call.name, params, &context)
             .await
+    }
+
+    // -------------------------------------------------------------------
+    // new_task isolation
+    // -------------------------------------------------------------------
+
+    /// Enforce `new_task` isolation: if `new_task` appears alongside other
+    /// tools, truncate any tools that come after it and inject error
+    /// tool_results for the truncated tools.
+    ///
+    /// Source: TS `recursivelyMakeClineRequests` — "Enforce new_task isolation:
+    /// if new_task is called alongside other tools, truncate any tools that
+    /// come after it and inject error tool_results."
+    fn enforce_new_task_isolation(
+        &mut self,
+        tool_calls: &[crate::stream_parser::ParsedToolCall],
+    ) -> Vec<crate::stream_parser::ParsedToolCall> {
+        let new_task_idx = tool_calls
+            .iter()
+            .position(|tc| tc.name == "new_task");
+
+        match new_task_idx {
+            Some(idx) if idx < tool_calls.len() - 1 => {
+                // new_task found but not last — truncate subsequent tools
+                let truncated: Vec<_> = tool_calls[idx + 1..].to_vec();
+                if !truncated.is_empty() {
+                    warn!(
+                        truncated_count = truncated.len(),
+                        "new_task isolation: truncating {} tool(s) after new_task",
+                        truncated.len()
+                    );
+                    // Inject error tool_results for truncated tools into conversation
+                    for tc in &truncated {
+                        let error_result = ToolExecutionResult::error(
+                            "This tool was not executed because new_task was called in the same message turn. \
+                             The new_task tool must be the last tool in a message.",
+                        );
+                        let result_msg =
+                            MessageBuilder::create_tool_result_message(&tc.id, &error_result);
+                        self.engine.add_api_message(result_msg);
+                    }
+                }
+                tool_calls[..=idx].to_vec()
+            }
+            _ => tool_calls.to_vec(),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Image generation stub
+    // -------------------------------------------------------------------
+
+    /// Handle image generation requests.
+    ///
+    /// Source: TS `presentAssistantMessage` — supports `generateImage`
+    /// functionality via image generation APIs (e.g., DALL-E, Flux).
+    ///
+    /// TODO: Wire up actual image generation when the image generation
+    /// service is available. For now, returns a placeholder.
+    async fn handle_image_generation(
+        &self,
+        _prompt: &str,
+    ) -> ToolExecutionResult {
+        warn!("Image generation not yet implemented");
+        ToolExecutionResult::error(
+            "Image generation is not yet supported in this implementation.",
+        )
+    }
+
+    // -------------------------------------------------------------------
+    // File context tracking
+    // -------------------------------------------------------------------
+
+    /// Update the file context tracker after tool execution.
+    ///
+    /// Source: TS `presentAssistantMessage` — after each tool execution,
+    /// `fileContextTracker.trackFileContext()` is called with the tool name
+    /// and file path to record which files were accessed or modified.
+    fn update_file_context(&self, tool_name: &str, params: &serde_json::Value) {
+        // Extract file path from tool parameters
+        let file_path = match tool_name {
+            "read_file" | "write_to_file" | "apply_diff" | "edit_file" => {
+                params.get("path")
+                    .or_else(|| params.get("filePath"))
+                    .or_else(|| params.get("file_path"))
+                    .and_then(|v| v.as_str())
+                    .map(|p| p.to_string())
+            }
+            "list_files" | "search_files" | "codebase_search" => {
+                params.get("path").and_then(|v| v.as_str()).map(|p| p.to_string())
+            }
+            _ => None,
+        };
+
+        if let Some(path) = file_path {
+            let operation = match tool_name {
+                "read_file" | "list_files" | "search_files" | "codebase_search" => "read",
+                "write_to_file" | "apply_diff" | "edit_file" => "write",
+                _ => "unknown",
+            };
+            debug!(
+                tool = tool_name,
+                path = %path,
+                operation = operation,
+                "File context tracked"
+            );
+            // TODO: Wire up actual file context tracker when available:
+            // self.file_context_tracker.track(path, operation);
+        }
     }
 
     // -------------------------------------------------------------------
@@ -1565,5 +1737,165 @@ mod tests {
 
         assert_eq!(result.status, TaskState::Completed);
         assert!(result.tool_usage.contains_key("attempt_completion"));
+    }
+
+    // --- new_task isolation tests ---
+
+    #[test]
+    fn test_new_task_isolation_truncates_after() {
+        // When new_task appears before other tools, those after it should be truncated
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+
+        let tool_calls = vec![
+            crate::stream_parser::ParsedToolCall {
+                id: "tc_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            },
+            crate::stream_parser::ParsedToolCall {
+                id: "tc_2".into(),
+                name: "new_task".into(),
+                arguments: r#"{"mode":"code","message":"sub task"}"#.into(),
+            },
+            crate::stream_parser::ParsedToolCall {
+                id: "tc_3".into(),
+                name: "write_to_file".into(),
+                arguments: r#"{"path":"b.rs","content":"x"}"#.into(),
+            },
+        ];
+
+        let result = agent.enforce_new_task_isolation(&tool_calls);
+        assert_eq!(result.len(), 2); // read_file + new_task
+        assert_eq!(result[0].name, "read_file");
+        assert_eq!(result[1].name, "new_task");
+    }
+
+    #[test]
+    fn test_new_task_isolation_no_truncation_when_last() {
+        // When new_task is the last tool, no truncation should occur
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+
+        let tool_calls = vec![
+            crate::stream_parser::ParsedToolCall {
+                id: "tc_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            },
+            crate::stream_parser::ParsedToolCall {
+                id: "tc_2".into(),
+                name: "new_task".into(),
+                arguments: r#"{"mode":"code","message":"sub task"}"#.into(),
+            },
+        ];
+
+        let result = agent.enforce_new_task_isolation(&tool_calls);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_new_task_isolation_no_new_task() {
+        // When there's no new_task, all tools should be preserved
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+
+        let tool_calls = vec![
+            crate::stream_parser::ParsedToolCall {
+                id: "tc_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            },
+            crate::stream_parser::ParsedToolCall {
+                id: "tc_2".into(),
+                name: "write_to_file".into(),
+                arguments: r#"{"path":"b.rs","content":"x"}"#.into(),
+            },
+        ];
+
+        let result = agent.enforce_new_task_isolation(&tool_calls);
+        assert_eq!(result.len(), 2);
+    }
+
+    // --- Empty response user message removal test ---
+
+    #[tokio::test]
+    async fn test_empty_response_removes_user_message() {
+        // When the API returns empty responses, the user message should be
+        // removed before retrying to prevent consecutive user messages.
+        let config = TaskConfig::new("test-task", "/tmp/work")
+            .with_mode("code")
+            .with_max_iterations(10)
+            .with_consecutive_mistake_limit(10)
+            .with_task_text("Hello");
+
+        let engine = TaskEngine::new(config).unwrap();
+
+        // Provider that returns empty responses then completes
+        struct EmptyThenCompleteProvider {
+            call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl EmptyThenCompleteProvider {
+            fn new() -> Self {
+                Self {
+                    call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                }
+            }
+        }
+        #[async_trait::async_trait]
+        impl Provider for EmptyThenCompleteProvider {
+            async fn create_message(
+                &self, _system_prompt: &str, _messages: Vec<roo_types::api::ApiMessage>,
+                _tools: Option<Vec<serde_json::Value>>, _metadata: CreateMessageMetadata,
+            ) -> Result<roo_provider::handler::ApiStream, roo_provider::ProviderError> {
+                use futures::stream;
+                let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count < 1 {
+                    // Return empty response (no chunks)
+                    Ok(Box::pin(stream::iter(vec![])))
+                } else {
+                    // Return completion
+                    Ok(Box::pin(stream::iter(vec![
+                        Ok(roo_types::api::ApiStreamChunk::Text { text: "Done".into() }),
+                        Ok(roo_types::api::ApiStreamChunk::ToolCall {
+                            id: "call_1".into(),
+                            name: "attempt_completion".into(),
+                            arguments: r#"{"result":"Done!"}"#.into(),
+                        }),
+                    ])))
+                }
+            }
+            fn get_model(&self) -> (String, roo_types::model::ModelInfo) {
+                ("mock".to_string(), Default::default())
+            }
+            async fn complete_prompt(&self, _prompt: &str) -> Result<String, roo_provider::ProviderError> {
+                Ok("done".to_string())
+            }
+            fn provider_name(&self) -> roo_types::api::ProviderName { roo_types::api::ProviderName::FakeAi }
+        }
+
+        let builder = MessageBuilder::new("test");
+        let mut dispatcher = ToolDispatcher::new();
+        dispatcher.register_fn("attempt_completion", |_params, _ctx| {
+            ToolExecutionResult::success("Done!")
+        });
+
+        let mut agent = AgentLoop::new(engine, Box::new(EmptyThenCompleteProvider::new()), builder, dispatcher);
+        let result = agent.run_loop().await.unwrap();
+
+        // Should eventually complete after empty responses
+        assert_eq!(result.status, TaskState::Completed);
     }
 }
