@@ -128,6 +128,29 @@ pub enum TaskEvent {
     /// Mode switched.
     /// Source: TS `switch_mode` tool → emit
     ModeSwitched { task_id: String, mode: String },
+
+    // --- Streaming events (real-time) ---
+    /// A text delta was received from the streaming API response.
+    /// Source: TS `presentAssistantMessage()` — text streaming state machine
+    StreamingTextDelta { task_id: String, text: String },
+    /// A tool use started (tool call header received from stream).
+    /// Source: TS `presentAssistantMessage()` — tool_use detection
+    StreamingToolUseStarted {
+        task_id: String,
+        tool_name: String,
+        tool_id: String,
+    },
+    /// A tool use completed (tool result available).
+    /// Source: TS `presentAssistantMessage()` — after tool execution
+    StreamingToolUseCompleted {
+        task_id: String,
+        tool_name: String,
+        tool_id: String,
+        success: bool,
+    },
+    /// Streaming response completed.
+    /// Source: TS `recursivelyMakeClineRequests()` — after stream ends
+    StreamingCompleted { task_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +366,48 @@ impl TaskEventEmitter {
         self.emit(&TaskEvent::ModeSwitched {
             task_id: task_id.to_string(),
             mode: mode.to_string(),
+        });
+    }
+
+    // --- Streaming emit methods ---
+
+    /// Emit a streaming text delta event.
+    pub fn emit_streaming_text_delta(&self, task_id: &str, text: &str) {
+        self.emit(&TaskEvent::StreamingTextDelta {
+            task_id: task_id.to_string(),
+            text: text.to_string(),
+        });
+    }
+
+    /// Emit a streaming tool use started event.
+    pub fn emit_streaming_tool_use_started(&self, task_id: &str, tool_name: &str, tool_id: &str) {
+        self.emit(&TaskEvent::StreamingToolUseStarted {
+            task_id: task_id.to_string(),
+            tool_name: tool_name.to_string(),
+            tool_id: tool_id.to_string(),
+        });
+    }
+
+    /// Emit a streaming tool use completed event.
+    pub fn emit_streaming_tool_use_completed(
+        &self,
+        task_id: &str,
+        tool_name: &str,
+        tool_id: &str,
+        success: bool,
+    ) {
+        self.emit(&TaskEvent::StreamingToolUseCompleted {
+            task_id: task_id.to_string(),
+            tool_name: tool_name.to_string(),
+            tool_id: tool_id.to_string(),
+            success,
+        });
+    }
+
+    /// Emit a streaming completed event.
+    pub fn emit_streaming_completed(&self, task_id: &str) {
+        self.emit(&TaskEvent::StreamingCompleted {
+            task_id: task_id.to_string(),
         });
     }
 

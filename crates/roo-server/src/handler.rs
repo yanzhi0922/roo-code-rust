@@ -5,16 +5,21 @@
 //!
 //! This module implements the handler for each JSON-RPC method, mapping them
 //! to the corresponding TypeScript webviewMessageHandler operations.
+//!
+//! R10-A: Updated to use TaskLifecycle and AskSayHandler from R9-C.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tracing::{debug, error, info, instrument, warn};
 
 use roo_app::App;
 use roo_jsonrpc::types::Message;
+use roo_task::task_lifecycle::TaskLifecycle;
+use roo_task::ask_say::AskResponse;
+use roo_task::events::TaskEvent;
 use roo_task::TaskManager;
 
 use crate::error::{ServerError, ServerResult};
@@ -64,6 +69,10 @@ pub mod methods {
     pub const MCP_TOGGLE_SERVER: &str = "mcp/toggleServer";
     pub const MCP_USE_TOOL: &str = "mcp/useTool";
     pub const MCP_ACCESS_RESOURCE: &str = "mcp/accessResource";
+
+    // ── Notification method (server → client) ──
+    /// Method name for task event notifications sent from server to client.
+    pub const NOTIFICATION_TASK_EVENT: &str = "notification/taskEvent";
 }
 
 // ---------------------------------------------------------------------------
@@ -73,9 +82,15 @@ pub mod methods {
 /// Handles JSON-RPC requests by dispatching to the appropriate App method.
 ///
 /// Source: `src/core/webview/webviewMessageHandler.ts` — `webviewMessageHandler` function
+///
+/// R10-A: Now uses [`TaskLifecycle`] for all task operations and forwards
+/// [`TaskEvent`]s to the client as JSON-RPC notifications.
 pub struct Handler {
     app: Arc<tokio::sync::RwLock<App>>,
     task_manager: Arc<TaskManager>,
+    /// Pending JSON-RPC notifications to be sent to the client.
+    /// Event listeners push notifications here; the server polls them.
+    pending_notifications: Arc<Mutex<Vec<Message>>>,
 }
 
 impl Handler {
@@ -84,6 +99,7 @@ impl Handler {
         Self {
             app: Arc::new(tokio::sync::RwLock::new(app)),
             task_manager: Arc::new(TaskManager::new()),
+            pending_notifications: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -92,6 +108,7 @@ impl Handler {
         Self {
             app,
             task_manager: Arc::new(TaskManager::new()),
+            pending_notifications: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -175,6 +192,33 @@ impl Handler {
         }
     }
 
+    // ── Notification helpers ────────────────────────────────────────────
+
+    /// Register an event listener on the given lifecycle that forwards
+    /// events as JSON-RPC notifications to the client.
+    ///
+    /// Source: TS `postStateToWebview()` — forwards task state to the webview
+    fn register_event_forwarder(&self, lifecycle: &TaskLifecycle) {
+        let notifications = self.pending_notifications.clone();
+        let task_id = lifecycle.task_id().to_string();
+
+        lifecycle.engine().emitter().on(move |event| {
+            let notification = task_event_to_notification(event, &task_id);
+            if let Some(msg) = notification {
+                notifications.lock().unwrap().push(msg);
+            }
+        });
+    }
+
+    /// Drain all pending notifications, returning them and clearing the queue.
+    ///
+    /// The server calls this after each request-response cycle to forward
+    /// any queued task events to the client.
+    pub fn drain_notifications(&self) -> Vec<Message> {
+        let mut guard = self.pending_notifications.lock().unwrap();
+        std::mem::take(&mut *guard)
+    }
+
     // ── Lifecycle ───────────────────────────────────────────────────────
 
     async fn handle_initialize(&self, _params: Value) -> ServerResult<Value> {
@@ -202,11 +246,22 @@ impl Handler {
 
     // ── Task commands ───────────────────────────────────────────────────
 
-    /// C9 — Create a TaskEngine, store in TaskManager, set as active.
+    /// R10-A — Create a TaskLifecycle, store in TaskManager, start the task.
+    ///
+    /// Source: TS `startTask()` — creates a new Task and initiates the loop
     async fn handle_task_start(&self, params: Value) -> ServerResult<Value> {
         let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
         let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("code");
-        info!(mode = mode, text_len = text.len(), "Starting new task");
+        let images: Vec<String> = params
+            .get("images")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        info!(mode = mode, text_len = text.len(), images = images.len(), "Starting new task");
 
         let task_id = generate_task_id();
         let cwd = {
@@ -214,20 +269,41 @@ impl Handler {
             app.cwd().to_string()
         };
 
-        // Create a TaskEngine to manage the task lifecycle
+        // Create a TaskEngine, then wrap it in a TaskLifecycle
         let mut task_config = roo_task::types::TaskConfig::new(&task_id, &cwd);
         task_config.mode = mode.to_string();
         task_config.task_text = if text.is_empty() { None } else { Some(text.to_string()) };
+        task_config.images = images;
 
         match roo_task::engine::TaskEngine::new(task_config) {
             Ok(engine) => {
-                // C9: Store engine in TaskManager, set as active task
-                self.task_manager.create_task(task_id.clone(), engine);
-                Ok(json!({
-                    "taskId": task_id,
-                    "mode": mode,
-                    "status": "started",
-                }))
+                let lifecycle = TaskLifecycle::new(engine);
+
+                // Register event forwarder before storing
+                self.register_event_forwarder(&lifecycle);
+
+                // Store lifecycle in TaskManager, set as active task
+                self.task_manager.create_task(task_id.clone(), lifecycle);
+
+                // Now start the task via TaskLifecycle
+                let lifecycle_arc = self.task_manager.get_task(&task_id).unwrap();
+                let mut lc = lifecycle_arc.lock().await;
+                match lc.start().await {
+                    Ok(()) => Ok(json!({
+                        "taskId": task_id,
+                        "mode": mode,
+                        "status": "started",
+                    })),
+                    Err(e) => {
+                        error!(error = %e, "Failed to start task lifecycle");
+                        Ok(json!({
+                            "taskId": task_id,
+                            "mode": mode,
+                            "status": "error",
+                            "error": e.to_string(),
+                        }))
+                    }
+                }
             }
             Err(e) => {
                 error!(error = %e, "Failed to create task engine");
@@ -241,41 +317,51 @@ impl Handler {
         }
     }
 
-    /// C10 — Cancel the active or specified task.
+    /// R10-A — Cancel the active or specified task.
+    ///
+    /// Source: TS `cancelCurrentRequest()` — aborts the current API request
     async fn handle_task_cancel(&self, params: Value) -> ServerResult<Value> {
         let task_id = params.get("taskId").and_then(|v| v.as_str());
         info!(task_id = task_id, "Cancelling task");
 
-        let engine_arc = match task_id {
+        let lifecycle_arc = match task_id {
             Some(id) => self.task_manager.get_task(id),
             None => self.task_manager.get_active_task(),
         };
 
-        match engine_arc {
-            Some(engine) => {
-                let mut engine = engine.lock().unwrap();
-                match engine.abort() {
-                    Ok(state) => Ok(json!({
-                        "taskId": engine.config().task_id,
-                        "status": format!("{}", state).to_lowercase(),
-                    })),
-                    Err(e) => Ok(json!({
-                        "status": "error",
-                        "error": e.to_string(),
-                    })),
-                }
+        match lifecycle_arc {
+            Some(lifecycle) => {
+                let mut lc = lifecycle.lock().await;
+                // Use TaskLifecycle::cancel_current_request()
+                lc.cancel_current_request();
+                let tid = lc.task_id().to_string();
+                let state = lc.state();
+                Ok(json!({
+                    "taskId": tid,
+                    "status": format!("{}", state).to_lowercase(),
+                }))
             }
             None => Ok(json!({"status": "cancelled", "note": "no active task found"})),
         }
     }
 
-    /// C11 — Close and remove a task from TaskManager.
+    /// R10-A — Close and abort a task, then remove from TaskManager.
+    ///
+    /// Source: TS `abortTask()` + `dispose()` — clean up and remove
     async fn handle_task_close(&self, params: Value) -> ServerResult<Value> {
         let task_id = params.get("taskId").and_then(|v| v.as_str());
         info!(task_id = task_id, "Closing task");
 
         match task_id {
             Some(id) => {
+                // First abort and dispose the lifecycle
+                if let Some(lifecycle) = self.task_manager.get_task(id) {
+                    let mut lc = lifecycle.lock().await;
+                    // Abort the task (graceful abort, not abandoned)
+                    let _ = lc.abort_task(false).await;
+                    lc.dispose();
+                }
+                // Then remove from manager
                 let removed = self.task_manager.remove_task(id);
                 if removed.is_some() {
                     Ok(json!({"taskId": id, "status": "closed"}))
@@ -287,8 +373,14 @@ impl Handler {
                 // Close the active task
                 let active = self.task_manager.get_active_task();
                 match active {
-                    Some(engine) => {
-                        let id = engine.lock().unwrap().config().task_id.clone();
+                    Some(lifecycle) => {
+                        let id = {
+                            let mut lc = lifecycle.lock().await;
+                            let id = lc.task_id().to_string();
+                            let _ = lc.abort_task(false).await;
+                            lc.dispose();
+                            id
+                        };
                         self.task_manager.remove_task(&id);
                         Ok(json!({"taskId": id, "status": "closed"}))
                     }
@@ -298,34 +390,56 @@ impl Handler {
         }
     }
 
-    /// C12 — Resume a paused task.
+    /// R10-A — Resume a paused task or resume from history.
+    ///
+    /// Source: TS `resumeTaskFromHistory()` — loads history and resumes
     async fn handle_task_resume(&self, params: Value) -> ServerResult<Value> {
         let task_id = params.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+        let history_item_id = params.get("historyItemId").and_then(|v| v.as_str());
         info!(task_id = task_id, "Resuming task");
 
-        let engine_arc = if task_id.is_empty() {
+        let lifecycle_arc = if task_id.is_empty() {
             self.task_manager.get_active_task()
         } else {
             self.task_manager.get_task(task_id)
         };
 
-        match engine_arc {
-            Some(engine) => {
-                let mut engine = engine.lock().unwrap();
-                let tid = engine.config().task_id.clone();
-                match engine.resume() {
-                    Ok(state) => {
-                        self.task_manager.set_active_task(&tid);
-                        Ok(json!({"taskId": tid, "status": format!("{}", state).to_lowercase()}))
+        match lifecycle_arc {
+            Some(lifecycle) => {
+                let mut lc = lifecycle.lock().await;
+                let tid = lc.task_id().to_string();
+
+                if history_item_id.is_some() {
+                    // Resume from history — use TaskLifecycle::resume_task_from_history()
+                    // Note: history_item_id should already be set in the config
+                    // before the lifecycle was created. If not, we set it here.
+                    match lc.resume_task_from_history().await {
+                        Ok(()) => {
+                            drop(lc);
+                            self.task_manager.set_active_task(&tid);
+                            Ok(json!({"taskId": tid, "status": "resumed"}))
+                        }
+                        Err(e) => Ok(json!({"taskId": tid, "status": "error", "error": e.to_string()})),
                     }
-                    Err(e) => Ok(json!({"taskId": tid, "status": "error", "error": e.to_string()})),
+                } else {
+                    // Simple resume from paused state — use engine state transition
+                    match lc.engine_mut().resume() {
+                        Ok(state) => {
+                            drop(lc);
+                            self.task_manager.set_active_task(&tid);
+                            Ok(json!({"taskId": tid, "status": format!("{}", state).to_lowercase()}))
+                        }
+                        Err(e) => Ok(json!({"taskId": tid, "status": "error", "error": e.to_string()})),
+                    }
                 }
             }
             None => Ok(json!({"taskId": task_id, "status": "not_found"})),
         }
     }
 
-    /// C13 — Send a message to the active task's conversation.
+    /// R10-A — Send a message to the active task's conversation.
+    ///
+    /// Source: TS `submitUserMessage()` — handles user response to an ask
     async fn handle_task_send_message(&self, params: Value) -> ServerResult<Value> {
         let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
         let images: Vec<String> = params
@@ -340,15 +454,13 @@ impl Handler {
         info!(text_len = text.len(), images = images.len(), "Sending message to task");
 
         match self.task_manager.get_active_task() {
-            Some(engine) => {
-                let mut engine = engine.lock().unwrap();
-                // Add user message to conversation history
-                let user_msg = roo_task::message_builder::MessageBuilder::create_user_message(
-                    text,
-                    &images,
-                );
-                engine.add_api_message(user_msg);
-                Ok(json!({"status": "sent"}))
+            Some(lifecycle) => {
+                let mut lc = lifecycle.lock().await;
+                // Use TaskLifecycle::submit_user_message()
+                match lc.submit_user_message(text, if images.is_empty() { None } else { Some(images) }).await {
+                    Ok(()) => Ok(json!({"status": "sent"})),
+                    Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
+                }
             }
             None => Ok(json!({"status": "error", "error": "no active task"})),
         }
@@ -411,34 +523,26 @@ impl Handler {
         Ok(json!({"status": "deleted"}))
     }
 
-    /// C14 — Condense the active task's context.
+    /// R10-A — Condense the active task's context.
+    ///
+    /// Source: TS `condenseContext()` — manually trigger context condensation
     async fn handle_task_condense(&self, _params: Value) -> ServerResult<Value> {
         info!("Condensing task context");
 
         match self.task_manager.get_active_task() {
-            Some(engine_arc) => {
-                let engine = engine_arc.lock().unwrap();
-                let history = engine.api_conversation_history();
-                if history.len() < 4 {
-                    return Ok(json!({"status": "condensed", "note": "not enough messages to condense"}));
+            Some(lifecycle) => {
+                let mut lc = lifecycle.lock().await;
+                // Use TaskLifecycle::condense_context()
+                match lc.condense_context().await {
+                    Ok(()) => {
+                        let history_len = lc.engine().api_conversation_history().len();
+                        Ok(json!({
+                            "status": "condensed",
+                            "historyLength": history_len,
+                        }))
+                    }
+                    Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
                 }
-
-                // Count tool-use content blocks across all messages for basic condensation.
-                // Full LLM-based summarization requires a Provider and is handled
-                // by the agent loop's context management layer.
-                let tool_block_count: usize = history.iter()
-                    .map(|msg| msg.content.iter()
-                        .filter(|block| matches!(block, roo_types::api::ContentBlock::ToolUse { .. }))
-                        .count())
-                    .sum();
-
-                let original_count = history.len();
-                Ok(json!({
-                    "status": "condensed",
-                    "originalCount": original_count,
-                    "toolBlockCount": tool_block_count,
-                    "note": "condensation acknowledged; full summarization requires provider",
-                }))
             }
             None => Ok(json!({"status": "error", "error": "no active task"})),
         }
@@ -597,9 +701,12 @@ impl Handler {
 
     // ── Ask response ────────────────────────────────────────────────────
 
-    /// M11 — Handle user response to an ask_followup_question.
+    /// R10-A — Handle user response to an ask_followup_question.
+    ///
+    /// Source: TS `handleWebviewAskResponse()` — processes the user's
+    /// response to an ask prompt via AskSayHandler::handle_response()
     async fn handle_ask_response(&self, params: Value) -> ServerResult<Value> {
-        let response = params.get("askResponse").and_then(|v| v.as_str()).unwrap_or("");
+        let ask_response_str = params.get("askResponse").and_then(|v| v.as_str()).unwrap_or("");
         let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
         let images: Vec<String> = params
             .get("images")
@@ -610,22 +717,26 @@ impl Handler {
                     .collect()
             })
             .unwrap_or_default();
-        debug!(response = response, "Processing ask response");
+        debug!(ask_response = ask_response_str, "Processing ask response");
+
+        // Map the string response to AskResponse enum
+        let ask_response = match ask_response_str {
+            "yesButtonClicked" | "yes" => AskResponse::YesButtonClicked,
+            "noButtonClicked" | "no" => AskResponse::NoButtonClicked,
+            _ => AskResponse::MessageResponse,
+        };
 
         match self.task_manager.get_active_task() {
-            Some(engine) => {
-                let mut engine = engine.lock().unwrap();
-                // Inject the user's response as a user message in the conversation
-                let response_text = if text.is_empty() {
-                    response.to_string()
-                } else {
-                    text.to_string()
-                };
-                let user_msg = roo_task::message_builder::MessageBuilder::create_user_message(
-                    &response_text,
-                    &images,
-                );
-                engine.add_api_message(user_msg);
+            Some(lifecycle) => {
+                let lc = lifecycle.lock().await;
+                // Use AskSayHandler::handle_response()
+                lc.ask_say()
+                    .handle_response(
+                        ask_response,
+                        if text.is_empty() { None } else { Some(text.to_string()) },
+                        if images.is_empty() { None } else { Some(images) },
+                    )
+                    .await;
                 Ok(json!({"status": "responded"}))
             }
             None => Ok(json!({"status": "error", "error": "no active task"})),
@@ -690,11 +801,11 @@ impl Handler {
         // Get active task to determine task_id and workspace
         let (task_id, cwd) = {
             match self.task_manager.get_active_task() {
-                Some(engine) => {
-                    let engine = engine.lock().unwrap();
+                Some(lifecycle) => {
+                    let lc = lifecycle.lock().await;
                     (
-                        engine.config().task_id.clone(),
-                        engine.config().cwd.clone(),
+                        lc.task_id().to_string(),
+                        lc.engine().config().cwd.clone(),
                     )
                 }
                 None => {
@@ -756,11 +867,11 @@ impl Handler {
 
         let (task_id, cwd) = {
             match self.task_manager.get_active_task() {
-                Some(engine) => {
-                    let engine = engine.lock().unwrap();
+                Some(lifecycle) => {
+                    let lc = lifecycle.lock().await;
                     (
-                        engine.config().task_id.clone(),
-                        engine.config().cwd.clone(),
+                        lc.task_id().to_string(),
+                        lc.engine().config().cwd.clone(),
                     )
                 }
                 None => {
@@ -1004,6 +1115,157 @@ fn generate_task_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// Convert a [`TaskEvent`] to a JSON-RPC notification message.
+///
+/// Source: TS `postStateToWebview()` — converts internal events to
+/// webview-compatible messages.
+fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Message> {
+    let (event_type, data) = match event {
+        TaskEvent::StateChanged { from, to } => (
+            "stateChanged",
+            json!({
+                "taskId": task_id,
+                "from": format!("{}", from),
+                "to": format!("{}", to),
+            }),
+        ),
+        TaskEvent::MessageCreated { message } => (
+            "messageCreated",
+            json!({
+                "taskId": task_id,
+                "message": serde_json::to_value(message).ok(),
+            }),
+        ),
+        TaskEvent::MessageUpdated { message } => (
+            "messageUpdated",
+            json!({
+                "taskId": task_id,
+                "message": serde_json::to_value(message).ok(),
+            }),
+        ),
+        TaskEvent::ToolExecuted { tool_name, success } => (
+            "toolExecuted",
+            json!({
+                "taskId": task_id,
+                "toolName": tool_name,
+                "success": success,
+            }),
+        ),
+        TaskEvent::TokenUsageUpdated { usage } => (
+            "tokenUsageUpdated",
+            json!({
+                "taskId": task_id,
+                "usage": serde_json::to_value(usage).ok(),
+            }),
+        ),
+        TaskEvent::TaskStarted { .. } => (
+            "taskStarted",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskCompleted { .. } => (
+            "taskCompleted",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskAborted { reason, .. } => (
+            "taskAborted",
+            json!({"taskId": task_id, "reason": reason}),
+        ),
+        TaskEvent::TaskPaused { .. } => (
+            "taskPaused",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskResumed { .. } => (
+            "taskResumed",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskDelegated { parent_task_id, child_task_id } => (
+            "taskDelegated",
+            json!({"parentTaskId": parent_task_id, "childTaskId": child_task_id}),
+        ),
+        TaskEvent::TaskInteractive { .. } => (
+            "taskInteractive",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskIdle { .. } => (
+            "taskIdle",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskResumable { .. } => (
+            "taskResumable",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::ApiRequestStarted { .. } => (
+            "apiRequestStarted",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::ApiRequestFinished { cost, tokens_in, tokens_out, .. } => (
+            "apiRequestFinished",
+            json!({
+                "taskId": task_id,
+                "cost": cost,
+                "tokensIn": tokens_in,
+                "tokensOut": tokens_out,
+            }),
+        ),
+        TaskEvent::ContextCondensationRequested { .. } => (
+            "contextCondensationRequested",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::ContextCondensationCompleted { messages_removed, .. } => (
+            "contextCondensationCompleted",
+            json!({"taskId": task_id, "messagesRemoved": messages_removed}),
+        ),
+        TaskEvent::ContextTruncationPerformed { messages_removed, .. } => (
+            "contextTruncationPerformed",
+            json!({"taskId": task_id, "messagesRemoved": messages_removed}),
+        ),
+        TaskEvent::CheckpointSaved { commit, .. } => (
+            "checkpointSaved",
+            json!({"taskId": task_id, "commit": commit}),
+        ),
+        TaskEvent::CheckpointRestored { .. } => (
+            "checkpointRestored",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::SubtaskCreated { parent_task_id, child_task_id } => (
+            "subtaskCreated",
+            json!({"parentTaskId": parent_task_id, "childTaskId": child_task_id}),
+        ),
+        TaskEvent::SubtaskCompleted { parent_task_id, child_task_id } => (
+            "subtaskCompleted",
+            json!({"parentTaskId": parent_task_id, "childTaskId": child_task_id}),
+        ),
+        TaskEvent::ModeSwitched { mode, .. } => (
+            "modeSwitched",
+            json!({"taskId": task_id, "mode": mode}),
+        ),
+        TaskEvent::StreamingTextDelta { text, .. } => (
+            "streamingTextDelta",
+            json!({"taskId": task_id, "text": text}),
+        ),
+        TaskEvent::StreamingToolUseStarted { tool_name, tool_id, .. } => (
+            "streamingToolUseStarted",
+            json!({"taskId": task_id, "toolName": tool_name, "toolId": tool_id}),
+        ),
+        TaskEvent::StreamingToolUseCompleted { tool_name, tool_id, success, .. } => (
+            "streamingToolUseCompleted",
+            json!({"taskId": task_id, "toolName": tool_name, "toolId": tool_id, "success": success}),
+        ),
+        TaskEvent::StreamingCompleted { .. } => (
+            "streamingCompleted",
+            json!({"taskId": task_id}),
+        ),
+    };
+
+    Some(Message::notification(
+        methods::NOTIFICATION_TASK_EVENT,
+        json!({
+            "type": event_type,
+            "data": data,
+        }),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1113,6 +1375,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_task_start_emits_event() {
+        let handler = test_handler();
+        let init_request = Message::request(99, methods::INITIALIZE, json!(null));
+        handler.handle(&init_request).await;
+
+        let request = Message::request(8, methods::TASK_START, json!({"text": "Hello", "mode": "code"}));
+        let response = handler.handle(&request).await;
+        let result = response.result.unwrap();
+        assert_eq!(result["status"], "started");
+
+        // Verify that event notifications were generated
+        let notifications = handler.drain_notifications();
+        assert!(!notifications.is_empty(), "Should have emitted event notifications");
+
+        // At least one notification should be a taskStarted event
+        let has_started = notifications.iter().any(|n| {
+            n.params.as_ref()
+                .and_then(|p| p.get("type"))
+                .and_then(|t| t.as_str())
+                .map_or(false, |t| t == "taskStarted")
+        });
+        assert!(has_started, "Should have emitted a taskStarted notification");
+    }
+
+    #[tokio::test]
     async fn test_task_cancel() {
         let handler = test_handler();
 
@@ -1121,13 +1408,12 @@ mod tests {
         let start_response = handler.handle(&start_request).await;
         let task_id = start_response.result.unwrap()["taskId"].as_str().unwrap().to_string();
 
-        // Cancel the task — note: the engine is in Idle state (not Running),
-        // so abort() will return a state error. This is expected behavior.
+        // Cancel the task — cancel_current_request sets the abort flag
         let request = Message::request(9, methods::TASK_CANCEL, json!({"taskId": task_id}));
         let response = handler.handle(&request).await;
         let result = response.result.unwrap();
-        // Engine in Idle state cannot transition to Aborted, so we get an error
-        assert_eq!(result["status"], "error");
+        // cancel_current_request sets abort=true, state remains as-is (Idle)
+        assert_eq!(result["taskId"], task_id);
     }
 
     #[tokio::test]
@@ -1280,6 +1566,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ask_response_with_active_task() {
+        let handler = test_handler();
+
+        // Start a task first
+        let start_request = Message::request(99, methods::TASK_START, json!({"text": "test", "mode": "code"}));
+        handler.handle(&start_request).await;
+
+        // Send ask response
+        let request = Message::request(22, methods::ASK_RESPONSE, json!({"askResponse": "yes", "text": "My answer"}));
+        let response = handler.handle(&request).await;
+        let result = response.result.unwrap();
+        assert_eq!(result["status"], "responded");
+    }
+
+    #[tokio::test]
     async fn test_terminal_operation_no_registry() {
         let handler = test_handler();
         // Without initialization, terminal registry is not available
@@ -1322,12 +1623,76 @@ mod tests {
 
         // Active should be id2 (last created)
         let active = handler.task_manager.get_active_task().unwrap();
-        assert_eq!(active.lock().unwrap().config().task_id, id2);
+        let lc = active.lock().await;
+        assert_eq!(lc.task_id(), id2);
+        drop(lc);
 
         // Close task 1
         let close1 = Message::request(102, methods::TASK_CLOSE, json!({"taskId": id1}));
         handler.handle(&close1).await;
         assert_eq!(handler.task_manager.list_tasks().len(), 1);
         assert!(handler.task_manager.get_task(&id1).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_drain_notifications() {
+        let handler = test_handler();
+
+        // Initially empty
+        let notifications = handler.drain_notifications();
+        assert!(notifications.is_empty());
+
+        // After draining, should be empty again
+        let notifications = handler.drain_notifications();
+        assert!(notifications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_task_condense_no_active() {
+        let handler = test_handler();
+        let request = Message::request(25, methods::TASK_CONDENSE, json!(null));
+        let response = handler.handle(&request).await;
+        let result = response.result.unwrap();
+        assert_eq!(result["status"], "error");
+    }
+
+    #[test]
+    fn test_task_event_to_notification() {
+        let event = TaskEvent::TaskStarted {
+            task_id: "test-123".to_string(),
+        };
+        let notification = task_event_to_notification(&event, "test-123");
+        assert!(notification.is_some());
+        let msg = notification.unwrap();
+        assert_eq!(msg.method, Some(methods::NOTIFICATION_TASK_EVENT.to_string()));
+    }
+
+    #[test]
+    fn test_task_event_streaming_text_delta() {
+        let event = TaskEvent::StreamingTextDelta {
+            task_id: "test-123".to_string(),
+            text: "Hello world".to_string(),
+        };
+        let notification = task_event_to_notification(&event, "test-123");
+        assert!(notification.is_some());
+        let msg = notification.unwrap();
+        let params = msg.params.unwrap();
+        assert_eq!(params["type"], "streamingTextDelta");
+        assert_eq!(params["data"]["text"], "Hello world");
+    }
+
+    #[test]
+    fn test_task_event_streaming_tool_use_started() {
+        let event = TaskEvent::StreamingToolUseStarted {
+            task_id: "test-123".to_string(),
+            tool_name: "read_file".to_string(),
+            tool_id: "call_1".to_string(),
+        };
+        let notification = task_event_to_notification(&event, "test-123");
+        assert!(notification.is_some());
+        let msg = notification.unwrap();
+        let params = msg.params.unwrap();
+        assert_eq!(params["type"], "streamingToolUseStarted");
+        assert_eq!(params["data"]["toolName"], "read_file");
     }
 }

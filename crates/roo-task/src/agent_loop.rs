@@ -805,6 +805,7 @@ impl AgentLoop {
     ) -> ParsedStreamContent {
         let mut parser = StreamParser::new();
         let mut stream = Box::pin(stream);
+        let task_id = self.engine.config().task_id.clone();
 
         // Mark that we received the first chunk
         self.engine.streaming_mut().is_waiting_for_first_chunk = false;
@@ -812,15 +813,31 @@ impl AgentLoop {
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(chunk) => {
+                    // Emit real-time streaming events for each chunk type.
+                    // Each emitter() call creates a temporary borrow that is
+                    // released immediately after the emit, avoiding borrow conflicts.
+                    match &chunk {
+                        roo_types::api::ApiStreamChunk::Text { text } => {
+                            self.engine.emitter().emit_streaming_text_delta(&task_id, text);
+                        }
+                        roo_types::api::ApiStreamChunk::ToolCall { id, name, .. } => {
+                            self.engine.emitter().emit_streaming_tool_use_started(&task_id, name, id);
+                        }
+                        roo_types::api::ApiStreamChunk::ToolCallStart { id, name, .. } => {
+                            self.engine.emitter().emit_streaming_tool_use_started(&task_id, name, id);
+                        }
+                        _ => {}
+                    }
                     parser.feed_chunk(&chunk);
                 }
                 Err(e) => {
                     warn!(error = %e, "Error reading stream chunk");
-                    // Continue reading 鈥?some providers send errors mid-stream
+                    // Continue reading — some providers send errors mid-stream
                 }
             }
         }
 
+        self.engine.emitter().emit_streaming_completed(&task_id);
         parser.finalize()
     }
 
@@ -904,6 +921,19 @@ impl AgentLoop {
             // Record tool execution
             self.engine
                 .record_tool_execution(&tool_call.name, !result.is_error);
+
+            // Emit streaming tool-use-completed event
+            {
+                let task_id = &self.engine.config().task_id;
+                self.engine
+                    .emitter()
+                    .emit_streaming_tool_use_completed(
+                        task_id,
+                        &tool_call.name,
+                        &tool_call.id,
+                        !result.is_error,
+                    );
+            }
 
             if result.is_error {
                 all_succeeded = false;
