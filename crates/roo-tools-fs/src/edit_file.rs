@@ -7,9 +7,11 @@
 //! - Modifying existing files (provide `old_string` and `new_string`)
 //! - Creating new files (set `old_string` to empty string)
 //! - Multiple replacements via `expected_replacements`
+//! - Three-layer matching strategy: exact → whitespace-tolerant → token-based
 
 use crate::helpers::*;
 use crate::types::*;
+use regex::Regex;
 use roo_types::tool::EditFileParams;
 
 /// Validate edit_file parameters.
@@ -76,13 +78,233 @@ fn restore_line_ending(content_lf: &str, eol: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Three-layer matching strategy
+// ---------------------------------------------------------------------------
+
+/// Try exact literal match and replacement.
+///
+/// Returns `Some((modified_content, actual_count))` on success, `None` on failure.
+fn try_exact_replace(content: &str, old: &str, new: &str, expected: usize) -> Option<(String, usize)> {
+    let actual_count = count_occurrences(content, old);
+    if actual_count == 0 || actual_count != expected {
+        return None;
+    }
+
+    let modified = if expected == 1 {
+        if let Some(pos) = content.find(old) {
+            let mut result = content.to_string();
+            result.replace_range(pos..pos + old.len(), new);
+            result
+        } else {
+            return None;
+        }
+    } else {
+        safe_literal_replace(content, old, new)
+    };
+
+    Some((modified, actual_count))
+}
+
+/// Build a whitespace-tolerant regex from a pattern.
+///
+/// Splits the pattern by whitespace sequences, escapes each non-whitespace
+/// part for regex, then joins them with `\s+` so that any whitespace
+/// differences (tabs vs spaces, multiple spaces) are tolerated.
+fn build_whitespace_tolerant_regex(pattern: &str) -> Result<Regex, regex::Error> {
+    let parts: Vec<&str> = pattern
+        .split(|c: char| c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        return Err(regex::Error::Syntax(
+            "Pattern is empty after splitting by whitespace".to_string(),
+        ));
+    }
+
+    let regex_parts: Vec<String> = parts.iter().map(|t| regex::escape(t)).collect();
+    let regex_str = regex_parts.join(r"\s+");
+
+    Regex::new(&regex_str)
+}
+
+/// Try whitespace-tolerant match and replacement.
+///
+/// Returns `Some((modified_content, actual_count))` on success, `None` on failure.
+fn try_whitespace_tolerant_replace(
+    content: &str,
+    old: &str,
+    new: &str,
+    expected: usize,
+) -> Option<(String, usize)> {
+    let re = match build_whitespace_tolerant_regex(old) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+
+    let matches: Vec<_> = re.find_iter(content).collect();
+    let actual_count = matches.len();
+
+    if actual_count == 0 || actual_count != expected {
+        return None;
+    }
+
+    // Replace from end to start to preserve positions
+    let mut result = content.to_string();
+    for m in matches.into_iter().rev() {
+        result.replace_range(m.start()..m.end(), new);
+    }
+
+    Some((result, actual_count))
+}
+
+/// Build a token-based regex from a pattern.
+///
+/// Extracts identifiers (alphanumeric + _) and joins them with `.*?`
+/// to allow arbitrary content between tokens.
+fn build_token_regex(pattern: &str) -> Result<Regex, regex::Error> {
+    let tokens: Vec<&str> = pattern
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    if tokens.is_empty() {
+        return Err(regex::Error::Syntax(
+            "No tokens found in pattern".to_string(),
+        ));
+    }
+
+    let regex_parts: Vec<String> = tokens.iter().map(|t| regex::escape(t)).collect();
+    let regex_str = regex_parts.join(r".*?");
+
+    // Use (?s) for dotall mode so . matches newlines
+    Regex::new(&format!("(?s){}", regex_str))
+}
+
+/// Try token-based match and replacement.
+///
+/// Returns `Some((modified_content, actual_count))` on success, `None` on failure.
+fn try_token_replace(
+    content: &str,
+    old: &str,
+    new: &str,
+    expected: usize,
+) -> Option<(String, usize)> {
+    let re = match build_token_regex(old) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+
+    let matches: Vec<_> = re.find_iter(content).collect();
+    let actual_count = matches.len();
+
+    if actual_count == 0 || actual_count != expected {
+        return None;
+    }
+
+    // Replace from end to start to preserve positions
+    let mut result = content.to_string();
+    for m in matches.into_iter().rev() {
+        result.replace_range(m.start()..m.end(), new);
+    }
+
+    Some((result, actual_count))
+}
+
+/// Build a detailed error message when all matching strategies fail.
+fn build_detailed_error(
+    file_path: &str,
+    old_string: &str,
+    new_string: &str,
+    content: &str,
+) -> FsToolError {
+    // Provide context about what was found vs what was expected
+    let old_preview = if old_string.len() > 200 {
+        format!("{}... (truncated, {} chars total)", &old_string[..200], old_string.len())
+    } else {
+        old_string.to_string()
+    };
+
+    let new_preview = if new_string.len() > 200 {
+        format!("{}... (truncated, {} chars total)", &new_string[..200], new_string.len())
+    } else {
+        new_string.to_string()
+    };
+
+    // Try to find partial matches for diagnostic
+    let mut diagnostics = Vec::new();
+
+    // Check if old_string first line exists somewhere
+    if let Some(first_line) = old_string.lines().next() {
+        if content.contains(first_line) {
+            diagnostics.push(format!(
+                "  - First line of old_string found in file: \"{}\"",
+                if first_line.len() > 80 {
+                    format!("{}...", &first_line[..80])
+                } else {
+                    first_line.to_string()
+                }
+            ));
+        }
+    }
+
+    // Check whitespace-tolerant regex diagnostics
+    if let Ok(re) = build_whitespace_tolerant_regex(old_string) {
+        let ws_count = re.find_iter(content).count();
+        if ws_count > 0 {
+            diagnostics.push(format!(
+                "  - Whitespace-tolerant matching found {} occurrence(s) (expected 1)",
+                ws_count
+            ));
+        }
+    }
+
+    // Check token-based regex diagnostics
+    if let Ok(re) = build_token_regex(old_string) {
+        let tok_count = re.find_iter(content).count();
+        if tok_count > 0 {
+            diagnostics.push(format!(
+                "  - Token-based matching found {} occurrence(s) (expected 1)",
+                tok_count
+            ));
+        }
+    }
+
+    let diag_section = if diagnostics.is_empty() {
+        String::new()
+    } else {
+        format!("\nDiagnostics:\n{}\n", diagnostics.join("\n"))
+    };
+
+    FsToolError::Validation(format!(
+        "No exact match found for old_string in file: {file_path}\n\
+         \n\
+         <error_details>\n\
+         <old_string>{old_preview}</old_string>\n\
+         <new_string>{new_preview}</new_string>\n\
+         <error>No exact match found for old_string in file</error>\n\
+         <suggestions>\n\
+         - Check for whitespace differences (tabs vs spaces, extra newlines)\n\
+         - Use read_file to see the actual file content\n\
+         - Ensure the old_string exactly matches the file content\n\
+         - Try copying the exact text from the file using read_file\n\
+         </suggestions>\n\
+         {diag_section}\
+         </error_details>"
+    ))
+}
+
 /// Process an edit_file operation.
 ///
 /// Implements the logic from `EditFileTool.ts`:
 /// 1. If `old_string` is empty → create new file
 /// 2. If file doesn't exist and `old_string` is not empty → error
 /// 3. If file exists and `old_string` is empty → error (file already exists)
-/// 4. Otherwise → perform literal string replacement
+/// 4. Otherwise → perform literal string replacement using three-layer matching:
+///    a. Exact literal match
+///    b. Whitespace-tolerant regex match
+///    c. Token-based regex match
 pub fn process_edit_file(
     params: &EditFileParams,
     cwd: &std::path::Path,
@@ -151,55 +373,66 @@ pub fn process_edit_file(
         ));
     }
 
-    // Count occurrences
-    let actual_count = count_occurrences(&current_lf, &old_lf);
+    // --- Three-layer matching strategy ---
 
-    if actual_count == 0 {
-        return Err(FsToolError::Validation(format!(
-            "old_string not found in file: {}. Please verify the exact content using read_file.",
-            params.file_path
-        )));
+    // Layer 1: Exact literal match
+    if let Some((modified_lf, actual_count)) =
+        try_exact_replace(&current_lf, &old_lf, &new_lf, expected_replacements)
+    {
+        let modified = restore_line_ending(&modified_lf, eol);
+        std::fs::write(&file_path, &modified)?;
+
+        return Ok(EditFileResult {
+            path: params.file_path.clone(),
+            success: true,
+            message: Some(format!(
+                "Successfully applied {} replacement(s) in {} (exact match)",
+                actual_count, params.file_path
+            )),
+        });
     }
 
-    // Validate against expected count
-    if actual_count != expected_replacements {
-        return Err(FsToolError::Validation(format!(
-            "Expected {} replacement(s) but found {} occurrence(s) of old_string in file: {}. \
-             If you want to replace all occurrences, set expected_replacements to {}.",
-            expected_replacements, actual_count, params.file_path, actual_count
-        )));
+    // Layer 2: Whitespace-tolerant match
+    if let Some((modified_lf, actual_count)) =
+        try_whitespace_tolerant_replace(&current_lf, &old_lf, &new_lf, expected_replacements)
+    {
+        let modified = restore_line_ending(&modified_lf, eol);
+        std::fs::write(&file_path, &modified)?;
+
+        return Ok(EditFileResult {
+            path: params.file_path.clone(),
+            success: true,
+            message: Some(format!(
+                "Successfully applied {} replacement(s) in {} (whitespace-tolerant match)",
+                actual_count, params.file_path
+            )),
+        });
     }
 
-    // Perform the replacement
-    let modified_lf = if expected_replacements == 1 {
-        // Single replacement: use find + replace_range for precision
-        if let Some(pos) = current_lf.find(&old_lf) {
-            let mut result = current_lf.clone();
-            result.replace_range(pos..pos + old_lf.len(), &new_lf);
-            result
-        } else {
-            // Should not happen since we checked count above
-            current_lf
-        }
-    } else {
-        // Multiple replacements
-        safe_literal_replace(&current_lf, &old_lf, &new_lf)
-    };
+    // Layer 3: Token-based match
+    if let Some((modified_lf, actual_count)) =
+        try_token_replace(&current_lf, &old_lf, &new_lf, expected_replacements)
+    {
+        let modified = restore_line_ending(&modified_lf, eol);
+        std::fs::write(&file_path, &modified)?;
 
-    // Restore original line endings
-    let modified = restore_line_ending(&modified_lf, eol);
+        return Ok(EditFileResult {
+            path: params.file_path.clone(),
+            success: true,
+            message: Some(format!(
+                "Successfully applied {} replacement(s) in {} (token-based match)",
+                actual_count, params.file_path
+            )),
+        });
+    }
 
-    // Write the modified content
-    std::fs::write(&file_path, &modified)?;
-
-    Ok(EditFileResult {
-        path: params.file_path.clone(),
-        success: true,
-        message: Some(format!(
-            "Successfully applied {} replacement(s) in {}",
-            actual_count, params.file_path
-        )),
-    })
+    // All strategies failed — produce detailed error
+    Err(build_detailed_error(
+        &params.file_path,
+        &old_lf,
+        &new_lf,
+        &current_lf,
+    ))
 }
 
 #[cfg(test)]
@@ -300,6 +533,7 @@ mod tests {
         };
         let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
         assert!(result.success);
+        assert!(result.message.unwrap().contains("exact match"));
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("HELLO WORLD"));
@@ -320,6 +554,10 @@ mod tests {
         };
         let result = process_edit_file(&params, std::path::Path::new("."));
         assert!(result.is_err());
+        // Verify detailed error message
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("<error_details>"));
+        assert!(err_msg.contains("<suggestions>"));
     }
 
     #[test]
@@ -414,5 +652,212 @@ mod tests {
         let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
         assert!(result.success);
         assert!(file_path.exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // Three-layer matching strategy tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_exact_match_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world\n").unwrap();
+
+        let params = EditFileParams {
+            file_path: file_path.to_str().unwrap().to_string(),
+            old_string: "hello world".to_string(),
+            new_string: "HELLO WORLD".to_string(),
+            expected_replacements: None,
+        };
+        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        assert!(result.success);
+        assert!(result.message.unwrap().contains("exact match"));
+    }
+
+    #[test]
+    fn test_whitespace_tolerant_match_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        // File has multiple spaces between words
+        std::fs::write(&file_path, "hello    world\n").unwrap();
+
+        let params = EditFileParams {
+            file_path: file_path.to_str().unwrap().to_string(),
+            // old_string has single space
+            old_string: "hello world".to_string(),
+            new_string: "HELLO WORLD".to_string(),
+            expected_replacements: None,
+        };
+        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        assert!(result.success);
+        assert!(result.message.unwrap().contains("whitespace-tolerant match"));
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "HELLO WORLD\n");
+    }
+
+    #[test]
+    fn test_whitespace_tolerant_match_tabs_vs_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        // File has tab between words
+        std::fs::write(&file_path, "hello\tworld\n").unwrap();
+
+        let params = EditFileParams {
+            file_path: file_path.to_str().unwrap().to_string(),
+            // old_string has spaces
+            old_string: "hello world".to_string(),
+            new_string: "HELLO WORLD".to_string(),
+            expected_replacements: None,
+        };
+        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        assert!(result.success);
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "HELLO WORLD\n");
+    }
+
+    #[test]
+    fn test_token_based_match_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        // File has non-whitespace separators between identifiers
+        // Whitespace-tolerant won't match because ':' is not whitespace
+        std::fs::write(&file_path, "function:myFunc\n").unwrap();
+
+        let params = EditFileParams {
+            file_path: file_path.to_str().unwrap().to_string(),
+            old_string: "function myFunc".to_string(),
+            new_string: "def myFunc".to_string(),
+            expected_replacements: None,
+        };
+        let result = process_edit_file(&params, std::path::Path::new(".")).unwrap();
+        assert!(result.success);
+        assert!(result.message.unwrap().contains("token-based match"));
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "def myFunc\n");
+    }
+
+    #[test]
+    fn test_all_strategies_fail_detailed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "completely different content\n").unwrap();
+
+        let params = EditFileParams {
+            file_path: file_path.to_str().unwrap().to_string(),
+            old_string: "fn foo() { bar }".to_string(),
+            new_string: "fn baz() { qux }".to_string(),
+            expected_replacements: None,
+        };
+        let result = process_edit_file(&params, std::path::Path::new("."));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("<error_details>"));
+        assert!(err_msg.contains("<old_string>"));
+        assert!(err_msg.contains("<new_string>"));
+        assert!(err_msg.contains("<suggestions>"));
+    }
+
+    #[test]
+    fn test_build_whitespace_tolerant_regex() {
+        let re = build_whitespace_tolerant_regex("hello world").unwrap();
+        assert!(re.is_match("hello    world"));
+        assert!(re.is_match("hello\tworld"));
+        assert!(re.is_match("hello world"));
+    }
+
+    #[test]
+    fn test_build_token_regex() {
+        let re = build_token_regex("fn foo() { bar }").unwrap();
+        assert!(re.is_match("fn  foo(  )  {  bar  }"));
+        assert!(re.is_match("fn foo() { bar }"));
+        assert!(re.is_match("fn...foo...bar"));
+    }
+
+    #[test]
+    fn test_build_token_regex_no_tokens() {
+        let result = build_token_regex("!@#$%^&*()");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_try_exact_replace_success() {
+        let content = "hello world\nfoo bar\n";
+        let result = try_exact_replace(content, "hello world", "HELLO WORLD", 1);
+        assert!(result.is_some());
+        let (modified, count) = result.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(modified, "HELLO WORLD\nfoo bar\n");
+    }
+
+    #[test]
+    fn test_try_exact_replace_no_match() {
+        let content = "hello world\n";
+        let result = try_exact_replace(content, "nonexistent", "replacement", 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_exact_replace_wrong_count() {
+        let content = "foo foo foo\n";
+        let result = try_exact_replace(content, "foo", "bar", 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_whitespace_tolerant_replace_success() {
+        let content = "hello    world\n";
+        let result = try_whitespace_tolerant_replace(content, "hello world", "HELLO WORLD", 1);
+        assert!(result.is_some());
+        let (modified, count) = result.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(modified, "HELLO WORLD\n");
+    }
+
+    #[test]
+    fn test_try_whitespace_tolerant_replace_no_match() {
+        let content = "completely different\n";
+        let result = try_whitespace_tolerant_replace(content, "hello world", "HELLO WORLD", 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_token_replace_success() {
+        // Token-based match: identifiers match despite non-whitespace separators
+        let content = "function:myFunc\n";
+        let result = try_token_replace(content, "function myFunc", "def myFunc", 1);
+        assert!(result.is_some());
+        let (modified, count) = result.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(modified, "def myFunc\n");
+    }
+
+    #[test]
+    fn test_try_token_replace_no_match() {
+        let content = "completely different\n";
+        let result = try_token_replace(content, "fn foo() { bar }", "fn baz() { qux }", 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detailed_error_contains_suggestions() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "some content here\n").unwrap();
+
+        let params = EditFileParams {
+            file_path: file_path.to_str().unwrap().to_string(),
+            old_string: "fn foo() { bar }".to_string(),
+            new_string: "fn baz() { qux }".to_string(),
+            expected_replacements: None,
+        };
+        let result = process_edit_file(&params, std::path::Path::new("."));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("read_file"));
+        assert!(err.contains("whitespace"));
     }
 }

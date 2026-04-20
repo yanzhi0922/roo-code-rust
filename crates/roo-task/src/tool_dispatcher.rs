@@ -1228,7 +1228,29 @@ impl ToolHandler for AccessMcpResourceHandler {
 ///
 /// Loads and executes an Agent Skill (SKILL.md file).
 /// Parameters: `skill` (skill name), `args` (optional context).
-pub struct SkillHandler;
+///
+/// When an [`roo_skills::SkillsManager`] is provided, the handler looks up
+/// the skill by name and returns its full instructions. Otherwise, a
+/// placeholder message is returned.
+pub struct SkillHandler {
+    skills_manager: Option<Arc<roo_skills::SkillsManager>>,
+}
+
+impl SkillHandler {
+    /// Create a new skill handler without a manager (fallback mode).
+    pub fn new() -> Self {
+        Self {
+            skills_manager: None,
+        }
+    }
+
+    /// Create a skill handler backed by a [`roo_skills::SkillsManager`].
+    pub fn with_manager(manager: Arc<roo_skills::SkillsManager>) -> Self {
+        Self {
+            skills_manager: Some(manager),
+        }
+    }
+}
 
 #[async_trait]
 impl ToolHandler for SkillHandler {
@@ -1248,16 +1270,20 @@ impl ToolHandler for SkillHandler {
             args,
         };
 
-        match roo_tools_misc::process_skill(&skill_params) {
+        match roo_tools_misc::process_skill(&skill_params, self.skills_manager.as_deref()) {
             Ok(result) => {
-                let mut msg = format!(
-                    "Skill '{}' loaded. Follow the skill instructions.",
-                    result.skill_name
-                );
-                if let Some(args) = &result.args {
-                    msg.push_str(&format!("\nContext: {}", args));
+                if let Some(content) = &result.content {
+                    ToolExecutionResult::success(content.clone())
+                } else {
+                    let mut msg = format!(
+                        "Skill '{}' loaded. Follow the skill instructions.",
+                        result.skill_name
+                    );
+                    if let Some(args) = &result.args {
+                        msg.push_str(&format!("\nContext: {}", args));
+                    }
+                    ToolExecutionResult::success(msg)
                 }
-                ToolExecutionResult::success(msg)
             }
             Err(e) => ToolExecutionResult::error(format!("skill error: {}", e)),
         }
@@ -1272,11 +1298,15 @@ impl ToolHandler for SkillHandler {
 ///
 /// Executes a slash command (e.g. /init, /test, /deploy).
 /// Parameters: `command` (command name), `args` (optional arguments).
+///
+/// Looks up the command via [`roo_command::get_command`] using the current
+/// working directory from the tool context. If the command is found, its
+/// content is returned; otherwise a fallback message is produced.
 pub struct SlashCommandHandler;
 
 #[async_trait]
 impl ToolHandler for SlashCommandHandler {
-    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+    async fn execute(&self, params: Value, context: &ToolContext) -> ToolExecutionResult {
         let command = match params.get("command").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => return ToolExecutionResult::error("Missing required parameter: command"),
@@ -1287,16 +1317,24 @@ impl ToolHandler for SlashCommandHandler {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let cmd_params = roo_types::tool::RunSlashCommandParams {
-            command,
-            args,
-        };
+        // Try to load command from project/global/built-in sources
+        if let Some(cmd) = roo_command::get_command(&context.cwd, &command).await {
+            let mut result = format!("Command: {}\n", cmd.name);
+            if let Some(desc) = &cmd.description {
+                result.push_str(&format!("Description: {}\n", desc));
+            }
+            if !cmd.content.is_empty() {
+                result.push_str(&format!("\n{}", cmd.content));
+            }
+            if let Some(args) = &args {
+                result.push_str(&format!("\n\nArguments: {}", args));
+            }
+            return ToolExecutionResult::success(result);
+        }
 
-        // Simplified: return a message indicating command execution.
-        // Full implementation would look up the command via roo-command crate
-        // and return its content.
-        let mut msg = format!("Slash command '/{}' executed.", cmd_params.command);
-        if let Some(args) = &cmd_params.args {
+        // Fallback: command not found in any source
+        let mut msg = format!("Slash command '/{}' executed.", command);
+        if let Some(args) = &args {
             msg.push_str(&format!(" Arguments: {}", args));
         }
 
@@ -1392,7 +1430,7 @@ pub fn default_dispatcher_with_terminal(
     dispatcher.register("new_task", Box::new(NewTaskHandler));
 
     // Skill & Slash Command tools
-    dispatcher.register("skill", Box::new(SkillHandler));
+    dispatcher.register("skill", Box::new(SkillHandler::new()));
     dispatcher.register("run_slash_command", Box::new(SlashCommandHandler));
 
     dispatcher
@@ -1982,7 +2020,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skill_handler_missing_skill_name() {
-        let handler = SkillHandler;
+        let handler = SkillHandler::new();
         let ctx = make_context();
         let result = handler.execute(serde_json::json!({}), &ctx).await;
         assert!(result.is_error);
@@ -1991,7 +2029,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skill_handler_valid() {
-        let handler = SkillHandler;
+        let handler = SkillHandler::new();
         let ctx = make_context();
         let result = handler
             .execute(
@@ -2006,7 +2044,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skill_handler_valid_no_args() {
-        let handler = SkillHandler;
+        let handler = SkillHandler::new();
         let ctx = make_context();
         let result = handler
             .execute(serde_json::json!({"skill": "flutter-dev"}), &ctx)
@@ -2017,7 +2055,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skill_handler_empty_name() {
-        let handler = SkillHandler;
+        let handler = SkillHandler::new();
         let ctx = make_context();
         let result = handler
             .execute(serde_json::json!({"skill": ""}), &ctx)

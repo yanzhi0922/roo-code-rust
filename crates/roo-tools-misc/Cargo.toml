@@ -8,6 +8,7 @@ description = "Miscellaneous tool implementations for Roo Code Rust"
 
 [dependencies]
 roo-types = { path = "../roo-types" }
+roo-skills = { path = "../roo-skills" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

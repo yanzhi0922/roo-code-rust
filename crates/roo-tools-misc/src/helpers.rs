@@ -260,6 +260,7 @@ mod tests {
             skill_name: "my-skill".to_string(),
             args: Some("arg1".to_string()),
             is_valid: true,
+            content: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: crate::types::SkillResult = serde_json::from_str(&json).unwrap();

@@ -22,6 +22,8 @@ roo-terminal = { path = "../roo-terminal" }
 roo-auto-approval = { path = "../roo-auto-approval" }
 roo-context = { path = "../roo-context" }
 roo-checkpoint = { path = "../roo-checkpoint" }
+roo-skills = { path = "../roo-skills" }
+roo-command = { path = "../roo-command" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -236,6 +236,32 @@ pub fn slice_lines(content: &str, start_line: usize, max_lines: usize) -> (Strin
     (result, total)
 }
 
+/// Check if every non-empty line in the content has a line number prefix
+/// in the format `  1 | content`.
+pub fn every_line_has_line_numbers(content: &str) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return false;
+    }
+    lines
+        .iter()
+        .all(|line| line.trim().is_empty() || has_line_number_prefix(line))
+}
+
+/// Check if a single line has a line number prefix like `  1 | `.
+fn has_line_number_prefix(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let digits_end = trimmed
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    if digits_end == 0 {
+        return false;
+    }
+    let rest = &trimmed[digits_end..];
+    rest.starts_with(" | ") || rest.starts_with("\u{2192}") || rest.starts_with(":\t")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

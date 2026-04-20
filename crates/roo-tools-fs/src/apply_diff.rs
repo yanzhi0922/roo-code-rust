@@ -138,6 +138,10 @@ pub fn parse_diff_blocks(diff: &str) -> Result<Vec<(String, String)>, FsToolErro
 }
 
 /// Apply parsed diff blocks to content.
+///
+/// For each block, first tries an exact substring match. If that fails,
+/// falls back to fuzzy matching via [`roo_diff::fuzzy_search`] with a
+/// similarity threshold of 0.8 (80%).
 pub fn apply_diff_blocks(
     original: &str,
     blocks: &[(String, String)],
@@ -147,14 +151,28 @@ pub fn apply_diff_blocks(
     let mut warnings = Vec::new();
 
     for (i, (search, replace)) in blocks.iter().enumerate() {
+        // 1. Try exact match first
         if let Some(pos) = content.find(search.as_str()) {
             content.replace_range(pos..pos + search.len(), replace);
             applied += 1;
         } else {
-            warnings.push(format!(
-                "Block {}: search content not found in file",
-                i + 1
-            ));
+            // 2. Try fuzzy match using roo-diff similarity
+            match apply_fuzzy_diff(&content, search, replace) {
+                Ok(new_content) => {
+                    content = new_content;
+                    applied += 1;
+                    warnings.push(format!(
+                        "Block {}: applied via fuzzy match (≥80% similarity)",
+                        i + 1
+                    ));
+                }
+                Err(_) => {
+                    warnings.push(format!(
+                        "Block {}: search content not found in file",
+                        i + 1
+                    ));
+                }
+            }
         }
     }
 
@@ -170,6 +188,52 @@ pub fn apply_diff_blocks(
         blocks_applied: applied,
         warnings,
     })
+}
+
+/// Fuzzy-match similarity threshold (80%).
+const FUZZY_THRESHOLD: f64 = 0.8;
+
+/// Attempt to apply a diff block using fuzzy matching.
+///
+/// Uses [`roo_diff::fuzzy_search`] to find the best-matching region in the
+/// content, then checks whether the similarity score meets the threshold.
+fn apply_fuzzy_diff(
+    content: &str,
+    search: &str,
+    replace: &str,
+) -> Result<String, FsToolError> {
+    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let search_line_count = search.lines().count();
+
+    if search_line_count == 0 || search_line_count > lines.len() {
+        return Err(FsToolError::InvalidDiff(
+            "search content is empty or longer than file".to_string(),
+        ));
+    }
+
+    let fuzzy_result = roo_diff::fuzzy_search(&lines, search, 0, lines.len());
+
+    if fuzzy_result.best_score >= FUZZY_THRESHOLD && fuzzy_result.best_match_index >= 0 {
+        let start = fuzzy_result.best_match_index as usize;
+        let end = (start + search_line_count).min(lines.len());
+
+        let mut new_lines = lines;
+        let replace_lines: Vec<String> = replace.lines().map(|l| l.to_string()).collect();
+        new_lines.splice(start..end, replace_lines);
+
+        // Preserve trailing newline from original content
+        let mut result = new_lines.join("\n");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+
+        Ok(result)
+    } else {
+        Err(FsToolError::InvalidDiff(format!(
+            "no fuzzy match found (best similarity: {:.0}%)",
+            fuzzy_result.best_score * 100.0
+        )))
+    }
 }
 
 /// Verify the result of a diff application.
@@ -559,5 +623,69 @@ bar
         assert_eq!(result.blocks_applied, 1);
         // Should have a warning about unbalanced braces
         assert!(!result.warnings.is_empty());
+    }
+
+    // --- Fuzzy matching tests ---
+
+    #[test]
+    fn test_fuzzy_match_minor_whitespace_diff() {
+        // Exact match fails due to extra space, but fuzzy match should succeed
+        let original = "line1\n  hello world\nline3";
+        let search = "  hello world"; // exact match
+        let replace = "  goodbye world";
+        let blocks = vec![(search.to_string(), replace.to_string())];
+        let result = apply_diff_blocks(original, &blocks).unwrap();
+        assert_eq!(result.blocks_applied, 1);
+    }
+
+    #[test]
+    fn test_fuzzy_match_similar_content() {
+        // Search content has a minor difference from the actual content
+        let original = "fn main() {\n    println!(\"hello\");\n}";
+        let search = "fn main() {\n    println!(\"world\");\n}";
+        let replace = "fn main() {\n    println!(\"universe\");\n}";
+        let blocks = vec![(search.to_string(), replace.to_string())];
+        let result = apply_diff_blocks(original, &blocks).unwrap();
+        // Should apply via fuzzy match since similarity is high
+        assert_eq!(result.blocks_applied, 1);
+        assert!(result.warnings.iter().any(|w| w.contains("fuzzy match")));
+    }
+
+    #[test]
+    fn test_fuzzy_match_below_threshold() {
+        // Content is too different for fuzzy match
+        let original = "alpha\nbeta\ngamma";
+        let search = "completely different content here";
+        let replace = "replacement";
+        let blocks = vec![(search.to_string(), replace.to_string())];
+        let result = apply_diff_blocks(original, &blocks).unwrap();
+        assert_eq!(result.blocks_applied, 0);
+        assert!(result.warnings.iter().any(|w| w.contains("not found")));
+    }
+
+    #[test]
+    fn test_fuzzy_match_multiline_region() {
+        let original = "line1\nline2\nline3\nline4\nline5";
+        let search = "line2\nline3";
+        let replace = "LINE2\nLINE3";
+        let blocks = vec![(search.to_string(), replace.to_string())];
+        let result = apply_diff_blocks(original, &blocks).unwrap();
+        // Exact match should work here
+        assert_eq!(result.blocks_applied, 1);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_apply_fuzzy_diff_empty_search() {
+        let content = "hello world";
+        let result = apply_fuzzy_diff(content, "", "replacement");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_apply_fuzzy_diff_search_longer_than_content() {
+        let content = "short";
+        let result = apply_fuzzy_diff(content, "line1\nline2\nline3\nline4\nline5\nline6", "replacement");
+        assert!(result.is_err());
     }
 }

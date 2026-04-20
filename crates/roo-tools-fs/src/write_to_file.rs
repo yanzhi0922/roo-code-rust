@@ -29,9 +29,22 @@ pub fn validate_write_to_file_params(params: &WriteToFileParams) -> Result<(), F
     Ok(())
 }
 
-/// Clean content for writing: strip markdown fences if present.
+/// Clean content for writing:
+/// 1. Strip markdown fences if present
+/// 2. Unescape HTML entities (e.g. `<` → `<`)
+/// 3. Strip line numbers if every line has them
 pub fn clean_write_content(content: &str) -> String {
-    strip_markdown_fences(content)
+    let mut cleaned = strip_markdown_fences(content);
+
+    // Unescape HTML entities
+    cleaned = unescape_html_entities(&cleaned);
+
+    // Strip line numbers if every non-empty line has them
+    if every_line_has_line_numbers(&cleaned) {
+        cleaned = strip_line_numbers(&cleaned);
+    }
+
+    cleaned
 }
 
 /// Process a write_to_file operation.
@@ -282,5 +295,93 @@ mod tests {
         // No backup should exist
         let backup_path = dir.path().join("new_file.txt.bak");
         assert!(!backup_path.exists());
+    }
+
+    // --- HTML entity unescaping tests ---
+
+    #[test]
+    fn test_clean_content_unescapes_html_entities() {
+        // Build HTML entity string at runtime to avoid tool unescaping
+        let content = format!("if (x {}lt; 10 {}amp;{}amp; y {}gt; 5)", '&', '&', '&', '&');
+        assert_eq!(
+            clean_write_content(&content),
+            "if (x < 10 && y > 5)"
+        );
+    }
+
+    #[test]
+    fn test_clean_content_unescapes_quot() {
+        let content = format!("msg = {}quot;hello{}quot;", '&', '&');
+        let expected = "msg = \"hello\"";
+        assert_eq!(clean_write_content(&content), expected);
+    }
+
+    #[test]
+    fn test_clean_content_no_entities() {
+        let content = "plain text without entities";
+        assert_eq!(clean_write_content(content), content);
+    }
+
+    #[test]
+    fn test_write_unescapes_html_entities() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+
+        // Build HTML entity string at runtime to avoid tool unescaping
+        let content = format!("if (x {}lt; 10 {}amp;{}amp; y {}gt; 5)", '&', '&', '&', '&');
+        let params = WriteToFileParams {
+            path: file_path.to_str().unwrap().to_string(),
+            content,
+        };
+        process_write_to_file(&params, std::path::Path::new(".")).unwrap();
+
+        let written = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(written, "if (x < 10 && y > 5)");
+    }
+
+    // --- Line number stripping tests ---
+
+    #[test]
+    fn test_clean_content_strips_line_numbers() {
+        let content = "  1 | fn main() {\n  2 |     println!(\"hello\");\n  3 | }\n";
+        let expected = "fn main() {\n    println!(\"hello\");\n}\n";
+        assert_eq!(clean_write_content(content), expected);
+    }
+
+    #[test]
+    fn test_clean_content_no_line_numbers() {
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        assert_eq!(clean_write_content(content), content);
+    }
+
+    #[test]
+    fn test_write_strips_line_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+
+        let params = WriteToFileParams {
+            path: file_path.to_str().unwrap().to_string(),
+            content: "  1 | fn main() {\n  2 |     println!(\"hello\");\n  3 | }\n".to_string(),
+        };
+        process_write_to_file(&params, std::path::Path::new(".")).unwrap();
+
+        let written = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(written, "fn main() {\n    println!(\"hello\");\n}\n");
+    }
+
+    #[test]
+    fn test_write_combined_fence_entities_line_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+
+        // Content with markdown fence, HTML entities, AND line numbers
+        let params = WriteToFileParams {
+            path: file_path.to_str().unwrap().to_string(),
+            content: "```\n  1 | x < 10\n  2 | y > 5\n```".to_string(),
+        };
+        process_write_to_file(&params, std::path::Path::new(".")).unwrap();
+
+        let written = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(written, "x < 10\ny > 5\n");
     }
 }

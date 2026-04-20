@@ -22,6 +22,8 @@ pub struct SkillResult {
     pub skill_name: String,
     pub args: Option<String>,
     pub is_valid: bool,
+    /// The loaded skill content (instructions), if available.
+    pub content: Option<String>,
 }
 
 /// A parsed todo item.
