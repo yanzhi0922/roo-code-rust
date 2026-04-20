@@ -1,9 +1,12 @@
 //! Task engine type definitions.
 //!
 //! Defines TaskState, TaskConfig, TaskResult, TaskEvent, TaskError,
-//! StreamingState, and related types for the task engine.
+//! StreamingState, AssistantMessageContent, ToolUse, McpToolUse,
+//! StackItem, AttemptResult, and related types for the task engine.
 //!
 //! Source: `src/core/task/Task.ts` — Task class properties and types
+//! Source: `src/core/assistant-message/types.ts` — AssistantMessageContent
+//! Source: `src/shared/tools.ts` — ToolUse, McpToolUse
 
 use std::collections::HashMap;
 use std::fmt;
@@ -11,6 +14,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use roo_types::message::TokenUsage;
+// Note: ToolName from roo_types::tool is used by downstream consumers
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -41,6 +45,16 @@ pub const FORCED_CONTEXT_REDUCTION_PERCENT: u64 = 75;
 ///
 /// Source: `src/core/task/Task.ts` — `MAX_CONTEXT_WINDOW_RETRIES`
 pub const MAX_CONTEXT_WINDOW_RETRIES: usize = 3;
+
+/// MCP tool name prefix.
+///
+/// Source: `src/utils/mcp-name.ts` — `MCP_TOOL_PREFIX`
+pub const MCP_TOOL_PREFIX: &str = "mcp";
+
+/// MCP tool name separator.
+///
+/// Source: `src/utils/mcp-name.ts` — `MCP_TOOL_SEPARATOR`
+pub const MCP_TOOL_SEPARATOR: &str = "--";
 
 // ---------------------------------------------------------------------------
 // TaskState
@@ -453,6 +467,420 @@ pub enum TaskError {
 }
 
 // ---------------------------------------------------------------------------
+// AssistantMessageContent — text / tool_use / mcp_tool_use
+// ---------------------------------------------------------------------------
+// Source: `src/core/assistant-message/types.ts`
+//   export type AssistantMessageContent = TextContent | ToolUse | McpToolUse
+
+/// Text content block in an assistant message.
+///
+/// Source: `src/shared/tools.ts` — `TextContent`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextContent {
+    #[serde(rename = "type")]
+    pub content_type: String, // always "text"
+    /// The text content.
+    pub content: String,
+    /// Whether this is a partial (streaming) block.
+    #[serde(default)]
+    pub partial: bool,
+}
+
+/// A tool use block in an assistant message.
+///
+/// Source: `src/shared/tools.ts` — `ToolUse<TName>`
+/// Represents a parsed tool call from the API with typed native arguments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUse {
+    #[serde(skip)]
+    pub content_type: String, // always "tool_use"
+    /// The tool name.
+    pub name: String,
+    /// Stringified params for display/logging (legacy format).
+    ///
+    /// Source: `src/shared/tools.ts` — `params: Partial<Record<ToolParamName, string>>`
+    pub params: HashMap<String, String>,
+    /// Whether this is a partial (streaming) block.
+    #[serde(default)]
+    pub partial: bool,
+    /// The tool call ID assigned by the API.
+    #[serde(default)]
+    pub id: String,
+    /// Typed native arguments for tool execution.
+    ///
+    /// Source: `src/shared/tools.ts` — `nativeArgs`
+    /// In the TS version, this is a typed union per tool. In Rust, we store
+    /// the parsed JSON value and let each tool handler extract what it needs.
+    #[serde(default)]
+    pub native_args: Option<serde_json::Value>,
+    /// Original tool name if an alias was resolved.
+    #[serde(default)]
+    pub original_name: Option<String>,
+    /// Whether the legacy format was used (for telemetry).
+    #[serde(default)]
+    pub used_legacy_format: bool,
+}
+
+/// An MCP tool use block in an assistant message.
+///
+/// Source: `src/shared/tools.ts` — `McpToolUse`
+/// Represents a dynamic MCP tool call (mcp--serverName--toolName format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolUse {
+    #[serde(skip)]
+    pub content_type: String, // always "mcp_tool_use"
+    /// The full MCP tool name (e.g., "mcp--serverName--toolName").
+    pub name: String,
+    /// The tool call ID assigned by the API.
+    pub id: String,
+    /// The MCP server name (sanitized).
+    pub server_name: String,
+    /// The MCP tool name on the server.
+    pub tool_name: String,
+    /// The parsed arguments for the MCP tool.
+    pub arguments: serde_json::Value,
+    /// Whether this is a partial (streaming) block.
+    #[serde(default)]
+    pub partial: bool,
+}
+
+/// Assistant message content: either text, a tool use, or an MCP tool use.
+///
+/// Source: `src/core/assistant-message/types.ts`
+///   export type AssistantMessageContent = TextContent | ToolUse | McpToolUse
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AssistantMessageContent {
+    /// Text content from the assistant.
+    #[serde(rename = "text")]
+    Text {
+        content: String,
+        #[serde(default)]
+        partial: bool,
+    },
+    /// A built-in tool use request.
+    #[serde(rename = "tool_use")]
+    ToolUse(ToolUse),
+    /// An MCP tool use request (dynamic tool from MCP server).
+    #[serde(rename = "mcp_tool_use")]
+    McpToolUse(McpToolUse),
+}
+
+impl AssistantMessageContent {
+    /// Returns `true` if this content represents a tool call.
+    pub fn is_tool_call(&self) -> bool {
+        matches!(self, Self::ToolUse(_) | Self::McpToolUse(_))
+    }
+
+    /// Returns `true` if this is a partial (still streaming) block.
+    pub fn is_partial(&self) -> bool {
+        match self {
+            Self::Text { partial, .. } => *partial,
+            Self::ToolUse(tu) => tu.partial,
+            Self::McpToolUse(mtu) => mtu.partial,
+        }
+    }
+
+    /// Get the tool call ID, if this is a tool use block.
+    pub fn tool_call_id(&self) -> Option<&str> {
+        match self {
+            Self::ToolUse(tu) => Some(&tu.id),
+            Self::McpToolUse(mtu) => Some(&mtu.id),
+            Self::Text { .. } => None,
+        }
+    }
+
+    /// Get the tool name, if this is a tool use block.
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            Self::ToolUse(tu) => Some(&tu.name),
+            Self::McpToolUse(mtu) => Some(&mtu.name),
+            Self::Text { .. } => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolCallStreamEvent — events from raw chunk processing
+// ---------------------------------------------------------------------------
+// Source: `src/core/assistant-message/NativeToolCallParser.ts`
+//   export type ToolCallStreamEvent =
+//     ApiStreamToolCallStartChunk | ApiStreamToolCallDeltaChunk | ApiStreamToolCallEndChunk
+
+/// Stream events emitted during raw tool call chunk processing.
+///
+/// Source: `src/core/assistant-message/NativeToolCallParser.ts` — `ToolCallStreamEvent`
+#[derive(Debug, Clone)]
+pub enum ToolCallStreamEvent {
+    /// A new tool call has started.
+    Start {
+        id: String,
+        name: String,
+    },
+    /// A delta of arguments has been received for an active tool call.
+    Delta {
+        id: String,
+        delta: String,
+    },
+    /// A tool call has ended (stream finished).
+    End {
+        id: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// StreamingToolCallState — state for streaming tool call accumulation
+// ---------------------------------------------------------------------------
+// Source: `src/core/assistant-message/NativeToolCallParser.ts`
+//   private static streamingToolCalls = new Map<string, { id, name, argumentsAccumulator }>()
+
+/// Internal state tracking a streaming tool call's argument accumulation.
+///
+/// Source: `src/core/assistant-message/NativeToolCallParser.ts` — `streamingToolCalls` map value
+#[derive(Debug, Clone)]
+pub struct StreamingToolCallState {
+    /// Tool call ID.
+    pub id: String,
+    /// Tool name.
+    pub name: String,
+    /// Accumulated JSON arguments string.
+    pub arguments_accumulator: String,
+}
+
+// ---------------------------------------------------------------------------
+// RawChunkTrackerEntry — state for raw chunk tracking
+// ---------------------------------------------------------------------------
+// Source: `src/core/assistant-message/NativeToolCallParser.ts`
+//   private static rawChunkTracker = new Map<number, { id, name, hasStarted, deltaBuffer }>()
+
+/// Internal state tracking a raw chunk from the API stream.
+///
+/// Source: `src/core/assistant-message/NativeToolCallParser.ts` — `rawChunkTracker` map value
+#[derive(Debug, Clone)]
+pub struct RawChunkTrackerEntry {
+    /// Tool call ID.
+    pub id: String,
+    /// Tool name.
+    pub name: String,
+    /// Whether the start event has been emitted.
+    pub has_started: bool,
+    /// Buffered deltas received before the start event.
+    pub delta_buffer: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// StackItem — recursive loop stack item
+// ---------------------------------------------------------------------------
+// Source: `src/core/task/Task.ts` — used in `recursivelyMakeClineRequests`
+//   The stack tracks the recursion state for the agent loop.
+
+/// A stack item for tracking the recursive agent loop state.
+///
+/// Source: `src/core/task/Task.ts` — `recursivelyMakeClineRequests` recursion state
+/// Used to track the state of each recursive call in the agent loop.
+#[derive(Debug, Clone)]
+pub enum StackItem {
+    /// The agent is waiting for a tool result to be processed.
+    ToolResult {
+        tool_use_id: String,
+        tool_name: String,
+    },
+    /// The agent is waiting for user input (ask response).
+    AskResponse {
+        ask_type: String,
+    },
+    /// The agent is processing a sub-task (new_task delegation).
+    SubTask {
+        parent_task_id: String,
+        child_task_id: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// AttemptResult — API request result
+// ---------------------------------------------------------------------------
+// Source: `src/core/task/Task.ts` — `recursivelyMakeClineRequests` return logic
+//   The result of an API attempt determines what happens next in the loop.
+
+/// The result of an API request attempt.
+///
+/// Source: `src/core/task/Task.ts` — `recursivelyMakeClineRequests` return values
+/// Determines what happens next in the agent loop after an API call.
+#[derive(Debug, Clone)]
+pub enum AttemptResult {
+    /// The API request completed successfully and the loop should continue.
+    Continue,
+    /// The API request completed successfully and the task is done.
+    Completed,
+    /// The task was aborted (user cancelled, rate limit, etc.).
+    Aborted {
+        reason: Option<String>,
+    },
+    /// The task was delegated to a sub-task.
+    Delegated {
+        child_task_id: String,
+    },
+    /// The context window was exceeded and needs truncation.
+    ContextWindowExceeded {
+        retry_count: usize,
+    },
+    /// A rate limit was hit; back off and retry.
+    RateLimited {
+        retry_after_ms: Option<u64>,
+    },
+    /// An API error occurred.
+    ApiError {
+        error: String,
+        retryable: bool,
+    },
+    /// The user paused the task.
+    Paused,
+    /// No response from the API (empty response).
+    NoResponse,
+}
+
+impl AttemptResult {
+    /// Returns `true` if the task should continue looping after this result.
+    pub fn should_continue(&self) -> bool {
+        matches!(self, Self::Continue | Self::ContextWindowExceeded { .. })
+    }
+
+    /// Returns `true` if this result represents a terminal state.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Aborted { .. } | Self::Delegated { .. } | Self::Paused
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DiffStrategy
+// ---------------------------------------------------------------------------
+// Source: `src/shared/tools.ts` — `DiffStrategy`
+
+/// Diff strategy for applying file edits.
+///
+/// Source: `src/shared/tools.ts` — `DiffStrategy`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffStrategy {
+    /// Use the multi-search-replace diff strategy.
+    MultiSearchReplace,
+    /// Use the standard unified diff strategy.
+    Unified,
+}
+
+// ---------------------------------------------------------------------------
+// ToolParamName — valid tool parameter names
+// ---------------------------------------------------------------------------
+// Source: `src/shared/tools.ts` — `toolParamNames`
+
+/// All valid tool parameter names.
+///
+/// Source: `src/shared/tools.ts` — `toolParamNames`
+pub const TOOL_PARAM_NAMES: &[&str] = &[
+    "path",
+    "content",
+    "diff",
+    "command",
+    "cwd",
+    "timeout",
+    "mode",
+    "mode_slug",
+    "reason",
+    "message",
+    "todos",
+    "question",
+    "follow_up",
+    "result",
+    "regex",
+    "file_pattern",
+    "recursive",
+    "query",
+    "skill",
+    "args",
+    "server_name",
+    "tool_name",
+    "arguments",
+    "uri",
+    "artifact_id",
+    "search",
+    "offset",
+    "limit",
+    "line_ranges",
+    "file_path",
+    "old_string",
+    "new_string",
+    "replace_all",
+    "expected_replacements",
+    "images",
+    "files",
+    "anchor_line",
+    "max_levels",
+    "max_lines",
+    "include_siblings",
+    "include_header",
+    "indentation",
+    "patch",
+    "prompt",
+    "image",
+    "directory_prefix",
+];
+
+/// Check if a parameter name is a recognized tool parameter.
+pub fn is_valid_tool_param(name: &str) -> bool {
+    TOOL_PARAM_NAMES.contains(&name)
+}
+
+// ---------------------------------------------------------------------------
+// MCP tool name utilities
+// ---------------------------------------------------------------------------
+
+/// Check if a tool name is a dynamic MCP tool (mcp--serverName--toolName format).
+///
+/// Source: `src/utils/mcp-name.ts` — MCP tool name detection
+pub fn is_mcp_tool_name(name: &str) -> bool {
+    let prefix = format!("{}{}", MCP_TOOL_PREFIX, MCP_TOOL_SEPARATOR);
+    name.starts_with(&prefix)
+}
+
+/// Parse an MCP tool name into (server_name, tool_name).
+///
+/// Source: `src/utils/mcp-name.ts` — `parseMcpToolName`
+/// Format: `mcp--serverName--toolName`
+pub fn parse_mcp_tool_name(name: &str) -> Option<(String, String)> {
+    let prefix = format!("{}{}", MCP_TOOL_PREFIX, MCP_TOOL_SEPARATOR);
+    if !name.starts_with(&prefix) {
+        return None;
+    }
+    let rest = &name[prefix.len()..];
+    let separator = MCP_TOOL_SEPARATOR;
+    if let Some(sep_pos) = rest.find(separator) {
+        let server_name = &rest[..sep_pos];
+        let tool_name = &rest[sep_pos + separator.len()..];
+        if !server_name.is_empty() && !tool_name.is_empty() {
+            return Some((server_name.to_string(), tool_name.to_string()));
+        }
+    }
+    None
+}
+
+/// Normalize MCP tool name: convert underscores to hyphens.
+///
+/// Source: `src/utils/mcp-name.ts` — `normalizeMcpToolName`
+/// Some models output `mcp__serverName__toolName` instead of `mcp--serverName--toolName`.
+pub fn normalize_mcp_tool_name(name: &str) -> String {
+    // Only normalize the prefix and separator parts
+    if name.starts_with("mcp__") {
+        name.replacen("mcp__", &format!("mcp{}", MCP_TOOL_SEPARATOR), 1)
+            .replace("__", MCP_TOOL_SEPARATOR)
+    } else {
+        name.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -528,7 +956,6 @@ mod tests {
 
     #[test]
     fn test_no_transitions_from_terminal_states() {
-        // Completed and Aborted are truly terminal — no transitions allowed
         for terminal in [TaskState::Completed, TaskState::Aborted] {
             for target in [
                 TaskState::Idle,
@@ -541,7 +968,6 @@ mod tests {
                 assert!(!terminal.can_transition_to(&target), "{terminal:?} should not transition to {target:?}");
             }
         }
-        // Delegated can transition back to Running (resumeAfterDelegation)
         assert!(TaskState::Delegated.can_transition_to(&TaskState::Running));
         assert!(!TaskState::Delegated.can_transition_to(&TaskState::Idle));
         assert!(!TaskState::Delegated.can_transition_to(&TaskState::Paused));
@@ -704,7 +1130,6 @@ mod tests {
 
         state.reset_for_new_request();
 
-        // These should be reset
         assert_eq!(state.current_streaming_content_index, 0);
         assert!(!state.current_streaming_did_checkpoint);
         assert!(!state.did_complete_reading_stream);
@@ -753,5 +1178,269 @@ mod tests {
         assert_eq!(MAX_EXPONENTIAL_BACKOFF_SECONDS, 600);
         assert_eq!(FORCED_CONTEXT_REDUCTION_PERCENT, 75);
         assert_eq!(MAX_CONTEXT_WINDOW_RETRIES, 3);
+    }
+
+    // --- AssistantMessageContent tests ---
+
+    #[test]
+    fn test_assistant_message_content_text() {
+        let content = AssistantMessageContent::Text {
+            content: "Hello".to_string(),
+            partial: false,
+        };
+        assert!(!content.is_tool_call());
+        assert!(!content.is_partial());
+        assert!(content.tool_call_id().is_none());
+        assert!(content.tool_name().is_none());
+    }
+
+    #[test]
+    fn test_assistant_message_content_tool_use() {
+        let content = AssistantMessageContent::ToolUse(ToolUse {
+            content_type: "tool_use".to_string(),
+            name: "read_file".to_string(),
+            params: HashMap::new(),
+            partial: false,
+            id: "call_123".to_string(),
+            native_args: None,
+            original_name: None,
+            used_legacy_format: false,
+        });
+        assert!(content.is_tool_call());
+        assert!(!content.is_partial());
+        assert_eq!(content.tool_call_id(), Some("call_123"));
+        assert_eq!(content.tool_name(), Some("read_file"));
+    }
+
+    #[test]
+    fn test_assistant_message_content_mcp_tool_use() {
+        let content = AssistantMessageContent::McpToolUse(McpToolUse {
+            content_type: "mcp_tool_use".to_string(),
+            name: "mcp--server--tool".to_string(),
+            id: "call_456".to_string(),
+            server_name: "server".to_string(),
+            tool_name: "tool".to_string(),
+            arguments: serde_json::json!({}),
+            partial: true,
+        });
+        assert!(content.is_tool_call());
+        assert!(content.is_partial());
+        assert_eq!(content.tool_call_id(), Some("call_456"));
+        assert_eq!(content.tool_name(), Some("mcp--server--tool"));
+    }
+
+    #[test]
+    fn test_assistant_message_content_serde_roundtrip() {
+        // Text variant
+        let text = AssistantMessageContent::Text {
+            content: "Hello".to_string(),
+            partial: false,
+        };
+        let json = serde_json::to_string(&text).unwrap();
+        let back: AssistantMessageContent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, AssistantMessageContent::Text { .. }));
+
+        // ToolUse variant
+        let tool_use = AssistantMessageContent::ToolUse(ToolUse {
+            content_type: "tool_use".to_string(),
+            name: "read_file".to_string(),
+            params: HashMap::new(),
+            partial: false,
+            id: "call_1".to_string(),
+            native_args: None,
+            original_name: None,
+            used_legacy_format: false,
+        });
+        let json = serde_json::to_string(&tool_use).unwrap();
+        let back: AssistantMessageContent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, AssistantMessageContent::ToolUse(_)));
+
+        // McpToolUse variant
+        let mcp = AssistantMessageContent::McpToolUse(McpToolUse {
+            content_type: "mcp_tool_use".to_string(),
+            name: "mcp--server--tool".to_string(),
+            id: "call_2".to_string(),
+            server_name: "server".to_string(),
+            tool_name: "tool".to_string(),
+            arguments: serde_json::json!({"key": "value"}),
+            partial: false,
+        });
+        let json = serde_json::to_string(&mcp).unwrap();
+        let back: AssistantMessageContent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, AssistantMessageContent::McpToolUse(_)));
+    }
+
+    // --- AttemptResult tests ---
+
+    #[test]
+    fn test_attempt_result_should_continue() {
+        assert!(AttemptResult::Continue.should_continue());
+        assert!(AttemptResult::ContextWindowExceeded { retry_count: 0 }.should_continue());
+        assert!(!AttemptResult::Completed.should_continue());
+        assert!(!AttemptResult::Aborted { reason: None }.should_continue());
+        assert!(!AttemptResult::RateLimited { retry_after_ms: None }.should_continue());
+    }
+
+    #[test]
+    fn test_attempt_result_is_terminal() {
+        assert!(AttemptResult::Completed.is_terminal());
+        assert!(AttemptResult::Aborted { reason: None }.is_terminal());
+        assert!(AttemptResult::Delegated { child_task_id: "c1".into() }.is_terminal());
+        assert!(AttemptResult::Paused.is_terminal());
+        assert!(!AttemptResult::Continue.is_terminal());
+        assert!(!AttemptResult::ApiError { error: "err".into(), retryable: true }.is_terminal());
+    }
+
+    // --- MCP tool name utilities tests ---
+
+    #[test]
+    fn test_is_mcp_tool_name() {
+        assert!(is_mcp_tool_name("mcp--serverName--toolName"));
+        assert!(is_mcp_tool_name("mcp--my_server--my_tool"));
+        assert!(!is_mcp_tool_name("read_file"));
+        assert!(!is_mcp_tool_name("use_mcp_tool"));
+        assert!(!is_mcp_tool_name("mcp_tool"));
+    }
+
+    #[test]
+    fn test_parse_mcp_tool_name() {
+        let (server, tool) = parse_mcp_tool_name("mcp--serverName--toolName").unwrap();
+        assert_eq!(server, "serverName");
+        assert_eq!(tool, "toolName");
+
+        let (server, tool) = parse_mcp_tool_name("mcp--my_server--my_tool").unwrap();
+        assert_eq!(server, "my_server");
+        assert_eq!(tool, "my_tool");
+
+        assert!(parse_mcp_tool_name("read_file").is_none());
+        assert!(parse_mcp_tool_name("mcp--").is_none());
+        assert!(parse_mcp_tool_name("mcp--only").is_none());
+    }
+
+    #[test]
+    fn test_normalize_mcp_tool_name() {
+        // Underscores in prefix should be converted to hyphens
+        assert_eq!(
+            normalize_mcp_tool_name("mcp__serverName__toolName"),
+            "mcp--serverName--toolName"
+        );
+        // Already normalized names should pass through
+        assert_eq!(
+            normalize_mcp_tool_name("mcp--serverName--toolName"),
+            "mcp--serverName--toolName"
+        );
+        // Non-MCP names should pass through
+        assert_eq!(normalize_mcp_tool_name("read_file"), "read_file");
+    }
+
+    // --- ToolCallStreamEvent tests ---
+
+    #[test]
+    fn test_tool_call_stream_event_start() {
+        let event = ToolCallStreamEvent::Start {
+            id: "call_1".into(),
+            name: "read_file".into(),
+        };
+        match &event {
+            ToolCallStreamEvent::Start { id, name } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "read_file");
+            }
+            _ => panic!("Expected Start variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_call_stream_event_delta() {
+        let event = ToolCallStreamEvent::Delta {
+            id: "call_1".into(),
+            delta: r#"{"path":"x.rs"}"#.into(),
+        };
+        match &event {
+            ToolCallStreamEvent::Delta { id, delta } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(delta, r#"{"path":"x.rs"}"#);
+            }
+            _ => panic!("Expected Delta variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_call_stream_event_end() {
+        let event = ToolCallStreamEvent::End { id: "call_1".into() };
+        match &event {
+            ToolCallStreamEvent::End { id } => {
+                assert_eq!(id, "call_1");
+            }
+            _ => panic!("Expected End variant"),
+        }
+    }
+
+    // --- DiffStrategy tests ---
+
+    #[test]
+    fn test_diff_strategy_serde() {
+        let strategy = DiffStrategy::MultiSearchReplace;
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert_eq!(json, "\"multi_search_replace\"");
+        let back: DiffStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, DiffStrategy::MultiSearchReplace);
+    }
+
+    // --- Tool param validation tests ---
+
+    #[test]
+    fn test_is_valid_tool_param() {
+        assert!(is_valid_tool_param("path"));
+        assert!(is_valid_tool_param("content"));
+        assert!(is_valid_tool_param("command"));
+        assert!(is_valid_tool_param("server_name"));
+        assert!(!is_valid_tool_param("unknown_param"));
+        assert!(!is_valid_tool_param(""));
+    }
+
+    // --- StackItem tests ---
+
+    #[test]
+    fn test_stack_item_tool_result() {
+        let item = StackItem::ToolResult {
+            tool_use_id: "call_1".into(),
+            tool_name: "read_file".into(),
+        };
+        match &item {
+            StackItem::ToolResult { tool_use_id, tool_name } => {
+                assert_eq!(tool_use_id, "call_1");
+                assert_eq!(tool_name, "read_file");
+            }
+            _ => panic!("Expected ToolResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_stack_item_ask_response() {
+        let item = StackItem::AskResponse {
+            ask_type: "followup".into(),
+        };
+        match &item {
+            StackItem::AskResponse { ask_type } => {
+                assert_eq!(ask_type, "followup");
+            }
+            _ => panic!("Expected AskResponse variant"),
+        }
+    }
+
+    #[test]
+    fn test_stack_item_sub_task() {
+        let item = StackItem::SubTask {
+            parent_task_id: "p1".into(),
+            child_task_id: "c1".into(),
+        };
+        match &item {
+            StackItem::SubTask { parent_task_id, child_task_id } => {
+                assert_eq!(parent_task_id, "p1");
+                assert_eq!(child_task_id, "c1");
+            }
+            _ => panic!("Expected SubTask variant"),
+        }
     }
 }

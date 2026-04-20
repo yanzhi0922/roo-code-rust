@@ -4,7 +4,9 @@
 //! state management, loop control, event emission, streaming state, and
 //! result computation.
 //!
-//! Source: `src/core/task/Task.ts` 鈥?Task class
+//! Source: `src/core/task/Task.ts` — Task class
+
+use std::collections::HashMap;
 
 use crate::config::validate_config;
 use roo_task_persistence::TaskFileSystem;
@@ -12,9 +14,45 @@ use crate::events::TaskEventEmitter;
 use crate::loop_control::LoopControl;
 use crate::state::StateMachine;
 use crate::types::{
-    StreamingState, TaskConfig, TaskError, TaskResult, TaskState,
-    MAX_EXPONENTIAL_BACKOFF_SECONDS,
+    AssistantMessageContent, DiffStrategy, StreamingState, TaskConfig, TaskError, TaskResult,
+    TaskState, MAX_EXPONENTIAL_BACKOFF_SECONDS,
 };
+
+// ---------------------------------------------------------------------------
+// CachedStreamingModel
+// ---------------------------------------------------------------------------
+
+/// Cached model info for the current streaming session.
+///
+/// Source: `src/core/task/Task.ts` line 398
+///   `cachedStreamingModel?: { id: string; info: ModelInfo }`
+#[derive(Debug, Clone)]
+pub struct CachedStreamingModel {
+    /// The model ID.
+    pub id: String,
+    /// The model information (simplified — in TS this is a full ModelInfo object).
+    pub max_tokens: Option<u64>,
+    pub context_window: Option<u64>,
+    pub supports_images: bool,
+    pub supports_computer_use: bool,
+}
+
+// ---------------------------------------------------------------------------
+// TokenUsageSnapshot
+// ---------------------------------------------------------------------------
+
+/// Token usage snapshot for throttling.
+///
+/// Source: `src/core/task/Task.ts` lines 401-402
+///   `private tokenUsageSnapshot?: TokenUsage`
+///   `private tokenUsageSnapshotAt?: number`
+#[derive(Debug, Clone)]
+pub struct TokenUsageSnapshot {
+    /// The token usage at the time of the snapshot.
+    pub usage: roo_types::message::TokenUsage,
+    /// The timestamp (ms since epoch) when the snapshot was taken.
+    pub timestamp_ms: u64,
+}
 
 // ---------------------------------------------------------------------------
 // TaskEngine
@@ -33,38 +71,143 @@ use crate::types::{
 /// - [`StreamingState`] for API streaming state
 /// - [`TaskResult`] for result aggregation
 ///
-/// The actual agent loop (API call 鈫?parse response 鈫?tool execution 鈫?loop)
+/// The actual agent loop (API call → parse response → tool execution → loop)
 /// is coordinated at the application layer using these components.
+///
+/// ## Task.ts Property Mapping
+///
+/// | TS Property | Rust Field | Notes |
+/// |---|---|---|
+/// | `taskId` | `config.task_id` | Immutable |
+/// | `rootTaskId` | `config.root_task_id` | Immutable |
+/// | `parentTaskId` | `config.parent_task_id` | Immutable |
+/// | `taskNumber` | `config.task_number` | Immutable |
+/// | `workspacePath` | `config.workspace` | Immutable |
+/// | `consecutiveMistakeCount` | `loop_control.consecutive_mistake_count` | Line 320 |
+/// | `consecutiveMistakeLimit` | `config.consecutive_mistake_limit` | Line 321 |
+/// | `consecutiveMistakeCountForApplyDiff` | `loop_control.consecutive_mistake_count_for_apply_diff` | Line 322 |
+/// | `consecutiveMistakeCountForEditFile` | `loop_control.consecutive_mistake_count_for_edit_file` | Line 323 |
+/// | `consecutiveNoToolUseCount` | `loop_control.consecutive_no_tool_use_count` | Line 324 |
+/// | `consecutiveNoAssistantMessagesCount` | `loop_control.consecutive_no_assistant_messages_count` | Line 325 |
+/// | `toolUsage` | `tool_usage` | Line 326 |
+/// | `didEditFile` | `did_edit_file` | Line 306 |
+/// | `diffStrategy` | `diff_strategy` | Line 305 |
+/// | `cachedStreamingModel` | `cached_streaming_model` | Line 398 |
+/// | `tokenUsageSnapshot` | `token_usage_snapshot` | Line 401 |
+/// | `assistantMessageSavedToHistory` | `streaming.assistant_message_saved_to_history` | Line 361 |
+/// | `skipPrevResponseIdOnce` | `skip_prev_response_id_once` | Line 270 |
+/// | `assistantMessageContent` | `assistant_message_content` | Line 343 |
+/// | `userMessageContent` | `user_message_content` | Line 346 |
+/// | `userMessageContentReady` | `user_message_content_ready` | Line 347 |
+/// | `streamingToolCallIndices` | `streaming_tool_call_indices` | Line 394 |
+/// | `abort` | `abort` | Line 268 |
+/// | `didFinishAbortingStream` | `streaming.did_finish_aborting_stream` | Line 277 |
+/// | `abandoned` | `abandoned` | Line 278 |
+/// | `abortReason` | `abort_reason` | Line 279 |
+/// | `isInitialized` | `is_initialized` | Line 280 |
+/// | `isPaused` | `is_paused` | Line 281 |
 pub struct TaskEngine {
+    // --- Core configuration and state ---
     config: TaskConfig,
     state_machine: StateMachine,
     loop_control: LoopControl,
     streaming: StreamingState,
     result: TaskResult,
+
+    // --- API conversation history ---
     /// API conversation history (messages sent to/from the API).
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`apiConversationHistory`
+    /// Source: `src/core/task/Task.ts` line 309 — `apiConversationHistory`
     api_conversation_history: Vec<roo_types::api::ApiMessage>,
+
     /// UI-facing conversation messages (ClineMessages).
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`clineMessages`
+    /// Source: `src/core/task/Task.ts` line 310 — `clineMessages`
     cline_messages: Vec<roo_types::message::ClineMessage>,
+
+    // --- Task lifecycle flags ---
     /// Whether the task has been initialized.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`isInitialized`
+    /// Source: `src/core/task/Task.ts` line 280 — `isInitialized`
     is_initialized: bool,
+
     /// Whether the task has been abandoned (for delegation).
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`abandoned`
+    /// Source: `src/core/task/Task.ts` line 278 — `abandoned`
     abandoned: bool,
+
     /// Whether the task is paused.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`isPaused`
+    /// Source: `src/core/task/Task.ts` line 281 — `isPaused`
     is_paused: bool,
+
     /// Abort reason, if any.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`abortReason`
+    /// Source: `src/core/task/Task.ts` line 279 — `abortReason`
     abort_reason: Option<String>,
+
+    /// Whether the task has been aborted.
+    ///
+    /// Source: `src/core/task/Task.ts` line 268 — `abort`
+    abort: bool,
+
+    /// Whether to skip the previous response ID once.
+    ///
+    /// Source: `src/core/task/Task.ts` line 270 — `skipPrevResponseIdOnce`
+    skip_prev_response_id_once: bool,
+
+    // --- Tool usage tracking ---
+    /// Tool usage tracking (attempts and failures per tool).
+    ///
+    /// Source: `src/core/task/Task.ts` line 326 — `toolUsage: ToolUsage = {}`
+    tool_usage: roo_types::tool::ToolUsage,
+
+    // --- Editing state ---
+    /// Whether a file was edited in the current session.
+    ///
+    /// Source: `src/core/task/Task.ts` line 306 — `didEditFile: boolean = false`
+    did_edit_file: bool,
+
+    /// The diff strategy to use for file editing.
+    ///
+    /// Source: `src/core/task/Task.ts` line 305 — `diffStrategy?: DiffStrategy`
+    diff_strategy: Option<DiffStrategy>,
+
+    // --- Streaming model cache ---
+    /// Cached model info for the current streaming session.
+    /// Set at the start of each API request to prevent excessive getModel() calls.
+    ///
+    /// Source: `src/core/task/Task.ts` line 398 — `cachedStreamingModel`
+    cached_streaming_model: Option<CachedStreamingModel>,
+
+    // --- Token usage snapshot / throttling ---
+    /// Token usage snapshot for throttling.
+    ///
+    /// Source: `src/core/task/Task.ts` line 401 — `tokenUsageSnapshot`
+    token_usage_snapshot: Option<TokenUsageSnapshot>,
+
+    // --- Assistant message content ---
+    /// The accumulated assistant message content blocks for the current streaming session.
+    ///
+    /// Source: `src/core/task/Task.ts` line 343 — `assistantMessageContent: AssistantMessageContent[] = []`
+    assistant_message_content: Vec<AssistantMessageContent>,
+
+    // --- User message content ---
+    /// User message content blocks being assembled for the next API request.
+    ///
+    /// Source: `src/core/task/Task.ts` line 346 — `userMessageContent`
+    user_message_content: Vec<serde_json::Value>,
+
+    /// Whether the user message content is ready to be sent.
+    ///
+    /// Source: `src/core/task/Task.ts` line 347 — `userMessageContentReady`
+    user_message_content_ready: bool,
+
+    // --- Streaming tool call indices ---
+    /// Map of tool call IDs to their streaming index.
+    ///
+    /// Source: `src/core/task/Task.ts` line 394 — `streamingToolCallIndices`
+    streaming_tool_call_indices: HashMap<String, usize>,
 }
 
 impl TaskEngine {
@@ -91,8 +234,23 @@ impl TaskEngine {
             abandoned: false,
             is_paused: false,
             abort_reason: None,
+            abort: false,
+            skip_prev_response_id_once: false,
+            tool_usage: HashMap::new(),
+            did_edit_file: false,
+            diff_strategy: None,
+            cached_streaming_model: None,
+            token_usage_snapshot: None,
+            assistant_message_content: Vec::new(),
+            user_message_content: Vec::new(),
+            user_message_content_ready: false,
+            streaming_tool_call_indices: HashMap::new(),
         })
     }
+
+    // -----------------------------------------------------------------------
+    // Core accessors
+    // -----------------------------------------------------------------------
 
     /// Get the current task state.
     pub fn state(&self) -> TaskState {
@@ -126,7 +284,7 @@ impl TaskEngine {
 
     /// Get a reference to the streaming state.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?streaming-related properties
+    /// Source: `src/core/task/Task.ts` — streaming-related properties
     pub fn streaming(&self) -> &StreamingState {
         &self.streaming
     }
@@ -136,9 +294,13 @@ impl TaskEngine {
         &mut self.streaming
     }
 
+    // -----------------------------------------------------------------------
+    // API conversation history
+    // -----------------------------------------------------------------------
+
     /// Get a reference to the API conversation history.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`apiConversationHistory`
+    /// Source: `src/core/task/Task.ts` line 309 — `apiConversationHistory`
     pub fn api_conversation_history(&self) -> &[roo_types::api::ApiMessage] {
         &self.api_conversation_history
     }
@@ -150,7 +312,7 @@ impl TaskEngine {
 
     /// Add a message to the API conversation history.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`addToApiConversationHistory`
+    /// Source: `src/core/task/Task.ts` — `addToApiConversationHistory`
     pub fn add_api_message(&mut self, message: roo_types::api::ApiMessage) {
         self.api_conversation_history.push(message);
     }
@@ -165,9 +327,13 @@ impl TaskEngine {
         self.api_conversation_history.clear();
     }
 
+    // -----------------------------------------------------------------------
+    // Cline messages (UI-facing)
+    // -----------------------------------------------------------------------
+
     /// Get a reference to the cline messages (UI-facing messages).
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`clineMessages`
+    /// Source: `src/core/task/Task.ts` line 310 — `clineMessages`
     pub fn cline_messages(&self) -> &[roo_types::message::ClineMessage] {
         &self.cline_messages
     }
@@ -182,7 +348,13 @@ impl TaskEngine {
         self.cline_messages.push(message);
     }
 
+    // -----------------------------------------------------------------------
+    // Task lifecycle flags
+    // -----------------------------------------------------------------------
+
     /// Check whether the task is initialized.
+    ///
+    /// Source: `src/core/task/Task.ts` line 280 — `isInitialized`
     pub fn is_initialized(&self) -> bool {
         self.is_initialized
     }
@@ -193,6 +365,8 @@ impl TaskEngine {
     }
 
     /// Check whether the task has been abandoned.
+    ///
+    /// Source: `src/core/task/Task.ts` line 278 — `abandoned`
     pub fn is_abandoned(&self) -> bool {
         self.abandoned
     }
@@ -203,9 +377,261 @@ impl TaskEngine {
     }
 
     /// Get the abort reason.
+    ///
+    /// Source: `src/core/task/Task.ts` line 279 — `abortReason`
     pub fn abort_reason(&self) -> Option<&str> {
         self.abort_reason.as_deref()
     }
+
+    /// Check whether the task has been aborted.
+    ///
+    /// Source: `src/core/task/Task.ts` line 268 — `abort`
+    pub fn is_aborted(&self) -> bool {
+        self.abort
+    }
+
+    /// Check whether the task is paused.
+    ///
+    /// Source: `src/core/task/Task.ts` line 281 — `isPaused`
+    pub fn is_paused(&self) -> bool {
+        self.is_paused
+    }
+
+    /// Get/set the `skipPrevResponseIdOnce` flag.
+    ///
+    /// Source: `src/core/task/Task.ts` line 270 — `skipPrevResponseIdOnce`
+    pub fn skip_prev_response_id_once(&self) -> bool {
+        self.skip_prev_response_id_once
+    }
+
+    /// Set the `skipPrevResponseIdOnce` flag.
+    pub fn set_skip_prev_response_id_once(&mut self, value: bool) {
+        self.skip_prev_response_id_once = value;
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool usage tracking
+    // -----------------------------------------------------------------------
+
+    /// Get a reference to the tool usage map.
+    ///
+    /// Source: `src/core/task/Task.ts` line 326 — `toolUsage: ToolUsage = {}`
+    pub fn tool_usage(&self) -> &roo_types::tool::ToolUsage {
+        &self.tool_usage
+    }
+
+    /// Record a tool usage (increment attempts count).
+    ///
+    /// Source: `src/core/task/Task.ts` — `recordToolUsage()`
+    pub fn record_tool_usage(&mut self, tool_name: roo_types::tool::ToolName) {
+        let entry = self
+            .tool_usage
+            .entry(tool_name)
+            .or_insert(roo_types::tool::ToolUsageEntry {
+                attempts: 0,
+                failures: 0,
+            });
+        entry.attempts += 1;
+    }
+
+    /// Record a tool failure (increment failures count).
+    pub fn record_tool_failure(&mut self, tool_name: roo_types::tool::ToolName) {
+        let entry = self
+            .tool_usage
+            .entry(tool_name)
+            .or_insert(roo_types::tool::ToolUsageEntry {
+                attempts: 0,
+                failures: 0,
+            });
+        entry.failures += 1;
+    }
+
+    // -----------------------------------------------------------------------
+    // Editing state
+    // -----------------------------------------------------------------------
+
+    /// Check whether a file was edited in the current session.
+    ///
+    /// Source: `src/core/task/Task.ts` line 306 — `didEditFile`
+    pub fn did_edit_file(&self) -> bool {
+        self.did_edit_file
+    }
+
+    /// Set the `didEditFile` flag.
+    pub fn set_did_edit_file(&mut self, value: bool) {
+        self.did_edit_file = value;
+    }
+
+    /// Get the diff strategy.
+    ///
+    /// Source: `src/core/task/Task.ts` line 305 — `diffStrategy`
+    pub fn diff_strategy(&self) -> Option<DiffStrategy> {
+        self.diff_strategy
+    }
+
+    /// Set the diff strategy.
+    pub fn set_diff_strategy(&mut self, strategy: Option<DiffStrategy>) {
+        self.diff_strategy = strategy;
+    }
+
+    // -----------------------------------------------------------------------
+    // Cached streaming model
+    // -----------------------------------------------------------------------
+
+    /// Get the cached streaming model info.
+    ///
+    /// Source: `src/core/task/Task.ts` line 398 — `cachedStreamingModel`
+    pub fn cached_streaming_model(&self) -> Option<&CachedStreamingModel> {
+        self.cached_streaming_model.as_ref()
+    }
+
+    /// Set the cached streaming model info.
+    pub fn set_cached_streaming_model(&mut self, model: Option<CachedStreamingModel>) {
+        self.cached_streaming_model = model;
+    }
+
+    // -----------------------------------------------------------------------
+    // Token usage snapshot / throttling
+    // -----------------------------------------------------------------------
+
+    /// Get the token usage snapshot.
+    ///
+    /// Source: `src/core/task/Task.ts` line 401 — `tokenUsageSnapshot`
+    pub fn token_usage_snapshot(&self) -> Option<&TokenUsageSnapshot> {
+        self.token_usage_snapshot.as_ref()
+    }
+
+    /// Take a token usage snapshot for throttling.
+    pub fn take_token_usage_snapshot(&mut self) {
+        self.token_usage_snapshot = Some(TokenUsageSnapshot {
+            usage: self.result.token_usage.clone(),
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        });
+    }
+
+    /// Clear the token usage snapshot.
+    pub fn clear_token_usage_snapshot(&mut self) {
+        self.token_usage_snapshot = None;
+    }
+
+    // -----------------------------------------------------------------------
+    // Assistant message content
+    // -----------------------------------------------------------------------
+
+    /// Get a reference to the assistant message content blocks.
+    ///
+    /// Source: `src/core/task/Task.ts` line 343 — `assistantMessageContent`
+    pub fn assistant_message_content(&self) -> &[AssistantMessageContent] {
+        &self.assistant_message_content
+    }
+
+    /// Get a mutable reference to the assistant message content blocks.
+    pub fn assistant_message_content_mut(&mut self) -> &mut Vec<AssistantMessageContent> {
+        &mut self.assistant_message_content
+    }
+
+    /// Add an assistant message content block.
+    pub fn add_assistant_message_content(&mut self, content: AssistantMessageContent) {
+        self.assistant_message_content.push(content);
+    }
+
+    /// Clear the assistant message content.
+    pub fn clear_assistant_message_content(&mut self) {
+        self.assistant_message_content.clear();
+    }
+
+    // -----------------------------------------------------------------------
+    // User message content
+    // -----------------------------------------------------------------------
+
+    /// Get a reference to the user message content blocks.
+    ///
+    /// Source: `src/core/task/Task.ts` line 346 — `userMessageContent`
+    pub fn user_message_content(&self) -> &[serde_json::Value] {
+        &self.user_message_content
+    }
+
+    /// Get a mutable reference to the user message content blocks.
+    pub fn user_message_content_mut(&mut self) -> &mut Vec<serde_json::Value> {
+        &mut self.user_message_content
+    }
+
+    /// Check whether the user message content is ready.
+    ///
+    /// Source: `src/core/task/Task.ts` line 347 — `userMessageContentReady`
+    pub fn user_message_content_ready(&self) -> bool {
+        self.user_message_content_ready
+    }
+
+    /// Set whether the user message content is ready.
+    pub fn set_user_message_content_ready(&mut self, ready: bool) {
+        self.user_message_content_ready = ready;
+    }
+
+    /// Push a tool result to user message content, preventing duplicates.
+    ///
+    /// Source: `src/core/task/Task.ts` lines 370-383 — `pushToolResultToUserContent`
+    pub fn push_tool_result_to_user_content(&mut self, tool_use_id: &str, content: &str, is_error: bool) -> bool {
+        // Check for duplicate
+        let exists = self.user_message_content.iter().any(|block| {
+            if let Some(obj) = block.as_object() {
+                obj.get("type").and_then(|v| v.as_str()) == Some("tool_result")
+                    && obj.get("tool_use_id").and_then(|v| v.as_str()) == Some(tool_use_id)
+            } else {
+                false
+            }
+        });
+
+        if exists {
+            tracing::warn!(
+                "Skipping duplicate tool_result for tool_use_id: {}",
+                tool_use_id
+            );
+            return false;
+        }
+
+        let result = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content,
+            "is_error": is_error,
+        });
+        self.user_message_content.push(result);
+        true
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming tool call indices
+    // -----------------------------------------------------------------------
+
+    /// Get a reference to the streaming tool call indices map.
+    ///
+    /// Source: `src/core/task/Task.ts` line 394 — `streamingToolCallIndices`
+    pub fn streaming_tool_call_indices(&self) -> &HashMap<String, usize> {
+        &self.streaming_tool_call_indices
+    }
+
+    /// Get a mutable reference to the streaming tool call indices map.
+    pub fn streaming_tool_call_indices_mut(&mut self) -> &mut HashMap<String, usize> {
+        &mut self.streaming_tool_call_indices
+    }
+
+    /// Record a streaming tool call index.
+    pub fn record_streaming_tool_call_index(&mut self, tool_call_id: String, index: usize) {
+        self.streaming_tool_call_indices.insert(tool_call_id, index);
+    }
+
+    /// Clear the streaming tool call indices.
+    pub fn clear_streaming_tool_call_indices(&mut self) {
+        self.streaming_tool_call_indices.clear();
+    }
+
+    // -----------------------------------------------------------------------
+    // State transitions
+    // -----------------------------------------------------------------------
 
     /// Start the task.
     pub fn start(&mut self) -> Result<TaskState, TaskError> {
@@ -240,6 +666,7 @@ impl TaskEngine {
     /// Abort the task.
     pub fn abort(&mut self) -> Result<TaskState, TaskError> {
         self.loop_control.cancel();
+        self.abort = true;
         self.abort_reason = Some("user_cancelled".to_string());
         let state = self.state_machine.abort()?;
         self.result.status = state;
@@ -248,10 +675,11 @@ impl TaskEngine {
 
     /// Abort the task with a specific reason.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`abortReason` can be various values
+    /// Source: `src/core/task/Task.ts` — `abortReason` can be various values
     /// like "user_cancelled", "rate_limit_hit", "max_tokens_exceeded", etc.
     pub fn abort_with_reason(&mut self, reason: &str) -> Result<TaskState, TaskError> {
         self.loop_control.cancel();
+        self.abort = true;
         self.abort_reason = Some(reason.to_string());
         let state = self.state_machine.abort()?;
         self.result.status = state;
@@ -264,6 +692,10 @@ impl TaskEngine {
         self.result.status = state;
         Ok(state)
     }
+
+    // -----------------------------------------------------------------------
+    // Loop control
+    // -----------------------------------------------------------------------
 
     /// Check whether the task loop should continue.
     pub fn should_continue(&self) -> bool {
@@ -318,19 +750,28 @@ impl TaskEngine {
         self.result.token_usage = usage;
     }
 
+    // -----------------------------------------------------------------------
+    // Streaming state management
+    // -----------------------------------------------------------------------
+
     /// Prepare for a new API request by resetting streaming state.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?streaming state reset block in
+    /// Source: `src/core/task/Task.ts` — streaming state reset block in
     /// `recursivelyMakeClineRequests`
     pub fn prepare_for_new_api_request(&mut self) {
         self.streaming.reset_for_new_request();
+        self.assistant_message_content.clear();
+        self.user_message_content.clear();
+        self.user_message_content_ready = false;
+        self.streaming_tool_call_indices.clear();
+        self.cached_streaming_model = None;
     }
 
     /// Calculate exponential backoff delay for retry attempts.
     ///
     /// Returns the delay in milliseconds.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`MAX_EXPONENTIAL_BACKOFF_SECONDS`
+    /// Source: `src/core/task/Task.ts` — `MAX_EXPONENTIAL_BACKOFF_SECONDS`
     pub fn calculate_backoff_delay(retry_attempt: u32) -> u64 {
         let base_delay = 1000u64; // 1 second base
         let delay = base_delay * 2u64.pow(retry_attempt);
@@ -342,11 +783,12 @@ impl TaskEngine {
     /// Clears ask states, resets abort/streaming flags, and prepares for
     /// the next API call.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`resumeAfterDelegation`
+    /// Source: `src/core/task/Task.ts` — `resumeAfterDelegation`
     pub fn resume_after_delegation(&mut self) -> Result<TaskState, TaskError> {
         // Reset abort and streaming state
         self.loop_control.reset_turn();
         self.abandoned = false;
+        self.abort = false;
         self.abort_reason = None;
         self.is_paused = false;
         self.streaming.reset_for_new_request();
@@ -361,12 +803,9 @@ impl TaskEngine {
         Ok(state)
     }
 
-    /// Check whether the task is paused.
-    ///
-    /// Source: `src/core/task/Task.ts` 鈥?`isPaused`
-    pub fn is_paused(&self) -> bool {
-        self.is_paused
-    }
+    // -----------------------------------------------------------------------
+    // Context management
+    // -----------------------------------------------------------------------
 
     /// Truncate conversation history by removing messages and inserting a marker.
     ///
@@ -456,6 +895,10 @@ impl TaskEngine {
         });
     }
 
+    // -----------------------------------------------------------------------
+    // Finalization
+    // -----------------------------------------------------------------------
+
     /// Finalize the task and return the result.
     pub fn finalize(mut self) -> TaskResult {
         if self.state_machine.current() == TaskState::Running {
@@ -485,9 +928,9 @@ impl TaskEngine {
         self.result.clone()
     }
 
-    // -------------------------------------------------------------------
+    // -----------------------------------------------------------------------
     // Persistence
-    // -------------------------------------------------------------------
+    // -----------------------------------------------------------------------
     // Source: TS `Task.ts` — `saveClineMessages()`, `saveApiConversationHistory()`,
     // `getSavedApiConversationHistory()`, etc.
 
@@ -668,6 +1111,16 @@ mod tests {
         assert!(!engine.is_abandoned());
         assert!(engine.abort_reason().is_none());
         assert!(engine.api_conversation_history().is_empty());
+        assert!(!engine.is_aborted());
+        assert!(!engine.did_edit_file());
+        assert!(engine.diff_strategy().is_none());
+        assert!(engine.cached_streaming_model().is_none());
+        assert!(engine.token_usage_snapshot().is_none());
+        assert!(engine.assistant_message_content().is_empty());
+        assert!(engine.user_message_content().is_empty());
+        assert!(!engine.user_message_content_ready());
+        assert!(engine.streaming_tool_call_indices().is_empty());
+        assert!(!engine.skip_prev_response_id_once());
     }
 
     #[test]
@@ -702,6 +1155,7 @@ mod tests {
         engine.abort().unwrap();
         assert_eq!(engine.state(), TaskState::Aborted);
         assert!(!engine.should_continue());
+        assert!(engine.is_aborted());
         assert_eq!(engine.abort_reason(), Some("user_cancelled"));
     }
 
@@ -858,12 +1312,20 @@ mod tests {
         engine.streaming_mut().assistant_message_saved_to_history = true;
         engine.streaming_mut().current_streaming_content_index = 5;
         engine.streaming_mut().did_tool_fail_in_current_turn = true;
+        engine.add_assistant_message_content(AssistantMessageContent::Text {
+            content: "test".to_string(),
+            partial: true,
+        });
+        engine.set_user_message_content_ready(true);
 
         engine.prepare_for_new_api_request();
 
         assert!(!engine.streaming().assistant_message_saved_to_history);
         assert_eq!(engine.streaming().current_streaming_content_index, 0);
         assert!(!engine.streaming().did_tool_fail_in_current_turn);
+        assert!(engine.assistant_message_content().is_empty());
+        assert!(engine.user_message_content().is_empty());
+        assert!(!engine.user_message_content_ready());
     }
 
     // --- API conversation history tests ---
@@ -895,42 +1357,143 @@ mod tests {
         assert!(engine.api_conversation_history().is_empty());
     }
 
-    #[test]
-    fn test_engine_set_api_conversation_history() {
-        let mut engine = make_engine();
-        let history = vec![
-            roo_types::api::ApiMessage {
-                role: roo_types::api::MessageRole::User,
-                content: vec![roo_types::api::ContentBlock::Text {
-                    text: "msg1".to_string(),
-                }],
-                reasoning: None,
-                ts: None,
-                truncation_parent: None,
-                is_truncation_marker: None,
-                truncation_id: None,
-                condense_parent: None,
-                is_summary: None,
-                condense_id: None,
-            },
-            roo_types::api::ApiMessage {
-                role: roo_types::api::MessageRole::Assistant,
-                content: vec![roo_types::api::ContentBlock::Text {
-                    text: "msg2".to_string(),
-                }],
-                reasoning: None,
-                ts: None,
-                truncation_parent: None,
-                is_truncation_marker: None,
-                truncation_id: None,
-                condense_parent: None,
-                is_summary: None,
-                condense_id: None,
-            },
-        ];
+    // --- Tool usage tracking tests ---
 
-        engine.set_api_conversation_history(history);
-        assert_eq!(engine.api_conversation_history().len(), 2);
+    #[test]
+    fn test_engine_tool_usage_tracking() {
+        let mut engine = make_engine();
+        engine.start().unwrap();
+
+        engine.record_tool_usage(roo_types::tool::ToolName::ReadFile);
+        engine.record_tool_usage(roo_types::tool::ToolName::ReadFile);
+        engine.record_tool_failure(roo_types::tool::ToolName::ReadFile);
+
+        let usage = engine.tool_usage();
+        let read_entry = usage.get(&roo_types::tool::ToolName::ReadFile).unwrap();
+        assert_eq!(read_entry.attempts, 2);
+        assert_eq!(read_entry.failures, 1);
+    }
+
+    // --- Editing state tests ---
+
+    #[test]
+    fn test_engine_editing_state() {
+        let mut engine = make_engine();
+        assert!(!engine.did_edit_file());
+        engine.set_did_edit_file(true);
+        assert!(engine.did_edit_file());
+
+        assert!(engine.diff_strategy().is_none());
+        engine.set_diff_strategy(Some(DiffStrategy::MultiSearchReplace));
+        assert_eq!(engine.diff_strategy(), Some(DiffStrategy::MultiSearchReplace));
+    }
+
+    // --- Cached streaming model tests ---
+
+    #[test]
+    fn test_engine_cached_streaming_model() {
+        let mut engine = make_engine();
+        assert!(engine.cached_streaming_model().is_none());
+
+        engine.set_cached_streaming_model(Some(CachedStreamingModel {
+            id: "gpt-4".to_string(),
+            max_tokens: Some(8192),
+            context_window: Some(128000),
+            supports_images: true,
+            supports_computer_use: false,
+        }));
+
+        let model = engine.cached_streaming_model().unwrap();
+        assert_eq!(model.id, "gpt-4");
+        assert_eq!(model.max_tokens, Some(8192));
+    }
+
+    // --- Token usage snapshot tests ---
+
+    #[test]
+    fn test_engine_token_usage_snapshot() {
+        let mut engine = make_engine();
+        assert!(engine.token_usage_snapshot().is_none());
+
+        engine.take_token_usage_snapshot();
+        assert!(engine.token_usage_snapshot().is_some());
+
+        engine.clear_token_usage_snapshot();
+        assert!(engine.token_usage_snapshot().is_none());
+    }
+
+    // --- Assistant message content tests ---
+
+    #[test]
+    fn test_engine_assistant_message_content() {
+        let mut engine = make_engine();
+        assert!(engine.assistant_message_content().is_empty());
+
+        engine.add_assistant_message_content(AssistantMessageContent::Text {
+            content: "Hello".to_string(),
+            partial: false,
+        });
+        assert_eq!(engine.assistant_message_content().len(), 1);
+
+        engine.clear_assistant_message_content();
+        assert!(engine.assistant_message_content().is_empty());
+    }
+
+    // --- User message content tests ---
+
+    #[test]
+    fn test_engine_user_message_content() {
+        let mut engine = make_engine();
+        assert!(engine.user_message_content().is_empty());
+        assert!(!engine.user_message_content_ready());
+
+        engine.user_message_content_mut().push(serde_json::json!({"type": "text", "text": "hello"}));
+        assert_eq!(engine.user_message_content().len(), 1);
+
+        engine.set_user_message_content_ready(true);
+        assert!(engine.user_message_content_ready());
+    }
+
+    #[test]
+    fn test_engine_push_tool_result_no_duplicates() {
+        let mut engine = make_engine();
+        assert!(engine.push_tool_result_to_user_content("call_1", "result", false));
+        assert_eq!(engine.user_message_content().len(), 1);
+
+        // Duplicate should be rejected
+        assert!(!engine.push_tool_result_to_user_content("call_1", "result2", false));
+        assert_eq!(engine.user_message_content().len(), 1);
+
+        // Different ID should be accepted
+        assert!(engine.push_tool_result_to_user_content("call_2", "result3", true));
+        assert_eq!(engine.user_message_content().len(), 2);
+    }
+
+    // --- Streaming tool call indices tests ---
+
+    #[test]
+    fn test_engine_streaming_tool_call_indices() {
+        let mut engine = make_engine();
+        assert!(engine.streaming_tool_call_indices().is_empty());
+
+        engine.record_streaming_tool_call_index("call_1".to_string(), 0);
+        engine.record_streaming_tool_call_index("call_2".to_string(), 1);
+        assert_eq!(engine.streaming_tool_call_indices().len(), 2);
+        assert_eq!(engine.streaming_tool_call_indices()["call_1"], 0);
+
+        engine.clear_streaming_tool_call_indices();
+        assert!(engine.streaming_tool_call_indices().is_empty());
+    }
+
+    // --- Skip prev response ID tests ---
+
+    #[test]
+    fn test_engine_skip_prev_response_id_once() {
+        let mut engine = make_engine();
+        assert!(!engine.skip_prev_response_id_once());
+
+        engine.set_skip_prev_response_id_once(true);
+        assert!(engine.skip_prev_response_id_once());
     }
 
     // --- Initialization and abandonment tests ---
@@ -974,6 +1537,7 @@ mod tests {
         assert_eq!(state, TaskState::Running);
         assert!(engine.is_initialized());
         assert!(!engine.is_abandoned());
+        assert!(!engine.is_aborted());
     }
 
     // --- Mistake limit tests ---
@@ -995,7 +1559,7 @@ mod tests {
 
         // Second mistake hits the limit (>= comparison)
         engine.record_tool_execution("tool1", false);
-        assert!(!engine.should_continue()); // 2 >= 2 鈫?STOP
+        assert!(!engine.should_continue()); // 2 >= 2 → STOP
     }
 
     // --- Cline messages tests ---
@@ -1056,6 +1620,7 @@ mod tests {
         assert_eq!(engine.state(), TaskState::Aborted);
         assert_eq!(engine.abort_reason(), Some("rate_limit_hit"));
         assert!(!engine.should_continue());
+        assert!(engine.is_aborted());
     }
 
     // --- resume_after_delegation resets is_paused ---

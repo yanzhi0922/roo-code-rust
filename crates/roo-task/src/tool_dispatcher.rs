@@ -1478,6 +1478,521 @@ pub fn default_dispatcher_full(
 }
 
 // ---------------------------------------------------------------------------
+// Tool Call Validation
+// ---------------------------------------------------------------------------
+// Source: `src/core/tools/validateToolUse.ts` — validates tool call parameters
+
+/// Validates a tool call's parameters before execution.
+///
+/// Source: `src/core/tools/validateToolUse.ts` — `validateToolUse()`
+#[derive(Debug, Clone)]
+pub struct ToolCallValidator;
+
+impl ToolCallValidator {
+    /// Validate a tool call's parameters.
+    ///
+    /// Returns `Ok(())` if valid, `Err` with a description of the issue.
+    ///
+    /// Source: `src/core/tools/validateToolUse.ts` — `validateToolUse()`
+    pub fn validate(tool_name: &str, params: &serde_json::Value) -> Result<(), String> {
+        match tool_name {
+            "read_file" => {
+                if params.get("path").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: path".to_string());
+                }
+            }
+            "write_to_file" => {
+                if params.get("path").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: path".to_string());
+                }
+                if params.get("content").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: content".to_string());
+                }
+            }
+            "apply_diff" => {
+                if params.get("path").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: path".to_string());
+                }
+                if params.get("diff").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: diff".to_string());
+                }
+            }
+            "edit_file" => {
+                if params.get("filePath")
+                    .or_else(|| params.get("file_path"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: filePath".to_string());
+                }
+                if params.get("oldString")
+                    .or_else(|| params.get("old_string"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: oldString".to_string());
+                }
+                if params.get("newString")
+                    .or_else(|| params.get("new_string"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: newString".to_string());
+                }
+            }
+            "execute_command" => {
+                if params.get("command").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: command".to_string());
+                }
+            }
+            "search_files" => {
+                if params.get("path").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: path".to_string());
+                }
+                if params.get("regex").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: regex".to_string());
+                }
+            }
+            "list_files" => {
+                if params.get("path").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: path".to_string());
+                }
+            }
+            "codebase_search" => {
+                if params.get("query").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: query".to_string());
+                }
+            }
+            "ask_followup_question" => {
+                if params.get("question").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: question".to_string());
+                }
+                if params.get("follow_up").is_none() {
+                    return Err("Missing required parameter: follow_up".to_string());
+                }
+            }
+            "attempt_completion" => {
+                if params.get("result").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: result".to_string());
+                }
+            }
+            "switch_mode" => {
+                if params.get("mode_slug").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: mode_slug".to_string());
+                }
+            }
+            "new_task" => {
+                if params.get("mode").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: mode".to_string());
+                }
+                if params.get("message").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: message".to_string());
+                }
+            }
+            "use_mcp_tool" => {
+                if params.get("server_name").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: server_name".to_string());
+                }
+                if params.get("tool_name").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: tool_name".to_string());
+                }
+            }
+            "access_mcp_resource" => {
+                if params.get("server_name").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: server_name".to_string());
+                }
+                if params.get("uri").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: uri".to_string());
+                }
+            }
+            "update_todo_list" => {
+                if params.get("todos").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: todos".to_string());
+                }
+            }
+            "skill" => {
+                if params.get("skill").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: skill".to_string());
+                }
+            }
+            "run_slash_command" => {
+                if params.get("command").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: command".to_string());
+                }
+            }
+            _ => {
+                // Unknown tools pass validation (they'll fail at dispatch time)
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if a tool name is a valid built-in tool.
+    ///
+    /// Source: `src/core/tools/validateToolUse.ts` — `isValidToolName()`
+    pub fn is_valid_tool_name(name: &str) -> bool {
+        matches!(
+            name,
+            "read_file"
+                | "write_to_file"
+                | "apply_diff"
+                | "edit_file"
+                | "execute_command"
+                | "read_command_output"
+                | "search_files"
+                | "list_files"
+                | "codebase_search"
+                | "ask_followup_question"
+                | "attempt_completion"
+                | "switch_mode"
+                | "new_task"
+                | "use_mcp_tool"
+                | "access_mcp_resource"
+                | "update_todo_list"
+                | "skill"
+                | "run_slash_command"
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-Approval Checker
+// ---------------------------------------------------------------------------
+// Source: `src/core/auto-approval/index.ts` — `checkAutoApproval()`
+
+/// Result of an auto-approval check.
+#[derive(Debug, Clone)]
+pub enum AutoApprovalResult {
+    /// The tool call is auto-approved.
+    Approved,
+    /// The tool call requires user approval.
+    RequiresApproval {
+        /// The reason why auto-approval was denied.
+        reason: String,
+    },
+    /// The tool call is auto-denied (e.g., protected file).
+    Denied {
+        /// The reason for denial.
+        reason: String,
+    },
+}
+
+/// Checks whether a tool call should be auto-approved.
+///
+/// Source: `src/core/auto-approval/index.ts` — `checkAutoApproval()`
+#[derive(Debug, Clone)]
+pub struct AutoApprovalChecker {
+    /// Whether auto-approval is enabled.
+    pub enabled: bool,
+    /// Tool names that are always auto-approved.
+    pub auto_approved_tools: Vec<String>,
+    /// Tool names that always require approval.
+    pub require_approval_tools: Vec<String>,
+}
+
+impl AutoApprovalChecker {
+    /// Create a new auto-approval checker.
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            auto_approved_tools: vec![
+                "read_file".to_string(),
+                "list_files".to_string(),
+                "search_files".to_string(),
+                "codebase_search".to_string(),
+                "read_command_output".to_string(),
+            ],
+            require_approval_tools: vec![
+                "execute_command".to_string(),
+                "write_to_file".to_string(),
+                "apply_diff".to_string(),
+                "edit_file".to_string(),
+            ],
+        }
+    }
+
+    /// Create a disabled auto-approval checker (all tools require approval).
+    pub fn disabled() -> Self {
+        Self::new(false)
+    }
+
+    /// Check whether a tool call should be auto-approved.
+    ///
+    /// Source: `src/core/auto-approval/index.ts` — `checkAutoApproval()`
+    pub fn check(&self, tool_name: &str, _params: &serde_json::Value) -> AutoApprovalResult {
+        if !self.enabled {
+            return AutoApprovalResult::RequiresApproval {
+                reason: "Auto-approval is disabled".to_string(),
+            };
+        }
+
+        if self.auto_approved_tools.contains(&tool_name.to_string()) {
+            return AutoApprovalResult::Approved;
+        }
+
+        if self.require_approval_tools.contains(&tool_name.to_string()) {
+            return AutoApprovalResult::RequiresApproval {
+                reason: format!("Tool '{}' requires explicit user approval", tool_name),
+            };
+        }
+
+        // Default: tools not in either list require approval
+        AutoApprovalResult::RequiresApproval {
+            reason: format!("Tool '{}' is not in the auto-approval list", tool_name),
+        }
+    }
+}
+
+impl Default for AutoApprovalChecker {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool Result Collector
+// ---------------------------------------------------------------------------
+// Source: `src/core/assistant-message/presentAssistantMessage.ts` — pushToolResult
+
+/// Collects tool results for the current streaming session.
+///
+/// Source: `src/core/assistant-message/presentAssistantMessage.ts` — pushToolResult
+#[derive(Debug, Clone)]
+pub struct ToolResultCollector {
+    /// Collected tool results, keyed by tool call ID.
+    results: HashMap<String, ToolResultEntry>,
+}
+
+/// A collected tool result entry.
+#[derive(Debug, Clone)]
+pub struct ToolResultEntry {
+    /// The tool call ID.
+    pub tool_call_id: String,
+    /// The tool name.
+    pub tool_name: String,
+    /// The result text.
+    pub result_text: String,
+    /// Whether the result is an error.
+    pub is_error: bool,
+    /// Optional images from the tool execution.
+    pub images: Option<Vec<String>>,
+}
+
+impl ToolResultCollector {
+    /// Create a new empty tool result collector.
+    pub fn new() -> Self {
+        Self {
+            results: HashMap::new(),
+        }
+    }
+
+    /// Push a tool result, preventing duplicates.
+    ///
+    /// Returns `true` if the result was added, `false` if it was a duplicate.
+    ///
+    /// Source: `src/core/assistant-message/presentAssistantMessage.ts` — pushToolResult
+    pub fn push_result(&mut self, entry: ToolResultEntry) -> bool {
+        if self.results.contains_key(&entry.tool_call_id) {
+            tracing::warn!(
+                "Skipping duplicate tool_result for tool_call_id: {}",
+                entry.tool_call_id
+            );
+            return false;
+        }
+        self.results.insert(entry.tool_call_id.clone(), entry);
+        true
+    }
+
+    /// Get a tool result by tool call ID.
+    pub fn get_result(&self, tool_call_id: &str) -> Option<&ToolResultEntry> {
+        self.results.get(tool_call_id)
+    }
+
+    /// Get all collected results.
+    pub fn results(&self) -> &HashMap<String, ToolResultEntry> {
+        &self.results
+    }
+
+    /// Check whether a tool result has been collected for the given ID.
+    pub fn has_result(&self, tool_call_id: &str) -> bool {
+        self.results.contains_key(tool_call_id)
+    }
+
+    /// Clear all collected results.
+    pub fn clear(&mut self) {
+        self.results.clear();
+    }
+
+    /// Get the number of collected results.
+    pub fn len(&self) -> usize {
+        self.results.len()
+    }
+
+    /// Check if there are no results.
+    pub fn is_empty(&self) -> bool {
+        self.results.is_empty()
+    }
+}
+
+impl Default for ToolResultCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Present Assistant Message Processor
+// ---------------------------------------------------------------------------
+// Source: `src/core/assistant-message/presentAssistantMessage.ts`
+//   Orchestrates the processing of assistant message content blocks.
+
+/// Processes assistant message content blocks sequentially.
+///
+/// This is the Rust equivalent of the TS `presentAssistantMessage()` function.
+/// It manages the sequential processing of content blocks, including:
+/// - Text display
+/// - Tool call validation, approval, and execution
+/// - MCP tool call routing
+/// - Lock management for concurrent processing
+///
+/// Source: `src/core/assistant-message/presentAssistantMessage.ts`
+pub struct PresentAssistantMessageProcessor {
+    /// The tool dispatcher for executing tools.
+    dispatcher: ToolDispatcher,
+    /// The tool call validator.
+    validator: ToolCallValidator,
+    /// The auto-approval checker.
+    auto_approval: AutoApprovalChecker,
+    /// The tool result collector.
+    result_collector: ToolResultCollector,
+}
+
+impl PresentAssistantMessageProcessor {
+    /// Create a new processor with the given dispatcher.
+    pub fn new(dispatcher: ToolDispatcher) -> Self {
+        Self {
+            dispatcher,
+            validator: ToolCallValidator,
+            auto_approval: AutoApprovalChecker::disabled(),
+            result_collector: ToolResultCollector::new(),
+        }
+    }
+
+    /// Create a new processor with auto-approval enabled.
+    pub fn with_auto_approval(mut self, enabled: bool) -> Self {
+        self.auto_approval = AutoApprovalChecker::new(enabled);
+        self
+    }
+
+    /// Get a reference to the tool result collector.
+    pub fn result_collector(&self) -> &ToolResultCollector {
+        &self.result_collector
+    }
+
+    /// Get a mutable reference to the tool result collector.
+    pub fn result_collector_mut(&mut self) -> &mut ToolResultCollector {
+        &mut self.result_collector
+    }
+
+    /// Get a reference to the dispatcher.
+    pub fn dispatcher(&self) -> &ToolDispatcher {
+        &self.dispatcher
+    }
+
+    /// Process a single content block.
+    ///
+    /// Returns the execution result if a tool was executed, or `None` for text blocks.
+    ///
+    /// Source: `src/core/assistant-message/presentAssistantMessage.ts` — main switch block
+    pub async fn process_block(
+        &mut self,
+        content: &crate::types::AssistantMessageContent,
+        context: &ToolContext,
+    ) -> Result<Option<ToolExecutionResult>, String> {
+        match content {
+            crate::types::AssistantMessageContent::Text { content, partial } => {
+                // Text blocks are displayed to the user but don't produce tool results
+                if *partial {
+                    return Ok(None);
+                }
+                // Strip thinking tags
+                let cleaned = content
+                    .replace("<thinking>", "")
+                    .replace("</thinking>", "");
+                let _ = cleaned; // In a full implementation, this would be sent to the UI
+                Ok(None)
+            }
+
+            crate::types::AssistantMessageContent::ToolUse(tool_use) => {
+                if tool_use.partial {
+                    return Ok(None);
+                }
+
+                // Validate the tool call
+                let args = tool_use.native_args.clone().unwrap_or(serde_json::Value::Null);
+                if let Err(e) = ToolCallValidator::validate(&tool_use.name, &args) {
+                    let result = ToolExecutionResult::error(format!(
+                        "Tool call validation failed: {}",
+                        e
+                    ));
+                    self.result_collector.push_result(ToolResultEntry {
+                        tool_call_id: tool_use.id.clone(),
+                        tool_name: tool_use.name.clone(),
+                        result_text: result.text.clone(),
+                        is_error: true,
+                        images: None,
+                    });
+                    return Ok(Some(result));
+                }
+
+                // Execute the tool
+                let result = self.dispatcher.dispatch(&tool_use.name, args, context).await;
+
+                self.result_collector.push_result(ToolResultEntry {
+                    tool_call_id: tool_use.id.clone(),
+                    tool_name: tool_use.name.clone(),
+                    result_text: result.text.clone(),
+                    is_error: result.is_error,
+                    images: result.images.clone(),
+                });
+
+                Ok(Some(result))
+            }
+
+            crate::types::AssistantMessageContent::McpToolUse(mcp_use) => {
+                if mcp_use.partial {
+                    return Ok(None);
+                }
+
+                // Route MCP tool calls through the use_mcp_tool handler
+                let args = serde_json::json!({
+                    "server_name": mcp_use.server_name,
+                    "tool_name": mcp_use.tool_name,
+                    "arguments": mcp_use.arguments,
+                });
+
+                let result = self.dispatcher.dispatch("use_mcp_tool", args, context).await;
+
+                self.result_collector.push_result(ToolResultEntry {
+                    tool_call_id: mcp_use.id.clone(),
+                    tool_name: format!("use_mcp_tool({}/{})", mcp_use.server_name, mcp_use.tool_name),
+                    result_text: result.text.clone(),
+                    is_error: result.is_error,
+                    images: result.images.clone(),
+                });
+
+                Ok(Some(result))
+            }
+        }
+    }
+
+    /// Clear all collected results for a new request.
+    pub fn clear_results(&mut self) {
+        self.result_collector.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

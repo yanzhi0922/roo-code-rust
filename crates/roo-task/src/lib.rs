@@ -36,7 +36,14 @@ pub mod task_lifecycle;
 // Re-exports
 // ---------------------------------------------------------------------------
 
-pub use types::{TaskConfig, TaskError, TaskResult, TaskState};
+pub use types::{
+    TaskConfig, TaskError, TaskResult, TaskState, StreamingState,
+    AssistantMessageContent, TextContent, ToolUse, McpToolUse,
+    ToolCallStreamEvent, StreamingToolCallState, RawChunkTrackerEntry,
+    StackItem, AttemptResult, DiffStrategy,
+    is_mcp_tool_name, parse_mcp_tool_name, normalize_mcp_tool_name,
+    TOOL_PARAM_NAMES, is_valid_tool_param,
+};
 pub use state::StateMachine;
 pub use events::{TaskEvent, TaskEventEmitter};
 pub use loop_control::LoopControl;
@@ -47,5 +54,5 @@ pub use tool_dispatcher::{ToolDispatcher, ToolExecutionResult, ToolContext, Tool
 pub use message_builder::MessageBuilder;
 pub use agent_loop::{AgentLoop, AgentLoopConfig};
 pub use task_manager::TaskManager;
-pub use ask_say::{AskSayHandler, AskResponse, AskResult, AskIgnoredError};
+pub use ask_say::{AskSayHandler, AskResponse, AskResult, AskIgnoredError, SayOptions};
 pub use task_lifecycle::{TaskLifecycle, ServiceRefs};
