@@ -112,24 +112,42 @@ pub async fn parse_mentions(text: &str, cwd: &Path) -> ParseMentionsResult {
                 }
             }
         } else if mention == "problems" {
-            // TODO: Integrate with diagnostics system
-            parsed_text.push_str("\n\n<workspace_diagnostics>\nNo errors or warnings detected.\n</workspace_diagnostics>");
-        } else if mention == "git-changes" {
-            // TODO: Integrate with git operations (needs git2 dependency)
-            parsed_text.push_str(
-                "\n\n<git_working_state>\nGit working state not available (stub)\n</git_working_state>",
-            );
-        } else if is_git_hash(mention) {
-            // TODO: Integrate with git operations (needs git2 dependency)
+            let content = crate::providers::get_problems_content(None);
             parsed_text.push_str(&format!(
-                "\n\n<git_commit hash=\"{}\">\nGit commit info not available (stub)\n</git_commit>",
-                mention
+                "\n\n<workspace_diagnostics>\n{}\n</workspace_diagnostics>",
+                content
             ));
+            content_blocks.push(MentionContentBlock::diagnostics(&content));
+        } else if mention == "git-changes" {
+            let content = crate::providers::get_git_changes_content(cwd).await;
+            parsed_text.push_str(&format!(
+                "\n\n<git_working_state>\n{}\n</git_working_state>",
+                content
+            ));
+            content_blocks.push(MentionContentBlock::git_changes(&content));
+        } else if is_git_hash(mention) {
+            // Get git commit info via command line
+            let content = get_git_commit_info(cwd, mention).await;
+            parsed_text.push_str(&format!(
+                "\n\n<git_commit hash=\"{}\">\n{}\n</git_commit>",
+                mention, content
+            ));
+            content_blocks.push(MentionContentBlock::git_commit(mention, &content));
         } else if mention == "terminal" {
-            // TODO: Integrate with terminal output
-            parsed_text.push_str(
-                "\n\n<terminal_output>\nTerminal output not available (stub)\n</terminal_output>",
-            );
+            let content = crate::providers::get_terminal_output(None);
+            parsed_text.push_str(&format!(
+                "\n\n<terminal_output>\n{}\n</terminal_output>",
+                content
+            ));
+            content_blocks.push(MentionContentBlock::terminal(&content));
+        } else if mention.starts_with("http") {
+            // URL mention — fetch content
+            let content = crate::providers::get_url_content(mention).await;
+            parsed_text.push_str(&format!(
+                "\n\n<url_content url=\"{}\">\n{}\n</url_content>",
+                mention, content
+            ));
+            content_blocks.push(MentionContentBlock::url(&content));
         }
     }
 
@@ -156,6 +174,26 @@ pub async fn parse_mentions(text: &str, cwd: &Path) -> ParseMentionsResult {
             Some(slash_command_help.trim().to_string())
         },
         mode: command_mode,
+    }
+}
+
+/// Get git commit info by running `git show --stat <hash>`.
+async fn get_git_commit_info(cwd: &Path, hash: &str) -> String {
+    let output = tokio::process::Command::new("git")
+        .args(["show", "--stat", "--format=fuller", hash])
+        .current_dir(cwd)
+        .output()
+        .await;
+
+    match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).to_string()
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            format!("Git commit info not available: {}", stderr.trim())
+        }
+        Err(e) => format!("Failed to get git commit info: {}", e),
     }
 }
 
@@ -266,8 +304,8 @@ mod tests {
         assert!(result.text.contains("'test.rs'"));
         assert!(result.text.contains("Workspace Problems"));
         assert!(result.text.contains("Terminal Output"));
-        // Should have 1 content block (the file)
-        assert_eq!(result.content_blocks.len(), 1);
+        // Should have 3 content blocks (file, problems, terminal)
+        assert_eq!(result.content_blocks.len(), 3);
     }
 
     #[tokio::test]
@@ -318,6 +356,6 @@ mod tests {
         assert!(result.text.contains("'hello.rs'"));
         assert!(result.text.contains("Terminal Output"));
         assert!(result.text.contains("Please look at"));
-        assert_eq!(result.content_blocks.len(), 1);
+        assert_eq!(result.content_blocks.len(), 2);
     }
 }

@@ -46,6 +46,7 @@ impl QwenHandler {
             model_info,
             provider_name_enum: ProviderName::QwenCode,
             request_timeout: config.request_timeout,
+        reasoning_effort: None,
         };
 
         let inner = OpenAiCompatibleProvider::new(compatible_config)?;

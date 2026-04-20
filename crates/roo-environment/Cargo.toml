@@ -9,5 +9,6 @@ description = "Environment details generation for Roo Code"
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
+regex = { workspace = true }
 
 [dev-dependencies]

@@ -68,6 +68,7 @@ impl RooHandler {
             model_info,
             provider_name_enum: ProviderName::Roo,
             request_timeout: config.request_timeout,
+        reasoning_effort: None,
         };
 
         let inner = OpenAiCompatibleProvider::new(compatible_config)?;

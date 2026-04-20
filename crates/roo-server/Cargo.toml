@@ -11,9 +11,14 @@ roo-types = { path = "../roo-types" }
 roo-jsonrpc = { path = "../roo-jsonrpc" }
 roo-app = { path = "../roo-app" }
 roo-modes = { path = "../roo-modes" }
+roo-mcp = { path = "../roo-mcp" }
+roo-tools-search = { path = "../roo-tools-search" }
+roo-task = { path = "../roo-task" }
+roo-task-persistence = { path = "../roo-task-persistence" }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }

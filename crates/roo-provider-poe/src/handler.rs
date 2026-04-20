@@ -63,6 +63,7 @@ impl PoeHandler {
             model_info: model_info.clone(),
             provider_name_enum: ProviderName::Poe,
             request_timeout: config.request_timeout,
+        reasoning_effort: None,
         };
 
         let inner = OpenAiCompatibleProvider::new(compatible_config)?;

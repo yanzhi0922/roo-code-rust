@@ -13,7 +13,31 @@ use clap::Parser;
 use futures::StreamExt;
 
 use roo_provider::handler::{CreateMessageMetadata, Provider};
-use roo_provider_anthropic::{AnthropicConfig, AnthropicHandler};
+use roo_provider_anthropic::{AnthropicConfig, AnthropicHandler, AnthropicVertexConfig, AnthropicVertexHandler};
+use roo_provider_openai::{OpenAiConfig, OpenAiHandler};
+use roo_provider_openai_native::OpenAiNativeConfig;
+use roo_provider_openai_native::OpenAiNativeHandler;
+use roo_provider_openrouter::{OpenRouterConfig, OpenRouterHandler};
+use roo_provider_deepseek::{DeepSeekConfig, DeepSeekHandler};
+use roo_provider_google::{GoogleConfig, GoogleHandler, VertexConfig, VertexHandler};
+use roo_provider_xai::{XaiConfig, XaiHandler};
+use roo_provider_mistral::{MistralConfig, MistralHandler};
+use roo_provider_fireworks::{FireworksConfig, FireworksHandler};
+use roo_provider_ollama::{OllamaConfig, OllamaHandler};
+use roo_provider_lmstudio::{LmStudioConfig, LmStudioHandler};
+use roo_provider_litellm::{LiteLlmConfig, LiteLlmHandler};
+use roo_provider_qwen::{QwenConfig, QwenHandler};
+use roo_provider_minimax::{MiniMaxConfig, MiniMaxHandler};
+use roo_provider_poe::{PoeConfig, PoeHandler};
+use roo_provider_requesty::{RequestyConfig, RequestyHandler};
+use roo_provider_unbound::{UnboundConfig, UnboundHandler};
+use roo_provider_vercel::{VercelConfig, VercelHandler};
+use roo_provider_roo::{RooConfig, RooHandler};
+use roo_provider_sambanova::{SambaNovaConfig, SambaNovaHandler};
+use roo_provider_baseten::{BasetenConfig, BasetenHandler};
+use roo_provider_moonshot::{MoonshotConfig, MoonshotHandler};
+use roo_provider_zai::{ZaiConfig, ZaiHandler};
+use roo_provider_aws::{AwsBedrockConfig, AwsBedrockHandler};
 use roo_task::tool_dispatcher::{
     ToolContext, ToolDispatcher, ToolExecutionResult,
     default_dispatcher_with_terminal,
@@ -251,32 +275,428 @@ fn build_handler(
     config: &ConfigFile,
 ) -> Result<Box<dyn Provider>> {
     match provider_name {
+        // ── Anthropic ──────────────────────────────────────────────────
         "anthropic" => {
-            let api_key = config
-                .api_key
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("--api-key is required for the anthropic provider"))?;
-            let base_url = config
-                .base_url
-                .clone()
-                .unwrap_or_else(|| AnthropicConfig::DEFAULT_BASE_URL.to_string());
-
-            let anthropic_config = AnthropicConfig {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for anthropic"))?;
+            let cfg = AnthropicConfig {
                 api_key: api_key.to_string(),
-                base_url,
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| AnthropicConfig::DEFAULT_BASE_URL.to_string()),
                 model_id: config.model.clone(),
                 temperature: config.temperature,
                 use_extended_thinking: config.thinking,
                 max_thinking_tokens: config.max_thinking_tokens,
                 request_timeout: config.timeout,
             };
-
-            let handler =
-                AnthropicHandler::new(anthropic_config).context("Failed to create Anthropic handler")?;
-            Ok(Box::new(handler))
+            Ok(Box::new(AnthropicHandler::new(cfg)
+                .context("Failed to create Anthropic handler")?))
         }
+
+        // ── Anthropic Vertex ───────────────────────────────────────────
+        "vertex" => {
+            let project_id = config.base_url.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--base-url is required for vertex (use project_id)"))?
+                .to_string();
+            let access_token = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for vertex (use access_token)"))?
+                .to_string();
+            let cfg = AnthropicVertexConfig {
+                project_id,
+                region: "us-east5".to_string(),
+                access_token,
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+                enable_1m_context: false,
+                use_extended_thinking: config.thinking,
+                max_thinking_tokens: config.max_thinking_tokens,
+            };
+            Ok(Box::new(AnthropicVertexHandler::new(cfg)
+                .context("Failed to create Anthropic Vertex handler")?))
+        }
+
+        // ── AWS Bedrock ────────────────────────────────────────────────
+        "aws" | "bedrock" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for bedrock (format: access_key:secret_key)"))?;
+            let parts: Vec<&str> = api_key.splitn(2, ':').collect();
+            let (access_key, secret_key) = if parts.len() == 2 {
+                (parts[0].to_string(), parts[1].to_string())
+            } else {
+                anyhow::bail!("--api-key for bedrock must be in format access_key:secret_key");
+            };
+            let cfg = AwsBedrockConfig {
+                access_key,
+                secret_key,
+                session_token: None,
+                region: config.base_url.clone()
+                    .unwrap_or_else(|| AwsBedrockConfig::DEFAULT_REGION.to_string()),
+                model_id: config.model.clone(),
+                use_cross_region_inference: false,
+                endpoint_url: None,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(AwsBedrockHandler::new(cfg)
+                .context("Failed to create Bedrock handler")?))
+        }
+
+        // ── OpenAI ─────────────────────────────────────────────────────
+        "openai" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for openai"))?;
+            let cfg = OpenAiConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| OpenAiConfig::DEFAULT_BASE_URL.to_string()),
+                org_id: None,
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                reasoning_effort: None,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(OpenAiHandler::new(cfg)
+                .context("Failed to create OpenAI handler")?))
+        }
+
+        // ── OpenAI Native (Responses API) ──────────────────────────────
+        "openai-native" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for openai-native"))?;
+            let cfg = OpenAiNativeConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone(),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                reasoning_effort: None,
+                request_timeout: config.timeout,
+                service_tier: None,
+                enable_reasoning_summary: true,
+            };
+            Ok(Box::new(OpenAiNativeHandler::new(cfg)
+                .context("Failed to create OpenAI Native handler")?))
+        }
+
+        // ── OpenRouter ─────────────────────────────────────────────────
+        "openrouter" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for openrouter"))?;
+            let cfg = OpenRouterConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| OpenRouterConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(OpenRouterHandler::new(cfg)
+                .context("Failed to create OpenRouter handler")?))
+        }
+
+        // ── DeepSeek ───────────────────────────────────────────────────
+        "deepseek" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for deepseek"))?;
+            let cfg = DeepSeekConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| DeepSeekConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(DeepSeekHandler::new(cfg)
+                .context("Failed to create DeepSeek handler")?))
+        }
+
+        // ── Google Gemini ──────────────────────────────────────────────
+        "google" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for google"))?;
+            let cfg = GoogleConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| GoogleConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(GoogleHandler::new(cfg)
+                .context("Failed to create Google handler")?))
+        }
+
+        // ── xAI ────────────────────────────────────────────────────────
+        "xai" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for xai"))?;
+            let cfg = XaiConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| XaiConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(XaiHandler::new(cfg)
+                .context("Failed to create xAI handler")?))
+        }
+
+        // ── Mistral ────────────────────────────────────────────────────
+        "mistral" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for mistral"))?;
+            let cfg = MistralConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| MistralConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(MistralHandler::new(cfg)
+                .context("Failed to create Mistral handler")?))
+        }
+
+        // ── Fireworks ──────────────────────────────────────────────────
+        "fireworks" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for fireworks"))?;
+            let cfg = FireworksConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| FireworksConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(FireworksHandler::new(cfg)
+                .context("Failed to create Fireworks handler")?))
+        }
+
+        // ── Ollama (no API key needed) ─────────────────────────────────
+        "ollama" => {
+            let cfg = OllamaConfig {
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| OllamaConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+                api_options: None,
+            };
+            Ok(Box::new(OllamaHandler::new(cfg)
+                .context("Failed to create Ollama handler")?))
+        }
+
+        // ── LM Studio (no API key needed) ──────────────────────────────
+        "lmstudio" => {
+            let cfg = LmStudioConfig {
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| LmStudioConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+                speculative_decoding_enabled: false,
+                draft_model_id: None,
+            };
+            Ok(Box::new(LmStudioHandler::new(cfg)
+                .context("Failed to create LM Studio handler")?))
+        }
+
+        // ── LiteLLM ────────────────────────────────────────────────────
+        "litellm" => {
+            let api_key = config.api_key.clone()
+                .unwrap_or_else(|| "dummy-key".to_string());
+            let cfg = LiteLlmConfig {
+                api_key,
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| LiteLlmConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                use_prompt_cache: false,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(LiteLlmHandler::new(cfg)
+                .context("Failed to create LiteLLM handler")?))
+        }
+
+        // ── Qwen ───────────────────────────────────────────────────────
+        "qwen" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for qwen"))?;
+            let cfg = QwenConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| QwenConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(QwenHandler::new(cfg)
+                .context("Failed to create Qwen handler")?))
+        }
+
+        // ── MiniMax ────────────────────────────────────────────────────
+        "minimax" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for minimax"))?;
+            let cfg = MiniMaxConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| MiniMaxConfig::DEFAULT_BASE_URL.to_string()),
+                group_id: None,
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(MiniMaxHandler::new(cfg)
+                .context("Failed to create MiniMax handler")?))
+        }
+
+        // ── Poe ────────────────────────────────────────────────────────
+        "poe" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for poe"))?;
+            let cfg = PoeConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone(),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                max_thinking_tokens: config.max_thinking_tokens,
+                reasoning_effort: None,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(PoeHandler::new(cfg)
+                .context("Failed to create Poe handler")?))
+        }
+
+        // ── Requesty ───────────────────────────────────────────────────
+        "requesty" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for requesty"))?;
+            let cfg = RequestyConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| RequestyConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(RequestyHandler::new(cfg)
+                .context("Failed to create Requesty handler")?))
+        }
+
+        // ── Unbound ────────────────────────────────────────────────────
+        "unbound" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for unbound"))?;
+            let cfg = UnboundConfig {
+                api_key: api_key.to_string(),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(UnboundHandler::new(cfg)
+                .context("Failed to create Unbound handler")?))
+        }
+
+        // ── Vercel AI Gateway ──────────────────────────────────────────
+        "vercel" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for vercel"))?;
+            let cfg = VercelConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone(),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(VercelHandler::new(cfg)
+                .context("Failed to create Vercel handler")?))
+        }
+
+        // ── Roo Code Cloud ─────────────────────────────────────────────
+        "roo" => {
+            let cfg = RooConfig {
+                api_key: config.api_key.clone(),
+                base_url: config.base_url.clone()
+                    .or_else(|| Some(RooConfig::DEFAULT_BASE_URL.to_string())),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(RooHandler::new(cfg)
+                .context("Failed to create Roo handler")?))
+        }
+
+        // ── SambaNova ──────────────────────────────────────────────────
+        "sambanova" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for sambanova"))?;
+            let cfg = SambaNovaConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| SambaNovaConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(SambaNovaHandler::new(cfg)
+                .context("Failed to create SambaNova handler")?))
+        }
+
+        // ── Baseten ────────────────────────────────────────────────────
+        "baseten" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for baseten"))?;
+            let cfg = BasetenConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| BasetenConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(BasetenHandler::new(cfg)
+                .context("Failed to create Baseten handler")?))
+        }
+
+        // ── Moonshot ───────────────────────────────────────────────────
+        "moonshot" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for moonshot"))?;
+            let cfg = MoonshotConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| MoonshotConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(MoonshotHandler::new(cfg)
+                .context("Failed to create Moonshot handler")?))
+        }
+
+        // ── ZAI ────────────────────────────────────────────────────────
+        "zai" => {
+            let api_key = config.api_key.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--api-key is required for zai"))?;
+            let cfg = ZaiConfig {
+                api_key: api_key.to_string(),
+                base_url: config.base_url.clone()
+                    .unwrap_or_else(|| ZaiConfig::DEFAULT_BASE_URL.to_string()),
+                model_id: config.model.clone(),
+                temperature: config.temperature,
+                request_timeout: config.timeout,
+            };
+            Ok(Box::new(ZaiHandler::new(cfg)
+                .context("Failed to create ZAI handler")?))
+        }
+
         other => anyhow::bail!(
-            "Unsupported provider: '{other}'. Currently supported: anthropic"
+            "Unsupported provider: '{other}'. Supported providers: anthropic, vertex, aws/bedrock, \
+             openai, openai-native, openrouter, deepseek, google, xai, mistral, fireworks, \
+             ollama, lmstudio, litellm, qwen, minimax, poe, requesty, unbound, vercel, \
+             roo, sambanova, baseten, moonshot, zai"
         ),
     }
 }

@@ -35,6 +35,7 @@ pub mod file_content;
 pub mod format;
 pub mod parser;
 pub mod processor;
+pub mod providers;
 pub mod regex;
 pub mod types;
 

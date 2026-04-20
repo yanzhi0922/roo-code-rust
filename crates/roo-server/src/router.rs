@@ -119,7 +119,6 @@ pub fn is_supported_method(method: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::handler::Handler;
     use roo_app::{App, AppConfig};
     use roo_jsonrpc::types::Message;
@@ -131,8 +130,7 @@ mod tests {
             mode: "code".to_string(),
             ..Default::default()
         };
-        let app = Arc::new(App::new(config));
-        let handler = Handler::new(app);
+        let handler = Handler::new(App::new(config));
         Router::new(handler)
     }
 

@@ -180,6 +180,7 @@ impl Provider for OpenRouterHandler {
             model_info: self.base.model_info.clone(),
             provider_name_enum: ProviderName::OpenRouter,
             request_timeout: None,
+            reasoning_effort: None,
         };
 
         let inner = roo_provider::OpenAiCompatibleProvider::new(config)?;

@@ -32,6 +32,22 @@ pub struct App {
 
     /// Shared application state.
     state: SharedState,
+
+    // ── Subsystems ──────────────────────────────────────────────────────
+    /// MCP hub for managing MCP server connections.
+    mcp_hub: Option<Arc<roo_mcp::McpHub>>,
+
+    /// Terminal registry for managing terminal processes.
+    terminal_registry: Option<Arc<roo_terminal::TerminalRegistry>>,
+
+    /// RooIgnore controller for file access control.
+    roo_ignore: Option<Arc<roo_ignore::RooIgnoreController>>,
+
+    /// Skills manager for discovering and managing skills.
+    skills_manager: Option<Arc<roo_skills::SkillsManager>>,
+
+    /// Todo list storage (in-memory, keyed by task ID).
+    todos: Arc<RwLock<std::collections::HashMap<String, serde_json::Value>>>,
 }
 
 impl App {
@@ -40,7 +56,15 @@ impl App {
     /// Source: `src/core/ClineProvider.ts` — constructor
     pub fn new(config: AppConfig) -> Self {
         let state = Arc::new(RwLock::new(AppState::new()));
-        Self { config, state }
+        Self {
+            config,
+            state,
+            mcp_hub: None,
+            terminal_registry: None,
+            roo_ignore: None,
+            skills_manager: None,
+            todos: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        }
     }
 
     /// Initialize the application.
@@ -49,16 +73,49 @@ impl App {
     /// the application for use.
     ///
     /// Source: `src/core/ClineProvider.ts` — initialization logic
-    pub async fn initialize(&self) -> AppResult<()> {
+    pub async fn initialize(&mut self) -> AppResult<()> {
         let mut state = self.state.write().await;
 
-        // Initialize the roo-ignore controller for the cwd
-        // In a real VS Code extension, this would set up file watchers
         tracing::info!(
             "Initializing Roo Code App in workspace: {}",
             self.config.cwd
         );
 
+        // ── Initialize RooIgnore controller ─────────────────────────────
+        let mut roo_ignore = roo_ignore::RooIgnoreController::new(&self.config.cwd);
+        let rooignore_path = std::path::Path::new(&self.config.cwd).join(".rooignore");
+        if rooignore_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&rooignore_path) {
+                roo_ignore.load_patterns(&content);
+                tracing::info!("Loaded .rooignore patterns from {}", rooignore_path.display());
+            }
+        }
+        self.roo_ignore = Some(Arc::new(roo_ignore));
+
+        // ── Initialize Terminal Registry ────────────────────────────────
+        self.terminal_registry = Some(Arc::new(roo_terminal::TerminalRegistry::new()));
+        tracing::debug!("Terminal registry initialized");
+
+        // ── Initialize MCP Hub ──────────────────────────────────────────
+        self.mcp_hub = Some(Arc::new(roo_mcp::McpHub::new()));
+        tracing::debug!("MCP hub initialized");
+
+        // ── Initialize Skills Manager ───────────────────────────────────
+        let mut skills = roo_skills::SkillsManager::new();
+        // Discover skills from project directory
+        let project_skills_dir = std::path::Path::new(&self.config.cwd).join(".roo");
+        let skills_dirs: Vec<(std::path::PathBuf, roo_skills::SkillSource, Option<String>)> = if project_skills_dir.exists() {
+            vec![(project_skills_dir, roo_skills::SkillSource::Project, None)]
+        } else {
+            vec![]
+        };
+        if let Err(e) = skills.discover_skills(&skills_dirs).await {
+            tracing::warn!("Failed to discover skills: {}", e);
+        }
+        self.skills_manager = Some(Arc::new(skills));
+        tracing::debug!("Skills manager initialized");
+
+        // ── Update state ────────────────────────────────────────────────
         state.current_mode = self.config.mode.clone();
         state.initialized = true;
 
@@ -103,6 +160,33 @@ impl App {
         self.state.read().await.disposed
     }
 
+    // ── Subsystem getters ────────────────────────────────────────────────
+
+    /// Get a reference to the MCP hub, if initialized.
+    pub fn mcp_hub(&self) -> Option<&Arc<roo_mcp::McpHub>> {
+        self.mcp_hub.as_ref()
+    }
+
+    /// Get a reference to the terminal registry, if initialized.
+    pub fn terminal_registry(&self) -> Option<&Arc<roo_terminal::TerminalRegistry>> {
+        self.terminal_registry.as_ref()
+    }
+
+    /// Get a reference to the roo-ignore controller, if initialized.
+    pub fn roo_ignore(&self) -> Option<&Arc<roo_ignore::RooIgnoreController>> {
+        self.roo_ignore.as_ref()
+    }
+
+    /// Get a reference to the skills manager, if initialized.
+    pub fn skills_manager(&self) -> Option<&Arc<roo_skills::SkillsManager>> {
+        self.skills_manager.as_ref()
+    }
+
+    /// Get the todo list storage.
+    pub fn todos(&self) -> &Arc<RwLock<std::collections::HashMap<String, serde_json::Value>>> {
+        &self.todos
+    }
+
     /// Dispose of the application and clean up resources.
     ///
     /// Source: `src/core/ClineProvider.ts` — dispose logic
@@ -110,6 +194,12 @@ impl App {
         let mut state = self.state.write().await;
         state.disposed = true;
         state.task_running = false;
+
+        // Clean up MCP hub
+        if let Some(hub) = &self.mcp_hub {
+            let _ = hub.dispose().await;
+        }
+
         tracing::info!("App disposed");
         Ok(())
     }
@@ -127,16 +217,16 @@ impl App {
         roo_prompt::build_system_prompt(
             &self.config.cwd,
             &self.config.mode,
-            None,   // custom_modes
-            None,   // custom_mode_prompts
-            false,  // has_mcp
-            None,   // global_custom_instructions
+            None,                      // custom_modes
+            None,                      // custom_mode_prompts
+            self.mcp_hub.is_some(),    // has_mcp
+            None,                      // global_custom_instructions
             self.config.language.as_deref(),
-            None,   // roo_ignore_instructions
+            None,                      // roo_ignore_instructions
             Some(&settings),
-            &[],    // skills
+            &[],                       // skills
             &format!("{} {}", std::env::consts::OS, env!("CARGO_PKG_VERSION")),
-            "bash", // shell
+            "bash",                    // shell
             &std::env::var("HOME")
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_else(|_| "~".to_string()),
@@ -171,12 +261,16 @@ mod tests {
             mode: "code".to_string(),
             ..Default::default()
         };
-        let app = App::new(config);
+        let mut app = App::new(config);
         app.initialize().await.unwrap();
 
         let state = app.state().await;
         assert!(state.initialized);
         assert_eq!(state.current_mode, "code");
+        assert!(app.mcp_hub().is_some());
+        assert!(app.terminal_registry().is_some());
+        assert!(app.roo_ignore().is_some());
+        assert!(app.skills_manager().is_some());
     }
 
     #[tokio::test]
@@ -186,7 +280,7 @@ mod tests {
             mode: "code".to_string(),
             ..Default::default()
         };
-        let app = App::new(config);
+        let mut app = App::new(config);
         app.initialize().await.unwrap();
 
         app.set_mode("architect").await;
@@ -196,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispose() {
         let config = AppConfig::default();
-        let app = App::new(config);
+        let mut app = App::new(config);
         app.initialize().await.unwrap();
 
         app.dispose().await.unwrap();

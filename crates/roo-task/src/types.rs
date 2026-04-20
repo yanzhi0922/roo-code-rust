@@ -164,6 +164,11 @@ pub struct TaskConfig {
     ///
     /// Source: `src/core/task/Task.ts` — `historyItem` option
     pub history_item_id: Option<String>,
+    /// Base storage path for task persistence.
+    ///
+    /// When set, the engine will persist messages and metadata to disk.
+    /// When `None`, persistence methods are no-ops.
+    pub storage_path: Option<String>,
 }
 
 impl TaskConfig {
@@ -186,6 +191,7 @@ impl TaskConfig {
             task_text: None,
             images: Vec::new(),
             history_item_id: None,
+            storage_path: None,
         }
     }
 
@@ -270,6 +276,12 @@ impl TaskConfig {
     /// Set the history item ID to resume from.
     pub fn with_history_item_id(mut self, id: impl Into<String>) -> Self {
         self.history_item_id = Some(id.into());
+        self
+    }
+
+    /// Set the base storage path for task persistence.
+    pub fn with_storage_path(mut self, path: impl Into<String>) -> Self {
+        self.storage_path = Some(path.into());
         self
     }
 }

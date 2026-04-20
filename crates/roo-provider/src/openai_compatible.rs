@@ -153,6 +153,10 @@ pub struct OpenAiCompatibleConfig {
     pub model_info: ModelInfo,
     pub provider_name_enum: ProviderName,
     pub request_timeout: Option<u64>,
+    /// Optional reasoning effort level (e.g. "low", "medium", "high").
+    ///
+    /// Source: `src/api/providers/openai.ts` — `reasoning_effort` in request body
+    pub reasoning_effort: Option<String>,
 }
 
 /// Base class for OpenAI-compatible API providers.
@@ -165,6 +169,7 @@ pub struct OpenAiCompatibleProvider {
     base_url: String,
     provider_name_str: String,
     default_temperature: f64,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -193,6 +198,7 @@ impl OpenAiCompatibleProvider {
             base_url: config.base_url,
             provider_name_str: config.provider_name,
             default_temperature: config.default_temperature,
+            reasoning_effort: config.reasoning_effort,
         })
     }
 
@@ -236,6 +242,12 @@ impl OpenAiCompatibleProvider {
 
         if let Some(ref tool_choice) = metadata.tool_choice {
             body["tool_choice"] = tool_choice.clone();
+        }
+
+        // Add reasoning_effort if configured.
+        // Source: `src/api/providers/openai.ts` — `reasoning_effort` in request body
+        if let Some(ref effort) = self.reasoning_effort {
+            body["reasoning_effort"] = serde_json::json!(effort);
         }
 
         Ok(body)

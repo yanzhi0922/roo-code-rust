@@ -50,6 +50,7 @@ impl OpenAiHandler {
             model_info,
             provider_name_enum: ProviderName::Openai,
             request_timeout: config.request_timeout,
+            reasoning_effort: config.reasoning_effort.clone(),
         };
 
         let inner = roo_provider::OpenAiCompatibleProvider::new(compatible_config)?;

@@ -7,6 +7,7 @@
 //! Source: `src/core/task/Task.ts` 鈥?Task class
 
 use crate::config::validate_config;
+use roo_task_persistence::TaskFileSystem;
 use crate::events::TaskEventEmitter;
 use crate::loop_control::LoopControl;
 use crate::state::StateMachine;
@@ -485,20 +486,36 @@ impl TaskEngine {
     }
 
     // -------------------------------------------------------------------
-    // Persistence stubs
+    // Persistence
     // -------------------------------------------------------------------
     // Source: TS `Task.ts` — `saveClineMessages()`, `saveApiConversationHistory()`,
     // `getSavedApiConversationHistory()`, etc.
-    //
-    // TODO: Wire up actual persistence when the storage layer is available.
-    // These stubs provide the interface that the agent loop expects.
 
     /// Save cline messages (UI-facing messages) to persistent storage.
     ///
     /// Source: TS `Task.ts` — `saveClineMessages()`
     pub async fn save_cline_messages(&self) -> Result<(), TaskError> {
-        // TODO: Implement persistence via roo-task-persistence
-        tracing::debug!(count = self.cline_messages.len(), "save_cline_messages (stub)");
+        let storage_path = match &self.config.storage_path {
+            Some(p) => p,
+            None => {
+                tracing::debug!("save_cline_messages: no storage_path configured, skipping");
+                return Ok(());
+            }
+        };
+
+        let base = std::path::Path::new(storage_path);
+        let path = roo_task_persistence::messages_path(base, &self.config.task_id);
+        let fs = roo_task_persistence::OsFileSystem;
+
+        tracing::debug!(
+            count = self.cline_messages.len(),
+            path = %path.display(),
+            "save_cline_messages"
+        );
+
+        roo_task_persistence::save_task_messages(&fs, &path, &self.cline_messages)
+            .map_err(|e| TaskError::General(format!("Failed to save cline messages: {}", e)))?;
+
         Ok(())
     }
 
@@ -506,8 +523,27 @@ impl TaskEngine {
     ///
     /// Source: TS `Task.ts` — `saveApiConversationHistory()`
     pub async fn save_api_conversation_history(&self) -> Result<(), TaskError> {
-        // TODO: Implement persistence via roo-task-persistence
-        tracing::debug!(count = self.api_conversation_history.len(), "save_api_conversation_history (stub)");
+        let storage_path = match &self.config.storage_path {
+            Some(p) => p,
+            None => {
+                tracing::debug!("save_api_conversation_history: no storage_path configured, skipping");
+                return Ok(());
+            }
+        };
+
+        let base = std::path::Path::new(storage_path);
+        let path = roo_task_persistence::api_messages_path(base, &self.config.task_id);
+        let fs = roo_task_persistence::OsFileSystem;
+
+        tracing::debug!(
+            count = self.api_conversation_history.len(),
+            path = %path.display(),
+            "save_api_conversation_history"
+        );
+
+        roo_task_persistence::save_api_messages(&fs, &path, &self.api_conversation_history)
+            .map_err(|e| TaskError::General(format!("Failed to save API conversation history: {}", e)))?;
+
         Ok(())
     }
 
@@ -515,8 +551,26 @@ impl TaskEngine {
     ///
     /// Source: TS `Task.ts` — `getSavedApiConversationHistory()`
     pub async fn load_api_conversation_history(&mut self) -> Result<(), TaskError> {
-        // TODO: Implement loading from roo-task-persistence
-        // For now, history stays in memory
+        let storage_path = match &self.config.storage_path {
+            Some(p) => p,
+            None => {
+                tracing::debug!("load_api_conversation_history: no storage_path configured, skipping");
+                return Ok(());
+            }
+        };
+
+        let base = std::path::Path::new(storage_path);
+        let path = roo_task_persistence::api_messages_path(base, &self.config.task_id);
+        let fs = roo_task_persistence::OsFileSystem;
+
+        tracing::debug!(path = %path.display(), "load_api_conversation_history");
+
+        let messages = roo_task_persistence::read_api_messages(&fs, &path)
+            .map_err(|e| TaskError::General(format!("Failed to load API conversation history: {}", e)))?;
+
+        tracing::debug!(count = messages.len(), "load_api_conversation_history: loaded");
+        self.api_conversation_history = messages;
+
         Ok(())
     }
 
@@ -524,8 +578,67 @@ impl TaskEngine {
     ///
     /// Source: TS `Task.ts` — `saveTask()`
     pub async fn save_task(&self) -> Result<(), TaskError> {
-        // TODO: Implement task metadata persistence
+        let storage_path = match &self.config.storage_path {
+            Some(p) => p,
+            None => {
+                tracing::debug!("save_task: no storage_path configured, skipping");
+                return Ok(());
+            }
+        };
+
+        let base = std::path::Path::new(storage_path);
+        let fs = roo_task_persistence::OsFileSystem;
+
+        // Ensure the task directory exists
+        roo_task_persistence::ensure_task_dir(&fs, base, &self.config.task_id)
+            .map_err(|e| TaskError::General(format!("Failed to create task directory: {}", e)))?;
+
+        // Compute and save metadata
+        let opts = roo_task_persistence::TaskMetadataOptions {
+            task_id: self.config.task_id.clone(),
+            root_task_id: self.config.root_task_id.clone(),
+            parent_task_id: self.config.parent_task_id.clone(),
+            task_number: self.config.task_number,
+            global_storage_path: base.to_path_buf(),
+            messages: self.cline_messages.clone(),
+            workspace: if self.config.workspace.is_empty() {
+                self.config.cwd.clone()
+            } else {
+                self.config.workspace.clone()
+            },
+            mode: Some(self.config.mode.clone()),
+            api_config_name: self.config.api_config_name.clone(),
+            initial_status: task_state_to_persistence_status(self.state_machine.current()),
+        };
+
+        let metadata = roo_task_persistence::compute_task_metadata(&fs, &opts)
+            .map_err(|e| TaskError::General(format!("Failed to compute task metadata: {}", e)))?;
+
+        let meta_path = roo_task_persistence::metadata_path(base, &self.config.task_id);
+        let content = serde_json::to_string_pretty(&metadata)
+            .map_err(|e| TaskError::General(format!("Failed to serialize task metadata: {}", e)))?;
+
+        fs.write_file(&meta_path, &content)
+            .map_err(|e| TaskError::General(format!("Failed to write task metadata: {}", e)))?;
+
+        tracing::debug!(task_id = %self.config.task_id, "save_task: metadata saved");
+
         Ok(())
+    }
+}
+
+/// Convert a [`TaskState`] (engine-level) to a [`PersistenceTaskStatus`].
+///
+/// This bridges the gap between the task engine's state enum and the
+/// persistence layer's status enum.
+fn task_state_to_persistence_status(state: TaskState) -> roo_task_persistence::PersistenceTaskStatus {
+    match state {
+        TaskState::Idle | TaskState::Running | TaskState::Paused => {
+            roo_task_persistence::PersistenceTaskStatus::Active
+        }
+        TaskState::Completed => roo_task_persistence::PersistenceTaskStatus::Completed,
+        TaskState::Aborted => roo_task_persistence::PersistenceTaskStatus::Aborted,
+        TaskState::Delegated => roo_task_persistence::PersistenceTaskStatus::Delegated,
     }
 }
 
@@ -957,5 +1070,157 @@ mod tests {
         engine.resume_after_delegation().unwrap();
         assert!(!engine.is_paused());
         assert_eq!(engine.state(), TaskState::Running);
+    }
+
+    // --- Persistence tests ---
+
+    #[tokio::test]
+    async fn test_persistence_noop_without_storage_path() {
+        let mut engine = make_engine();
+        // No storage_path configured — all persistence methods should be no-ops
+        assert!(engine.save_cline_messages().await.is_ok());
+        assert!(engine.save_api_conversation_history().await.is_ok());
+        assert!(engine.load_api_conversation_history().await.is_ok());
+        assert!(engine.save_task().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_api_conversation_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().to_string_lossy().to_string();
+
+        let mut engine = TaskEngine::new(
+            TaskConfig::new("persist-test", "/tmp/work")
+                .with_mode("code")
+                .with_max_iterations(100)
+                .with_storage_path(&storage_path),
+        )
+        .unwrap();
+
+        // Add some API messages
+        engine.add_api_message(roo_types::api::ApiMessage {
+            role: roo_types::api::MessageRole::User,
+            content: vec![roo_types::api::ContentBlock::Text {
+                text: "Hello".to_string(),
+            }],
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        });
+
+        // Save
+        engine.save_api_conversation_history().await.unwrap();
+
+        // Create a new engine and load
+        let mut engine2 = TaskEngine::new(
+            TaskConfig::new("persist-test", "/tmp/work")
+                .with_mode("code")
+                .with_max_iterations(100)
+                .with_storage_path(&storage_path),
+        )
+        .unwrap();
+
+        engine2.load_api_conversation_history().await.unwrap();
+        assert_eq!(engine2.api_conversation_history().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_save_cline_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().to_string_lossy().to_string();
+
+        let mut engine = TaskEngine::new(
+            TaskConfig::new("cline-test", "/tmp/work")
+                .with_mode("code")
+                .with_max_iterations(100)
+                .with_storage_path(&storage_path),
+        )
+        .unwrap();
+
+        engine.add_cline_message(roo_types::message::ClineMessage {
+            ts: 1000.0,
+            r#type: roo_types::message::MessageType::Say,
+            ask: None,
+            say: None,
+            text: Some("test message".to_string()),
+            images: None,
+            partial: None,
+            reasoning: None,
+            conversation_history_index: None,
+            checkpoint: None,
+            progress_status: None,
+            context_condense: None,
+            context_truncation: None,
+            is_protected: None,
+            api_protocol: None,
+            is_answered: None,
+        });
+
+        engine.save_cline_messages().await.unwrap();
+
+        // Verify file was created
+        let base = std::path::Path::new(&storage_path);
+        let path = roo_task_persistence::messages_path(base, "cline-test");
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_task_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().to_string_lossy().to_string();
+
+        let mut engine = TaskEngine::new(
+            TaskConfig::new("meta-test", "/tmp/work")
+                .with_mode("code")
+                .with_max_iterations(100)
+                .with_storage_path(&storage_path),
+        )
+        .unwrap();
+
+        engine.start().unwrap();
+        engine.save_task().await.unwrap();
+
+        // Verify metadata file was created
+        let base = std::path::Path::new(&storage_path);
+        let path = roo_task_persistence::metadata_path(base, "meta-test");
+        assert!(path.exists());
+
+        // Verify it's valid JSON
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["taskId"], "meta-test");
+    }
+
+    #[test]
+    fn test_task_state_to_persistence_status() {
+        assert_eq!(
+            task_state_to_persistence_status(TaskState::Idle),
+            roo_task_persistence::PersistenceTaskStatus::Active
+        );
+        assert_eq!(
+            task_state_to_persistence_status(TaskState::Running),
+            roo_task_persistence::PersistenceTaskStatus::Active
+        );
+        assert_eq!(
+            task_state_to_persistence_status(TaskState::Paused),
+            roo_task_persistence::PersistenceTaskStatus::Active
+        );
+        assert_eq!(
+            task_state_to_persistence_status(TaskState::Completed),
+            roo_task_persistence::PersistenceTaskStatus::Completed
+        );
+        assert_eq!(
+            task_state_to_persistence_status(TaskState::Aborted),
+            roo_task_persistence::PersistenceTaskStatus::Aborted
+        );
+        assert_eq!(
+            task_state_to_persistence_status(TaskState::Delegated),
+            roo_task_persistence::PersistenceTaskStatus::Delegated
+        );
     }
 }
