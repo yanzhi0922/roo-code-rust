@@ -82,9 +82,14 @@ impl McpServerState {
 
     /// Append an error message, truncating to max length and adding to history.
     ///
-    /// Corresponds to TS: `McpHub.appendErrorMessage`.
+    /// Corresponds to TS: `McpHub.appendErrorMessage(connection, error, level)`.
     /// Adds "...(error message truncated)" suffix when truncated.
-    pub fn append_error(&mut self, error_msg: &str) {
+    /// Supports error levels: "error", "warn", "info" (matching TS).
+    pub fn append_error(
+        &mut self,
+        error_msg: &str,
+        level: crate::hub::ErrorLevel,
+    ) {
         let truncated = if error_msg.len() > Self::MAX_ERROR_LENGTH {
             format!(
                 "{}...(error message truncated)",
@@ -106,6 +111,19 @@ impl McpServerState {
         if self.error_history.len() > Self::MAX_ERROR_HISTORY {
             let drain_count = self.error_history.len() - Self::MAX_ERROR_HISTORY;
             self.error_history.drain(..drain_count);
+        }
+
+        // Log based on level
+        match level {
+            crate::hub::ErrorLevel::Error => {
+                tracing::error!("[{}] {}", self.name, self.error);
+            }
+            crate::hub::ErrorLevel::Warn => {
+                tracing::warn!("[{}] {}", self.name, self.error);
+            }
+            crate::hub::ErrorLevel::Info => {
+                tracing::info!("[{}] {}", self.name, self.error);
+            }
         }
     }
 }

@@ -74,6 +74,12 @@ pub struct DefaultTerminal {
     busy: bool,
     /// Whether the terminal has been closed.
     closed: bool,
+    /// Optional task ID this terminal is associated with.
+    /// Corresponds to TS: `taskId?: string`
+    task_id: Option<String>,
+    /// Unretrieved output buffer.
+    /// Corresponds to TS: `unretrievedOutput`
+    unretrieved_output: String,
 }
 
 impl DefaultTerminal {
@@ -84,7 +90,47 @@ impl DefaultTerminal {
             cwd: cwd.into(),
             busy: false,
             closed: false,
+            task_id: None,
+            unretrieved_output: String::new(),
         }
+    }
+
+    /// Get the terminal's unique ID.
+    pub fn get_id(&self) -> TerminalId {
+        self.id
+    }
+
+    /// Get the working directory.
+    pub fn get_cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// Get the task ID associated with this terminal, if any.
+    /// Corresponds to TS: `terminal.taskId`
+    pub fn task_id(&self) -> Option<&str> {
+        self.task_id.as_deref()
+    }
+
+    /// Set the task ID for this terminal.
+    pub fn set_task_id(&mut self, task_id: String) {
+        if task_id.is_empty() {
+            self.task_id = None;
+        } else {
+            self.task_id = Some(task_id);
+        }
+    }
+
+    /// Get unretrieved output from this terminal.
+    /// Corresponds to TS: `getUnretrievedOutput()`
+    pub fn get_unretrieved_output(&mut self) -> String {
+        let output = self.unretrieved_output.clone();
+        self.unretrieved_output.clear();
+        output
+    }
+
+    /// Append to unretrieved output buffer.
+    pub fn append_unretrieved_output(&mut self, text: &str) {
+        self.unretrieved_output.push_str(text);
     }
 
     /// Build the shell command for the current platform using tokio.

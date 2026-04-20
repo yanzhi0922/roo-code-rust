@@ -114,6 +114,126 @@ impl TerminalRegistry {
         arc
     }
 
+    /// Get or create a terminal by working directory path.
+    ///
+    /// Corresponds to TS: `getOrCreateTerminal(cwd, taskId, provider)`.
+    /// First looks for an existing non-busy terminal with matching cwd,
+    /// then creates a new one if none is found.
+    pub async fn get_or_create_terminal_by_cwd(
+        &self,
+        cwd: impl Into<PathBuf>,
+        task_id: Option<String>,
+    ) -> Arc<Mutex<DefaultTerminal>> {
+        let cwd = cwd.into();
+        let mut terminals = self.terminals.lock().await;
+
+        // First priority: Find a terminal with matching task_id and cwd
+        if let Some(ref tid) = task_id {
+            for (_, terminal_arc) in terminals.iter() {
+                let terminal = terminal_arc.lock().await;
+                if !terminal.is_busy() && !terminal.is_closed() && terminal.get_cwd() == cwd {
+                    if let Some(ref terminal_task_id) = terminal.task_id() {
+                        if terminal_task_id == tid {
+                            drop(terminal);
+                            return Arc::clone(terminal_arc);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Second priority: Find any available terminal with matching cwd
+        for (_, terminal_arc) in terminals.iter() {
+            let terminal = terminal_arc.lock().await;
+            if !terminal.is_busy() && !terminal.is_closed() && terminal.get_cwd() == cwd {
+                drop(terminal);
+                return Arc::clone(terminal_arc);
+            }
+        }
+
+        // No suitable terminal found, create a new one
+        let id = self.allocate_id().await;
+        let mut terminal = DefaultTerminal::new(id, cwd);
+        if let Some(tid) = task_id {
+            terminal.set_task_id(tid);
+        }
+        let arc = Arc::new(Mutex::new(terminal));
+        terminals.insert(id, Arc::clone(&arc));
+        arc
+    }
+
+    /// Get terminals filtered by busy state and optionally by task ID.
+    ///
+    /// Corresponds to TS: `getTerminals(busy, taskId?)`.
+    pub async fn get_terminals(
+        &self,
+        busy: bool,
+        task_id: Option<&str>,
+    ) -> Vec<Arc<Mutex<DefaultTerminal>>> {
+        let terminals = self.terminals.lock().await;
+        let mut result = Vec::new();
+        for (_, terminal_arc) in terminals.iter() {
+            let terminal = terminal_arc.lock().await;
+            if terminal.is_busy() != busy || terminal.is_closed() {
+                continue;
+            }
+            if let Some(tid) = task_id {
+                if let Some(ref terminal_tid) = terminal.task_id() {
+                    if *terminal_tid != tid {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+            drop(terminal);
+            result.push(Arc::clone(terminal_arc));
+        }
+        result
+    }
+
+    /// Get background terminals (no task_id) that have unretrieved output
+    /// or are still running.
+    ///
+    /// Corresponds to TS: `getBackgroundTerminals(busy?)`.
+    pub async fn get_background_terminals(
+        &self,
+        busy: Option<bool>,
+    ) -> Vec<Arc<Mutex<DefaultTerminal>>> {
+        let terminals = self.terminals.lock().await;
+        let mut result = Vec::new();
+        for (_, terminal_arc) in terminals.iter() {
+            let terminal = terminal_arc.lock().await;
+            // Only background terminals (no task_id)
+            if terminal.task_id().is_some() || terminal.is_closed() {
+                continue;
+            }
+            if let Some(b) = busy {
+                if terminal.is_busy() != b {
+                    continue;
+                }
+            }
+            drop(terminal);
+            result.push(Arc::clone(terminal_arc));
+        }
+        result
+    }
+
+    /// Release all terminals associated with a task.
+    ///
+    /// Corresponds to TS: `releaseTerminalsForTask(taskId)`.
+    pub async fn release_terminals_for_task(&self, task_id: &str) {
+        let terminals = self.terminals.lock().await;
+        for (_, terminal_arc) in terminals.iter() {
+            let mut terminal = terminal_arc.lock().await;
+            if let Some(ref tid) = terminal.task_id() {
+                if *tid == task_id {
+                    terminal.set_task_id(String::new());
+                }
+            }
+        }
+    }
+
     /// Get the number of registered terminals.
     pub async fn len(&self) -> usize {
         self.terminals.lock().await.len()
