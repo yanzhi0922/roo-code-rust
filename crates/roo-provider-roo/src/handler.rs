@@ -363,12 +363,17 @@ mod tests {
     #[test]
     fn test_models_count() {
         let all_models = models::models();
-        assert_eq!(all_models.len(), 4);
+        assert_eq!(all_models.len(), 5);
     }
 
     #[test]
     fn test_all_models_support_images() {
+        // xai/grok-code-fast-1 does NOT support images
+        let non_image_models = ["xai/grok-code-fast-1"];
         for (id, info) in models::models() {
+            if non_image_models.contains(&id.as_str()) {
+                continue; // skip models that don't support images
+            }
             assert!(
                 info.supports_images.unwrap_or(false),
                 "Roo model '{}' should support images",

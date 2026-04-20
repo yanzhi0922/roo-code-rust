@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use roo_types::model::ModelInfo;
 
 /// Default Roo model ID.
-pub const DEFAULT_MODEL_ID: &str = "roo-claude-3.5-sonnet";
+pub const DEFAULT_MODEL_ID: &str = "xai/grok-code-fast-1";
 
 /// Returns the supported Roo Code Cloud models.
 ///
@@ -12,6 +12,20 @@ pub const DEFAULT_MODEL_ID: &str = "roo-claude-3.5-sonnet";
 /// These are the known model configurations.
 pub fn models() -> HashMap<String, ModelInfo> {
     let mut m = HashMap::new();
+
+    m.insert(
+        "xai/grok-code-fast-1".to_string(),
+        ModelInfo {
+            max_tokens: Some(16384),
+            context_window: 131072,
+            supports_images: Some(false),
+            supports_prompt_cache: false,
+            input_price: Some(0.50),
+            output_price: Some(2.0),
+            description: Some("Grok Code Fast via Roo Code Cloud".to_string()),
+            ..Default::default()
+        },
+    );
 
     m.insert(
         "roo-claude-3.5-sonnet".to_string(),

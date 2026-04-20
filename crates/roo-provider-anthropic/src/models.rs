@@ -1,7 +1,7 @@
 //! Anthropic model definitions.
 
 use std::collections::HashMap;
-use roo_types::model::ModelInfo;
+use roo_types::model::{ModelInfo, ModelTier};
 
 /// Default Anthropic model ID.
 pub const DEFAULT_MODEL_ID: &str = "claude-sonnet-4-5";
@@ -23,6 +23,14 @@ pub fn models() -> HashMap<String, ModelInfo> {
             cache_reads_price: Some(0.3),
             supports_reasoning_budget: Some(true),
             description: Some("Anthropic Claude Sonnet 4.6".to_string()),
+            tiers: Some(vec![ModelTier {
+                name: None,
+                context_window: 1_000_000,
+                input_price: Some(6.0),
+                output_price: Some(22.5),
+                cache_writes_price: Some(7.5),
+                cache_reads_price: Some(0.6),
+            }]),
             ..Default::default()
         },
     );
@@ -40,6 +48,14 @@ pub fn models() -> HashMap<String, ModelInfo> {
             cache_reads_price: Some(0.3),
             supports_reasoning_budget: Some(true),
             description: Some("Anthropic Claude Sonnet 4.5".to_string()),
+            tiers: Some(vec![ModelTier {
+                name: None,
+                context_window: 1_000_000,
+                input_price: Some(6.0),
+                output_price: Some(22.5),
+                cache_writes_price: Some(7.5),
+                cache_reads_price: Some(0.6),
+            }]),
             ..Default::default()
         },
     );
@@ -57,6 +73,14 @@ pub fn models() -> HashMap<String, ModelInfo> {
             cache_reads_price: Some(0.3),
             supports_reasoning_budget: Some(true),
             description: Some("Anthropic Claude Sonnet 4".to_string()),
+            tiers: Some(vec![ModelTier {
+                name: None,
+                context_window: 1_000_000,
+                input_price: Some(6.0),
+                output_price: Some(22.5),
+                cache_writes_price: Some(7.5),
+                cache_reads_price: Some(0.6),
+            }]),
             ..Default::default()
         },
     );
@@ -74,6 +98,14 @@ pub fn models() -> HashMap<String, ModelInfo> {
             cache_reads_price: Some(0.5),
             supports_reasoning_budget: Some(true),
             description: Some("Anthropic Claude Opus 4.6".to_string()),
+            tiers: Some(vec![ModelTier {
+                name: None,
+                context_window: 1_000_000,
+                input_price: Some(10.0),
+                output_price: Some(37.5),
+                cache_writes_price: Some(12.5),
+                cache_reads_price: Some(1.0),
+            }]),
             ..Default::default()
         },
     );
@@ -184,7 +216,7 @@ pub fn models() -> HashMap<String, ModelInfo> {
         ModelInfo {
             max_tokens: Some(8192),
             context_window: 200_000,
-            supports_images: Some(true),
+            supports_images: Some(false),
             supports_prompt_cache: true,
             input_price: Some(1.0),
             output_price: Some(5.0),

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use roo_types::model::ModelInfo;
 
 /// Default Ollama model ID.
-pub const DEFAULT_MODEL_ID: &str = "llama3.2";
+pub const DEFAULT_MODEL_ID: &str = "devstral:24b";
 
 /// Returns commonly used Ollama models.
 pub fn models() -> HashMap<String, ModelInfo> {
@@ -59,6 +59,17 @@ pub fn models() -> HashMap<String, ModelInfo> {
             max_tokens: Some(8192),
             context_window: 131072,
             description: Some("DeepSeek Coder V2 via Ollama".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "devstral:24b".to_string(),
+        ModelInfo {
+            max_tokens: Some(8192),
+            context_window: 131072,
+            supports_images: Some(false),
+            description: Some("Devstral 24B via Ollama".to_string()),
             ..Default::default()
         },
     );

@@ -7,11 +7,28 @@ use std::collections::HashMap;
 use roo_types::model::ModelInfo;
 
 /// Default OpenRouter model ID.
-pub const DEFAULT_MODEL_ID: &str = "anthropic/claude-sonnet-4";
+pub const DEFAULT_MODEL_ID: &str = "anthropic/claude-sonnet-4.5";
 
 /// Returns commonly used OpenRouter models with their pricing.
 pub fn models() -> HashMap<String, ModelInfo> {
     let mut m = HashMap::new();
+
+    m.insert(
+        "anthropic/claude-sonnet-4.5".to_string(),
+        ModelInfo {
+            max_tokens: Some(64000),
+            context_window: 200000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(3.0),
+            output_price: Some(15.0),
+            cache_writes_price: Some(3.75),
+            cache_reads_price: Some(0.3),
+            supports_reasoning_budget: Some(true),
+            description: Some("Anthropic Claude Sonnet 4.5 via OpenRouter".to_string()),
+            ..Default::default()
+        },
+    );
 
     m.insert(
         "anthropic/claude-sonnet-4".to_string(),

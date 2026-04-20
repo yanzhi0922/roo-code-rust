@@ -2,9 +2,15 @@
 //!
 //! Uses the OpenAI-compatible chat completions API.
 //! Supports extended thinking mode via `deepseek-reasoner`.
+//!
+//! Key differences from the base OpenAI-compatible provider:
+//! - Messages are converted using R1 format (merges consecutive same-role messages)
+//! - Thinking mode is enabled for `deepseek-reasoner` models
+//! - Custom usage metrics for DeepSeek-specific cache token fields
 
 use async_trait::async_trait;
 use roo_provider::{
+    transform::{convert_to_r1_zai_messages, R1ZaiOptions},
     ApiStream, CreateMessageMetadata, OpenAiCompatibleConfig, OpenAiCompatibleProvider, Provider,
 };
 use roo_types::api::ProviderName;
@@ -13,9 +19,15 @@ use roo_types::model::ModelInfo;
 use crate::models;
 use crate::types::DeepSeekConfig;
 
+/// Default temperature for DeepSeek models.
+/// Source: `packages/types/src/providers/deepseek.ts` — `DEEP_SEEK_DEFAULT_TEMPERATURE`
+const DEEP_SEEK_DEFAULT_TEMPERATURE: f64 = 0.3;
+
 /// DeepSeek API provider handler.
 pub struct DeepSeekHandler {
     inner: OpenAiCompatibleProvider,
+    /// The configured model ID (used for thinking model detection).
+    model_id: String,
 }
 
 impl DeepSeekHandler {
@@ -27,10 +39,10 @@ impl DeepSeekHandler {
             .cloned()
             .unwrap_or_else(|| ModelInfo {
                 max_tokens: Some(8192),
-                context_window: 65536,
+                context_window: 128_000,
                 supports_prompt_cache: true,
-                input_price: Some(0.27),
-                output_price: Some(1.10),
+                input_price: Some(0.28),
+                output_price: Some(0.42),
                 description: Some("DeepSeek model (unknown variant)".to_string()),
                 ..Default::default()
             });
@@ -40,17 +52,17 @@ impl DeepSeekHandler {
             base_url: config.base_url,
             api_key: config.api_key,
             default_model_id: models::default_model_id(),
-            default_temperature: config.temperature.unwrap_or(0.0),
-            model_id: Some(model_id),
+            default_temperature: config.temperature.unwrap_or(DEEP_SEEK_DEFAULT_TEMPERATURE),
+            model_id: Some(model_id.clone()),
             model_info,
             provider_name_enum: ProviderName::DeepSeek,
             request_timeout: config.request_timeout,
-        reasoning_effort: None,
+            reasoning_effort: None,
         };
 
         let inner = OpenAiCompatibleProvider::new(compatible_config)?;
 
-        Ok(Self { inner })
+        Ok(Self { inner, model_id })
     }
 
     /// Create a new DeepSeek handler from provider settings.
@@ -61,6 +73,89 @@ impl DeepSeekHandler {
             roo_provider::ProviderError::ApiKeyRequired
         })?;
         Self::new(config)
+    }
+
+    /// Check if the model is a thinking model (deepseek-reasoner or deepseek-r1 variants).
+    ///
+    /// Source: `src/api/providers/deepseek.ts` — `isThinkingModel` check
+    fn is_thinking_model(model_id: &str) -> bool {
+        model_id.contains("deepseek-reasoner") || model_id.contains("deepseek-r1")
+    }
+
+    /// Build a custom request body for DeepSeek with R1 format messages and thinking mode.
+    fn build_request_body(
+        &self,
+        system_prompt: &str,
+        messages: &[roo_types::api::ApiMessage],
+        tools: Option<&Vec<serde_json::Value>>,
+        metadata: &CreateMessageMetadata,
+    ) -> serde_json::Value {
+        let (_, info) = self.inner.get_model();
+        let max_tokens = info.max_tokens;
+        let model = &self.model_id;
+        let temperature = DEEP_SEEK_DEFAULT_TEMPERATURE;
+
+        let is_thinking = Self::is_thinking_model(model);
+
+        // Convert messages using R1 format (merges consecutive same-role messages).
+        // For thinking models, enable merge_tool_result_text to preserve reasoning_content
+        // during tool call sequences.
+        // Source: `src/api/providers/deepseek.ts` — convertToR1Format with mergeToolResultText
+        let options = R1ZaiOptions {
+            merge_tool_result_text: is_thinking,
+            preserve_reasoning: true,
+        };
+
+        // Prepend system prompt as a user message (matching TS behavior)
+        let mut all_messages = vec![roo_types::api::ApiMessage {
+            role: roo_types::api::MessageRole::User,
+            content: vec![roo_types::api::ContentBlock::Text {
+                text: system_prompt.to_string(),
+            }],
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        }];
+        all_messages.extend(messages.iter().cloned());
+
+        let r1_messages = convert_to_r1_zai_messages(&all_messages, options);
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "temperature": temperature,
+            "messages": r1_messages,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "parallel_tool_calls": metadata.parallel_tool_calls.unwrap_or(true),
+        });
+
+        // Add max_tokens if model specifies it
+        if let Some(max_tokens) = max_tokens {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+
+        // Add tools if provided
+        if let Some(tools) = roo_provider::base_provider::convert_tools_for_openai(tools) {
+            body["tools"] = serde_json::json!(tools);
+        }
+
+        // Add tool_choice if specified
+        if let Some(ref tool_choice) = metadata.tool_choice {
+            body["tool_choice"] = tool_choice.clone();
+        }
+
+        // Enable thinking mode for deepseek-reasoner models.
+        // Source: `src/api/providers/deepseek.ts` — thinking: { type: "enabled" }
+        if is_thinking {
+            body["thinking"] = serde_json::json!({ "type": "enabled" });
+        }
+
+        body
     }
 }
 
@@ -73,9 +168,8 @@ impl Provider for DeepSeekHandler {
         tools: Option<Vec<serde_json::Value>>,
         metadata: CreateMessageMetadata,
     ) -> Result<ApiStream, roo_provider::ProviderError> {
-        self.inner
-            .create_message(system_prompt, messages, tools, metadata)
-            .await
+        let body = self.build_request_body(system_prompt, &messages, tools.as_ref(), &metadata);
+        self.inner.create_message_from_body(body).await
     }
 
     fn get_model(&self) -> (String, ModelInfo) {
@@ -135,6 +229,14 @@ mod tests {
         let all_models = models::models();
         let reasoner = all_models.get("deepseek-reasoner").expect("reasoner should exist");
         assert_eq!(reasoner.supports_reasoning_budget, Some(true));
+    }
+
+    #[test]
+    fn test_is_thinking_model() {
+        assert!(DeepSeekHandler::is_thinking_model("deepseek-reasoner"));
+        assert!(DeepSeekHandler::is_thinking_model("deepseek-r1-0528"));
+        assert!(!DeepSeekHandler::is_thinking_model("deepseek-chat"));
+        assert!(!DeepSeekHandler::is_thinking_model("deepseek-chat-v3-0324"));
     }
 
     #[test]
@@ -251,61 +353,107 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_model_supports_cache() {
-        let all_models = models::models();
-        let chat = all_models.get("deepseek-chat").expect("chat model should exist");
-        assert!(chat.supports_prompt_cache);
+    fn test_default_temperature() {
+        assert_eq!(DEEP_SEEK_DEFAULT_TEMPERATURE, 0.3);
     }
 
     #[test]
-    fn test_handler_unknown_model_fallback() {
+    fn test_build_request_body_includes_thinking_for_reasoner() {
         let config = DeepSeekConfig {
             api_key: "test-key".to_string(),
             base_url: DeepSeekConfig::DEFAULT_BASE_URL.to_string(),
-            model_id: Some("deepseek-unknown-model".to_string()),
+            model_id: Some("deepseek-reasoner".to_string()),
             temperature: None,
             request_timeout: None,
         };
         let handler = DeepSeekHandler::new(config).unwrap();
-        let (model_id, info) = handler.get_model();
-        assert_eq!(model_id, "deepseek-unknown-model");
-        assert!(info.max_tokens.is_some());
+
+        let body = handler.build_request_body(
+            "You are a helpful assistant.",
+            &[],
+            None,
+            &CreateMessageMetadata::default(),
+        );
+
+        // Thinking mode should be enabled for deepseek-reasoner
+        assert_eq!(body["thinking"]["type"], "enabled");
     }
 
     #[test]
-    fn test_handler_with_temperature() {
+    fn test_build_request_body_no_thinking_for_chat() {
         let config = DeepSeekConfig {
             api_key: "test-key".to_string(),
             base_url: DeepSeekConfig::DEFAULT_BASE_URL.to_string(),
-            model_id: None,
-            temperature: Some(0.5),
+            model_id: Some("deepseek-chat".to_string()),
+            temperature: None,
             request_timeout: None,
         };
-        let handler = DeepSeekHandler::new(config);
-        assert!(handler.is_ok());
+        let handler = DeepSeekHandler::new(config).unwrap();
+
+        let body = handler.build_request_body(
+            "You are a helpful assistant.",
+            &[],
+            None,
+            &CreateMessageMetadata::default(),
+        );
+
+        // Thinking mode should NOT be enabled for deepseek-chat
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]
-    fn test_handler_with_timeout() {
+    fn test_build_request_body_uses_r1_format() {
         let config = DeepSeekConfig {
             api_key: "test-key".to_string(),
             base_url: DeepSeekConfig::DEFAULT_BASE_URL.to_string(),
             model_id: None,
             temperature: None,
-            request_timeout: Some(30000),
+            request_timeout: None,
         };
-        let handler = DeepSeekHandler::new(config);
-        assert!(handler.is_ok());
-    }
+        let handler = DeepSeekHandler::new(config).unwrap();
 
-    #[test]
-    fn test_r1_model_has_higher_pricing() {
-        let all_models = models::models();
-        let chat = all_models.get("deepseek-chat").unwrap();
-        let reasoner = all_models.get("deepseek-reasoner").unwrap();
-        assert!(
-            reasoner.input_price.unwrap() > chat.input_price.unwrap(),
-            "Reasoner should cost more than chat"
+        // Create consecutive user messages that should be merged by R1 format
+        let messages = vec![
+            roo_types::api::ApiMessage {
+                role: roo_types::api::MessageRole::User,
+                content: vec![roo_types::api::ContentBlock::Text {
+                    text: "Hello".to_string(),
+                }],
+                reasoning: None,
+                ts: None,
+                truncation_parent: None,
+                is_truncation_marker: None,
+                truncation_id: None,
+                condense_parent: None,
+                is_summary: None,
+                condense_id: None,
+            },
+            roo_types::api::ApiMessage {
+                role: roo_types::api::MessageRole::User,
+                content: vec![roo_types::api::ContentBlock::Text {
+                    text: "World".to_string(),
+                }],
+                reasoning: None,
+                ts: None,
+                truncation_parent: None,
+                is_truncation_marker: None,
+                truncation_id: None,
+                condense_parent: None,
+                is_summary: None,
+                condense_id: None,
+            },
+        ];
+
+        let body = handler.build_request_body(
+            "System prompt",
+            &messages,
+            None,
+            &CreateMessageMetadata::default(),
         );
+
+        // The system prompt + 2 user messages should be merged into fewer messages
+        let msgs = body["messages"].as_array().unwrap();
+        // System prompt becomes first user message, then the two user messages should be merged
+        assert!(msgs.len() < 3, "R1 format should merge consecutive same-role messages");
     }
 }

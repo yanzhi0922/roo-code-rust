@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use roo_types::model::ModelInfo;
 
 /// Default VS Code LM model ID.
-pub const DEFAULT_MODEL_ID: &str = "vscode-lm-default";
+pub const DEFAULT_MODEL_ID: &str = "claude-3.5-sonnet";
 
 /// Returns the supported VS Code LM fallback models.
 ///
@@ -13,6 +13,20 @@ pub const DEFAULT_MODEL_ID: &str = "vscode-lm-default";
 /// via `vscode.lm.selectChatModels()`.
 pub fn models() -> HashMap<String, ModelInfo> {
     let mut m = HashMap::new();
+
+    m.insert(
+        "claude-3.5-sonnet".to_string(),
+        ModelInfo {
+            max_tokens: Some(8192),
+            context_window: 200000,
+            supports_images: Some(true),
+            supports_prompt_cache: false,
+            input_price: Some(0.0),
+            output_price: Some(0.0),
+            description: Some("Claude 3.5 Sonnet via VS Code LM".to_string()),
+            ..Default::default()
+        },
+    );
 
     m.insert(
         "vscode-lm-default".to_string(),

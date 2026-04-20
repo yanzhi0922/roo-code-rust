@@ -76,15 +76,24 @@ impl AnthropicHandler {
         }
         let http_client = client_builder.build().map_err(ProviderError::Reqwest)?;
 
-        let use_extended_thinking = config
-            .use_extended_thinking
-            .unwrap_or(false)
-            && model_info.supports_reasoning_budget.unwrap_or(false);
+        // Force-enable extended thinking for models with required_reasoning_budget
+        let use_extended_thinking = if model_info.required_reasoning_budget.unwrap_or(false) {
+            true
+        } else {
+            config
+                .use_extended_thinking
+                .unwrap_or(false)
+                && model_info.supports_reasoning_budget.unwrap_or(false)
+        };
 
         // Build betas array for request headers
         let mut betas = vec!["fine-grained-tool-streaming-2025-05-14".to_string()];
         if model_info.supports_prompt_cache {
             betas.push("prompt-caching-2024-07-31".to_string());
+        }
+        // Add output-128k beta for :thinking model variant
+        if model_id.ends_with(":thinking") {
+            betas.push("output-128k-2025-02-19".to_string());
         }
 
         Ok(Self {
@@ -131,6 +140,12 @@ impl AnthropicHandler {
         tools: Option<&Vec<Value>>,
     ) -> Value {
         let max_tokens = self.model_info.max_tokens.unwrap_or(8192);
+        // Strip :thinking suffix for the actual API call
+        let api_model_id = if self.model_id.ends_with(":thinking") {
+            &self.model_id[..self.model_id.len() - ":thinking".len()]
+        } else {
+            &self.model_id
+        };
 
         // Filter messages to only include Anthropic-compatible blocks
         let filtered_messages = filter_non_anthropic_blocks(messages.to_vec());
@@ -144,7 +159,7 @@ impl AnthropicHandler {
         }
 
         let mut body = json!({
-            "model": self.model_id,
+            "model": api_model_id,
             "max_tokens": max_tokens,
             "temperature": self.temperature,
             "messages": anthropic_messages,
@@ -637,7 +652,13 @@ impl Provider for AnthropicHandler {
     }
 
     fn get_model(&self) -> (String, ModelInfo) {
-        (self.model_id.clone(), self.model_info.clone())
+        // Strip :thinking suffix for the returned model ID (matches TS behavior)
+        let clean_id = if self.model_id.ends_with(":thinking") {
+            self.model_id[..self.model_id.len() - ":thinking".len()].to_string()
+        } else {
+            self.model_id.clone()
+        };
+        (clean_id, self.model_info.clone())
     }
 
     async fn count_tokens(
@@ -676,10 +697,17 @@ impl Provider for AnthropicHandler {
     async fn complete_prompt(&self, prompt: &str) -> Result<String> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let max_tokens = self.model_info.max_tokens.unwrap_or(8192);
+        // Strip :thinking suffix for the actual API call
+        let api_model_id = if self.model_id.ends_with(":thinking") {
+            self.model_id[..self.model_id.len() - ":thinking".len()].to_string()
+        } else {
+            self.model_id.clone()
+        };
 
         let body = json!({
-            "model": self.model_id,
+            "model": api_model_id,
             "max_tokens": max_tokens,
+            "temperature": self.temperature,
             "messages": [{ "role": "user", "content": prompt }]
         });
 
@@ -1258,8 +1286,14 @@ mod tests {
 
     #[test]
     fn test_all_models_support_images() {
+        // claude-3-5-haiku-20241022 does NOT support images (matches TS definition)
+        let non_image_models = ["claude-3-5-haiku-20241022"];
         for (id, info) in models::models() {
-            assert!(info.supports_images.unwrap_or(false), "Model '{}' should support images", id);
+            if non_image_models.contains(&id.as_str()) {
+                assert!(!info.supports_images.unwrap_or(true), "Model '{}' should NOT support images", id);
+            } else {
+                assert!(info.supports_images.unwrap_or(false), "Model '{}' should support images", id);
+            }
         }
     }
 

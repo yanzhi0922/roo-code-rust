@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn test_models_count() {
         let all_models = models::models();
-        assert_eq!(all_models.len(), 3);
+        assert_eq!(all_models.len(), 4);
     }
 
     #[test]

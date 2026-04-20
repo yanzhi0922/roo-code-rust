@@ -316,6 +316,154 @@ impl OpenAiCompatibleProvider {
 
         Ok(Box::pin(stream))
     }
+
+    /// Create a message from a pre-built request body.
+    ///
+    /// This allows providers that need custom message formatting (e.g. DeepSeek
+    /// with R1 format) to build their own request body while still reusing the
+    /// HTTP client and SSE stream parsing infrastructure.
+    pub async fn create_message_from_body(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<ApiStream> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::api_error(&self.provider_name_str, e))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(ProviderError::api_error_response(
+                &self.provider_name_str,
+                status,
+                text,
+            ));
+        }
+
+        // Parse SSE stream
+        let provider_name = self.provider_name_str.clone();
+        let stream = response
+            .bytes_stream()
+            .eventsource()
+            .map(move |event| {
+                match event {
+                    Ok(event) => {
+                        if event.data == "[DONE]" {
+                            return None;
+                        }
+                        match serde_json::from_str::<OpenAiStreamChunk>(&event.data) {
+                            Ok(chunk) => Some(Ok(chunk)),
+                            Err(e) => Some(Err(ProviderError::ParseError(format!(
+                                "Failed to parse stream chunk: {e}"
+                            )))),
+                        }
+                    }
+                    Err(e) => Some(Err(ProviderError::StreamError(format!(
+                        "SSE error: {e}"
+                    )))),
+                }
+            })
+            .filter_map(|item| async move { item })
+            .map_err(move |e| {
+                ProviderError::StreamError(format!("{provider_name}: {e}"))
+            });
+
+        let (_, model_info) = self.base.get_model();
+
+        // Process the stream into ApiStreamChunks
+        let mut active_tool_call_ids: HashSet<String> = HashSet::new();
+        let model_info = model_info.clone();
+
+        let processed = stream.flat_map(move |chunk_result| {
+            let results: Vec<Result<ApiStreamChunk>> = match chunk_result {
+                Ok(chunk) => {
+                    let delta = chunk.choices.as_ref().and_then(|c| c.first()).and_then(|c| c.delta.as_ref());
+                    let finish_reason = chunk
+                        .choices
+                        .as_ref()
+                        .and_then(|c| c.first())
+                        .and_then(|c| c.finish_reason.as_ref())
+                        .cloned();
+
+                    let mut results: Vec<Result<ApiStreamChunk>> = Vec::new();
+
+                    // Handle content
+                    if let Some(delta) = delta {
+                        if let Some(ref content) = delta.content {
+                            results.push(Ok(ApiStreamChunk::Text {
+                                text: content.clone(),
+                            }));
+                        }
+
+                        // Handle reasoning content
+                        if let Some(ref reasoning) = delta.reasoning_content {
+                            if !reasoning.trim().is_empty() {
+                                results.push(Ok(ApiStreamChunk::Reasoning {
+                                    text: reasoning.clone(),
+                                    signature: None,
+                                }));
+                            }
+                        } else if let Some(ref reasoning) = delta.reasoning {
+                            if !reasoning.trim().is_empty() {
+                                results.push(Ok(ApiStreamChunk::Reasoning {
+                                    text: reasoning.clone(),
+                                    signature: None,
+                                }));
+                            }
+                        }
+
+                        // Handle tool calls
+                        if let Some(ref tool_calls) = delta.tool_calls {
+                            for tool_call in tool_calls {
+                                if let Some(ref id) = tool_call.id {
+                                    active_tool_call_ids.insert(id.clone());
+                                }
+                                results.push(Ok(ApiStreamChunk::ToolCallPartial {
+                                    index: tool_call.index,
+                                    id: tool_call.id.clone(),
+                                    name: tool_call
+                                        .function
+                                        .as_ref()
+                                        .and_then(|f| f.name.clone()),
+                                    arguments: tool_call
+                                        .function
+                                        .as_ref()
+                                        .and_then(|f| f.arguments.clone()),
+                                }));
+                            }
+                        }
+                    }
+
+                    // Emit tool_call_end events when finish_reason is "tool_calls"
+                    if finish_reason.as_deref() == Some("tool_calls") && !active_tool_call_ids.is_empty() {
+                        for id in active_tool_call_ids.drain() {
+                            results.push(Ok(ApiStreamChunk::ToolCallEnd { id }));
+                        }
+                    }
+
+                    // Handle usage
+                    if let Some(ref usage) = chunk.usage {
+                        results.push(Ok(process_usage_metrics(usage, &model_info)));
+                    }
+
+                    results
+                }
+                Err(e) => vec![Err(e)],
+            };
+
+            futures::stream::iter(results)
+        });
+
+        Ok(Box::pin(processed))
+    }
 }
 
 #[async_trait]

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use roo_types::model::ModelInfo;
 
 /// Default LiteLLM model ID.
-pub const DEFAULT_MODEL_ID: &str = "gpt-4o";
+pub const DEFAULT_MODEL_ID: &str = "claude-3-7-sonnet-20250219";
 
 /// Returns the supported LiteLLM fallback models.
 pub fn models() -> HashMap<String, ModelInfo> {
@@ -53,6 +53,22 @@ pub fn models() -> HashMap<String, ModelInfo> {
             input_price: Some(0.27),
             output_price: Some(1.10),
             description: Some("DeepSeek-V3 via LiteLLM proxy".to_string()),
+            ..Default::default()
+        },
+    );
+
+    m.insert(
+        "claude-3-7-sonnet-20250219".to_string(),
+        ModelInfo {
+            max_tokens: Some(8192),
+            context_window: 200000,
+            supports_images: Some(true),
+            supports_prompt_cache: true,
+            input_price: Some(3.0),
+            output_price: Some(15.0),
+            cache_writes_price: Some(3.75),
+            cache_reads_price: Some(0.30),
+            description: Some("Claude 3.7 Sonnet via LiteLLM proxy".to_string()),
             ..Default::default()
         },
     );
