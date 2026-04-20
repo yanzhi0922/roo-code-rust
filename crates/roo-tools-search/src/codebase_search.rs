@@ -139,6 +139,7 @@ mod tests {
             max_file_size: 1_000_000,
             include_patterns: vec![],
             exclude_patterns: vec![],
+            workspace_path: None,
         };
         let mut mgr = CodeIndexManager::new(config);
         mgr.initialize().unwrap();

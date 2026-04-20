@@ -151,7 +151,12 @@ impl VertexConfig {
     /// Create configuration from provider settings.
     ///
     /// Requires `vertex_project_id` and either `vertex_json_credentials`
-    /// (treated as an access token for now) or `vertex_key_file`.
+    /// (a Google Cloud service account JSON) or `vertex_key_file`.
+    ///
+    /// The `access_token` field stores the raw credentials string. The
+    /// [`VertexHandler`](crate::handler::VertexHandler) will attempt to
+    /// parse it as a service account JSON for OAuth2 token management;
+    /// if parsing fails, the string is used as a static access token.
     pub fn from_settings(settings: &ProviderSettings) -> Option<Self> {
         let project_id = settings.vertex_project_id.clone()?;
 
@@ -160,8 +165,8 @@ impl VertexConfig {
             .clone()
             .unwrap_or_else(|| Self::DEFAULT_REGION.to_string());
 
-        // Use JSON credentials or key file as the access token.
-        // TODO: Implement proper OAuth2 token acquisition from service account credentials.
+        // Store raw credentials — the handler will try to parse them as
+        // service account JSON for OAuth2, or fall back to using as a raw token.
         let access_token = settings
             .vertex_json_credentials
             .clone()

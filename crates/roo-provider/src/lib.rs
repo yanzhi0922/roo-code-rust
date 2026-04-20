@@ -21,6 +21,7 @@ pub mod handler;
 pub mod metrics;
 pub mod openai_compatible;
 pub mod transform;
+pub mod vertex_auth;
 
 // Re-export key types
 pub use error::{ProviderError, Result};

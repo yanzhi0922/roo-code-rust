@@ -19,3 +19,4 @@ thiserror = { workspace = true }
 eventsource-stream = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
+jsonwebtoken = { workspace = true }

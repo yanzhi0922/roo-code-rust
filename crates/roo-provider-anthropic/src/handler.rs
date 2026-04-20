@@ -29,6 +29,7 @@ use crate::types::{
     AnthropicConfig, AnthropicDelta, AnthropicSseEvent, AnthropicUsage,
     AnthropicVertexConfig, anthropic_vertex_models, anthropic_vertex_default_model_id,
 };
+use roo_provider::vertex_auth::VertexTokenProvider;
 
 // =========================================================================
 // AnthropicHandler
@@ -656,6 +657,9 @@ impl Provider for AnthropicHandler {
 pub struct AnthropicVertexHandler {
     http_client: reqwest::Client,
     config: AnthropicVertexConfig,
+    /// OAuth2 token provider for service account authentication.
+    /// When present, tokens are fetched/refreshed automatically.
+    token_provider: Option<VertexTokenProvider>,
     model_id: String,
     model_info: ModelInfo,
     temperature: f64,
@@ -666,6 +670,11 @@ pub struct AnthropicVertexHandler {
 
 impl AnthropicVertexHandler {
     /// Create a new Anthropic Vertex handler from configuration.
+    ///
+    /// Attempts to parse the `access_token` field as a Google Cloud service
+    /// account JSON. If parsing succeeds, a [`VertexTokenProvider`] is created
+    /// for automatic OAuth2 token management. Otherwise, the raw string is
+    /// used as a static access token (backward-compatible behavior).
     pub fn new(config: AnthropicVertexConfig) -> Result<Self> {
         let model_id = config
             .model_id
@@ -727,9 +736,15 @@ impl AnthropicVertexHandler {
         }
         let http_client = client_builder.build().map_err(ProviderError::Reqwest)?;
 
+        // Try to create a token provider from service account credentials.
+        // If the access_token is not valid service account JSON, fall back to
+        // using it as a raw access token (backward-compatible).
+        let token_provider = VertexTokenProvider::new(&config.access_token).ok();
+
         Ok(Self {
             http_client,
             config,
+            token_provider,
             model_id,
             model_info,
             temperature,
@@ -737,6 +752,22 @@ impl AnthropicVertexHandler {
             max_thinking_tokens: None,
             betas,
         })
+    }
+
+    /// Get a valid OAuth2 access token.
+    ///
+    /// If a [`VertexTokenProvider`] is available (service account credentials),
+    /// this fetches/refreshes the token automatically. Otherwise, returns the
+    /// raw fallback token from the config.
+    async fn get_access_token(&self) -> Result<String> {
+        if let Some(provider) = &self.token_provider {
+            provider
+                .get_access_token()
+                .await
+                .map_err(|e| ProviderError::Other(format!("Vertex auth error: {e}")))
+        } else {
+            Ok(self.config.access_token.clone())
+        }
     }
 
     /// Create a new Anthropic Vertex handler from provider settings.
@@ -829,11 +860,12 @@ impl Provider for AnthropicVertexHandler {
     ) -> Result<ApiStream> {
         let body = self.build_request_body(system_prompt, &messages, tools.as_ref());
         let url = self.config.stream_url(&self.model_id);
+        let access_token = self.get_access_token().await?;
 
         let mut request = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.access_token))
+            .header("Authorization", format!("Bearer {}", access_token))
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .header("accept", "text/event-stream");
@@ -946,10 +978,12 @@ impl Provider for AnthropicVertexHandler {
             "stream": false,
         });
 
+        let access_token = self.get_access_token().await?;
+
         let mut request = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.access_token))
+            .header("Authorization", format!("Bearer {}", access_token))
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
 

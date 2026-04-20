@@ -35,6 +35,11 @@ pub struct CodeIndexConfig {
     pub max_file_size: u64,
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
+    /// Root directory for resolving relative file paths.
+    /// When set, file contents will be read and cached during indexing
+    /// to enable content-based search with BM25-like scoring.
+    #[serde(default)]
+    pub workspace_path: Option<String>,
 }
 
 impl Default for CodeIndexConfig {
@@ -44,6 +49,7 @@ impl Default for CodeIndexConfig {
             max_file_size: 1_000_000, // 1 MB
             include_patterns: vec!["**/*.rs".to_string(), "**/*.ts".to_string()],
             exclude_patterns: vec!["**/target/**".to_string(), "**/node_modules/**".to_string()],
+            workspace_path: None,
         }
     }
 }
@@ -129,6 +135,7 @@ mod tests {
             max_file_size: 500,
             include_patterns: vec!["*.py".to_string()],
             exclude_patterns: vec![],
+            workspace_path: None,
         };
         assert!(!config.enabled);
         assert_eq!(500, config.max_file_size);

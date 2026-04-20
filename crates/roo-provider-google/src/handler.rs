@@ -20,6 +20,7 @@ use roo_types::model::ModelInfo;
 
 use crate::models;
 use crate::types::{GeminiStreamResponse, GoogleConfig, VertexConfig};
+use roo_provider::vertex_auth::VertexTokenProvider;
 
 /// Google Gemini API provider handler.
 pub struct GoogleHandler {
@@ -407,7 +408,11 @@ pub struct VertexHandler {
     http_client: reqwest::Client,
     project_id: String,
     region: String,
+    /// Fallback raw access token (used when no token provider is available).
     access_token: String,
+    /// OAuth2 token provider for service account authentication.
+    /// When present, tokens are fetched/refreshed automatically.
+    token_provider: Option<VertexTokenProvider>,
     model_id: String,
     model_info: ModelInfo,
     temperature: f64,
@@ -415,6 +420,11 @@ pub struct VertexHandler {
 
 impl VertexHandler {
     /// Create a new Vertex AI handler from configuration.
+    ///
+    /// Attempts to parse the `access_token` field as a Google Cloud service
+    /// account JSON. If parsing succeeds, a [`VertexTokenProvider`] is created
+    /// for automatic OAuth2 token management. Otherwise, the raw string is
+    /// used as a static access token (backward-compatible behavior).
     pub fn new(config: VertexConfig) -> Result<Self> {
         let model_id = config
             .model_id
@@ -453,15 +463,37 @@ impl VertexHandler {
         }
         let http_client = client_builder.build().map_err(ProviderError::Reqwest)?;
 
+        // Try to create a token provider from service account credentials.
+        // If the access_token is not valid service account JSON, fall back to
+        // using it as a raw access token (backward-compatible).
+        let token_provider = VertexTokenProvider::new(&config.access_token).ok();
+
         Ok(Self {
             http_client,
             project_id: config.project_id,
             region: config.region,
             access_token: config.access_token,
+            token_provider,
             model_id,
             model_info,
             temperature: config.temperature.unwrap_or(0.0),
         })
+    }
+
+    /// Get a valid OAuth2 access token.
+    ///
+    /// If a [`VertexTokenProvider`] is available (service account credentials),
+    /// this fetches/refreshes the token automatically. Otherwise, returns the
+    /// raw fallback token.
+    async fn get_access_token(&self) -> Result<String> {
+        if let Some(provider) = &self.token_provider {
+            provider
+                .get_access_token()
+                .await
+                .map_err(|e| ProviderError::Other(format!("Vertex auth error: {e}")))
+        } else {
+            Ok(self.access_token.clone())
+        }
     }
 
     /// Create a new Vertex AI handler from provider settings.
@@ -598,11 +630,12 @@ impl Provider for VertexHandler {
     ) -> Result<ApiStream> {
         let body = self.build_request_body(system_prompt, &messages, tools.as_ref());
         let url = self.build_stream_url();
+        let access_token = self.get_access_token().await?;
 
         let response = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.access_token))
+            .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -661,10 +694,12 @@ impl Provider for VertexHandler {
             }
         });
 
+        let access_token = self.get_access_token().await?;
+
         let response = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.access_token))
+            .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
