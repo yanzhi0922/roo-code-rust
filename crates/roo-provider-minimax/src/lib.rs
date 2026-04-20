@@ -1,7 +1,7 @@
 //! # Roo Provider: MiniMax
 //!
 //! MiniMax AI provider for Roo Code Rust.
-//! Uses the OpenAI-compatible chat completions API.
+//! Uses the Anthropic Messages API protocol via MiniMax's endpoint.
 
 mod handler;
 mod models;

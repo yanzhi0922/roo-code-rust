@@ -20,8 +20,8 @@ pub struct MiniMaxConfig {
 }
 
 impl MiniMaxConfig {
-    /// Default MiniMax API base URL.
-    pub const DEFAULT_BASE_URL: &'static str = "https://api.minimax.chat/v1";
+    /// Default MiniMax API base URL (Anthropic-compatible endpoint).
+    pub const DEFAULT_BASE_URL: &'static str = "https://api.minimaxi.com/anthropic";
 
     /// Create configuration from provider settings.
     pub fn from_settings(settings: &ProviderSettings) -> Option<Self> {

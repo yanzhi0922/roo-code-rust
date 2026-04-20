@@ -45,6 +45,8 @@ pub struct AnthropicHandler {
     temperature: f64,
     use_extended_thinking: bool,
     max_thinking_tokens: Option<u64>,
+    /// Beta feature flags sent as `anthropic-beta` HTTP header.
+    betas: Vec<String>,
 }
 
 impl AnthropicHandler {
@@ -79,6 +81,12 @@ impl AnthropicHandler {
             .unwrap_or(false)
             && model_info.supports_reasoning_budget.unwrap_or(false);
 
+        // Build betas array for request headers
+        let mut betas = vec!["fine-grained-tool-streaming-2025-05-14".to_string()];
+        if model_info.supports_prompt_cache {
+            betas.push("prompt-caching-2024-07-31".to_string());
+        }
+
         Ok(Self {
             http_client,
             api_key: config.api_key,
@@ -88,6 +96,7 @@ impl AnthropicHandler {
             temperature: config.temperature.unwrap_or(0.0),
             use_extended_thinking,
             max_thinking_tokens: config.max_thinking_tokens,
+            betas,
         })
     }
 
@@ -98,6 +107,20 @@ impl AnthropicHandler {
         let config =
             AnthropicConfig::from_settings(settings).ok_or(ProviderError::ApiKeyRequired)?;
         Self::new(config)
+    }
+
+    /// Override the model info.
+    ///
+    /// Used by providers that delegate to the Anthropic protocol (e.g. MiniMax)
+    /// but have their own model definitions.
+    pub fn with_model_info(mut self, model_info: ModelInfo) -> Self {
+        // Rebuild betas based on new model info
+        self.betas = vec!["fine-grained-tool-streaming-2025-05-14".to_string()];
+        if model_info.supports_prompt_cache {
+            self.betas.push("prompt-caching-2024-07-31".to_string());
+        }
+        self.model_info = model_info;
+        self
     }
 
     /// Build the request body for the Anthropic Messages API.
@@ -113,16 +136,31 @@ impl AnthropicHandler {
         let filtered_messages = filter_non_anthropic_blocks(messages.to_vec());
 
         // Convert messages to Anthropic format
-        let anthropic_messages = convert_to_anthropic_messages(&filtered_messages);
+        let mut anthropic_messages = convert_to_anthropic_messages(&filtered_messages);
+
+        // Apply prompt caching: add cache_control to last two user messages
+        if self.model_info.supports_prompt_cache {
+            apply_cache_control_to_user_messages(&mut anthropic_messages);
+        }
 
         let mut body = json!({
             "model": self.model_id,
             "max_tokens": max_tokens,
             "temperature": self.temperature,
             "messages": anthropic_messages,
-            "system": system_prompt,
             "stream": true,
         });
+
+        // System prompt with cache_control for Anthropic
+        if self.model_info.supports_prompt_cache {
+            body["system"] = json!([{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": { "type": "ephemeral" }
+            }]);
+        } else {
+            body["system"] = json!(system_prompt);
+        }
 
         // Add extended thinking configuration
         if self.use_extended_thinking {
@@ -144,10 +182,23 @@ impl AnthropicHandler {
         // Add tools if provided
         if let Some(tools) = tools {
             if !tools.is_empty() {
-                let anthropic_tools: Vec<Value> = tools
+                let mut anthropic_tools: Vec<Value> = tools
                     .iter()
                     .map(|tool| convert_tool_for_anthropic(tool))
                     .collect();
+
+                // Add cache_control to the last tool definition for prompt caching
+                if self.model_info.supports_prompt_cache {
+                    if let Some(last_tool) = anthropic_tools.last_mut() {
+                        if let Some(obj) = last_tool.as_object_mut() {
+                            obj.insert(
+                                "cache_control".to_string(),
+                                json!({ "type": "ephemeral" }),
+                            );
+                        }
+                    }
+                }
+
                 body["tools"] = json!(anthropic_tools);
             }
         }
@@ -456,6 +507,35 @@ fn convert_to_anthropic_messages(messages: &[ApiMessage]) -> Vec<Value> {
     result
 }
 
+/// Apply `cache_control: { "type": "ephemeral" }` to the last two user messages.
+///
+/// This follows the Anthropic caching strategy: mark the last two user messages
+/// so the server can reuse cached KV entries from the previous request and
+/// cache the latest message for the next request.
+fn apply_cache_control_to_user_messages(messages: &mut Vec<Value>) {
+    let user_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, msg)| msg["role"] == "user")
+        .map(|(i, _)| i)
+        .collect();
+
+    // Mark the last two user messages
+    for idx in user_indices.into_iter().rev().take(2) {
+        let msg = &mut messages[idx];
+        if let Some(content) = msg["content"].as_array_mut() {
+            if let Some(last_block) = content.last_mut() {
+                if let Some(obj) = last_block.as_object_mut() {
+                    obj.insert(
+                        "cache_control".to_string(),
+                        json!({ "type": "ephemeral" }),
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Calculate usage metrics for Anthropic.
 fn calculate_anthropic_usage(usage: &AnthropicUsage, model_info: &ModelInfo) -> ApiStreamChunk {
     let input_tokens = usage.input_tokens.unwrap_or(0);
@@ -501,13 +581,20 @@ impl Provider for AnthropicHandler {
         let body = self.build_request_body(system_prompt, &messages, tools.as_ref());
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
-        let response = self
+        let mut request = self
             .http_client
             .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
+            .header("accept", "text/event-stream");
+
+        // Add beta headers if any
+        if !self.betas.is_empty() {
+            request = request.header("anthropic-beta", self.betas.join(","));
+        }
+
+        let response = request
             .json(&body)
             .send()
             .await
@@ -596,12 +683,19 @@ impl Provider for AnthropicHandler {
             "messages": [{ "role": "user", "content": prompt }]
         });
 
-        let response = self
+        let mut request = self
             .http_client
             .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        // Add beta headers if any
+        if !self.betas.is_empty() {
+            request = request.header("anthropic-beta", self.betas.join(","));
+        }
+
+        let response = request
             .json(&body)
             .send()
             .await

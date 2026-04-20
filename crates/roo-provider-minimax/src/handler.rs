@@ -1,12 +1,16 @@
 //! MiniMax provider handler.
 //!
-//! Uses the OpenAI-compatible chat completions API.
-//! Supports group_id header for MiniMax API.
+//! Uses the Anthropic Messages API protocol via MiniMax's endpoint.
+//! MiniMax provides an Anthropic-compatible API at `https://api.minimaxi.com/anthropic`.
+//!
+//! Delegates to [`AnthropicHandler`] internally for request building,
+//! SSE parsing, and usage tracking.
 
 use async_trait::async_trait;
 use roo_provider::{
-    ApiStream, CreateMessageMetadata, OpenAiCompatibleConfig, OpenAiCompatibleProvider, Provider,
+    ApiStream, CreateMessageMetadata, Provider,
 };
+use roo_provider_anthropic::AnthropicHandler;
 use roo_types::api::ProviderName;
 use roo_types::model::ModelInfo;
 
@@ -17,8 +21,12 @@ use crate::types::MiniMaxConfig;
 const DEFAULT_TEMPERATURE: f64 = 1.0;
 
 /// MiniMax API provider handler.
+///
+/// Delegates to [`AnthropicHandler`] since MiniMax exposes an
+/// Anthropic-compatible Messages API endpoint at
+/// `https://api.minimaxi.com/anthropic`.
 pub struct MiniMaxHandler {
-    inner: OpenAiCompatibleProvider,
+    inner: AnthropicHandler,
     #[allow(dead_code)]
     group_id: Option<String>,
 }
@@ -40,23 +48,23 @@ impl MiniMaxHandler {
                 ..Default::default()
             });
 
-        let compatible_config = OpenAiCompatibleConfig {
-            provider_name: "minimax".to_string(),
-            base_url: config.base_url,
+        let anthropic_config = roo_provider_anthropic::AnthropicConfig {
             api_key: config.api_key,
-            default_model_id: models::default_model_id(),
-            default_temperature: config.temperature.unwrap_or(DEFAULT_TEMPERATURE),
+            base_url: config.base_url,
             model_id: Some(model_id),
-            model_info,
-            provider_name_enum: ProviderName::MiniMax,
+            temperature: config.temperature.or(Some(DEFAULT_TEMPERATURE)),
+            use_extended_thinking: None,
+            max_thinking_tokens: None,
             request_timeout: config.request_timeout,
-        reasoning_effort: None,
         };
 
-        let inner = OpenAiCompatibleProvider::new(compatible_config)?;
-        let group_id = config.group_id;
+        let inner = AnthropicHandler::new(anthropic_config)?
+            .with_model_info(model_info);
 
-        Ok(Self { inner, group_id })
+        Ok(Self {
+            inner,
+            group_id: config.group_id,
+        })
     }
 
     /// Create a new MiniMax handler from provider settings.
@@ -139,7 +147,7 @@ mod tests {
     fn test_minimax_config_default_url() {
         assert_eq!(
             MiniMaxConfig::DEFAULT_BASE_URL,
-            "https://api.minimax.chat/v1"
+            "https://api.minimaxi.com/anthropic"
         );
     }
 
