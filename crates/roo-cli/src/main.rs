@@ -101,6 +101,10 @@ struct Cli {
     /// Path to a JSON configuration file.
     #[arg(short, long)]
     config: Option<String>,
+
+    /// Working directory for tool execution (default: current directory).
+    #[arg(long, global = true)]
+    working_dir: Option<String>,
 }
 
 /// Configuration loaded from a JSON file.
@@ -144,6 +148,12 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Switch working directory if --working-dir is specified.
+    if let Some(ref dir) = cli.working_dir {
+        std::env::set_current_dir(dir)
+            .with_context(|| format!("Failed to change working directory to: {dir}"))?;
+    }
 
     // Load optional config file and merge with CLI flags (CLI takes priority).
     let config = load_config(&cli)?;

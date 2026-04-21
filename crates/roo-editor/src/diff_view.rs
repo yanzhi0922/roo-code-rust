@@ -263,6 +263,18 @@ impl DiffViewProvider {
         Ok(())
     }
 
+    /// Close the diff view, reverting any unsaved changes and resetting state.
+    ///
+    /// This mirrors the TS `DiffViewProvider.close()` method which closes the
+    /// diff editor tab and reverts the file to its original content.
+    pub async fn close(&mut self) -> Result<(), DiffViewError> {
+        if self.has_unsaved_changes() {
+            self.revert_changes().await?;
+        }
+        self.reset();
+        Ok(())
+    }
+
     /// Resets the provider to idle state, discarding all session data.
     pub fn reset(&mut self) {
         self.state = EditorState::Idle;
@@ -508,6 +520,55 @@ mod tests {
         assert!(provider.get_current_content().is_none());
         assert!(provider.created_files().is_empty());
         assert!(!provider.opened_diff());
+    }
+
+    // ── Close lifecycle ──
+
+    #[tokio::test]
+    async fn test_close_reverts_unsaved_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        tokio::fs::write(&file_path, "original").await.unwrap();
+
+        let mut provider = make_provider();
+        provider.open(&file_path).await.unwrap();
+        provider.update("modified", false).unwrap();
+        assert!(provider.has_unsaved_changes());
+
+        provider.close().await.unwrap();
+        assert!(!provider.is_active());
+        // After close, the provider is fully reset (idle state)
+        assert!(provider.rel_path().is_none());
+        assert!(provider.get_current_content().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_close_without_unsaved_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        tokio::fs::write(&file_path, "original").await.unwrap();
+
+        let mut provider = make_provider();
+        provider.open(&file_path).await.unwrap();
+        // No changes made
+
+        provider.close().await.unwrap();
+        assert!(!provider.is_active());
+        assert!(provider.rel_path().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_close_new_file_clears_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("new.txt");
+
+        let mut provider = make_provider();
+        provider.open(&file_path).await.unwrap();
+        provider.update("new content", false).unwrap();
+
+        provider.close().await.unwrap();
+        assert!(!provider.is_active());
+        assert!(provider.rel_path().is_none());
     }
 
     // ── Diff summary ──

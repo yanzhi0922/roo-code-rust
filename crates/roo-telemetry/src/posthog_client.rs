@@ -137,6 +137,7 @@ impl PostHogTelemetryClient {
         !msg_contains_rate_limit && !msg_contains_billing
     }
 
+    #[allow(dead_code)]
     async fn send_capture(&self, event: &str, properties: HashMap<String, Value>) {
         let body = PostHogCaptureBody {
             api_key: self.api_key.clone(),
@@ -156,6 +157,7 @@ impl PostHogTelemetryClient {
             .await;
     }
 
+    #[allow(dead_code)]
     async fn send_exception(
         &self,
         error_type: &str,

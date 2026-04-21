@@ -89,8 +89,10 @@ pub struct CustomModesManager {
     /// Timestamp of last cache update.
     cached_at: Option<std::time::Instant>,
     /// Whether a write is in progress.
+    #[allow(dead_code)]
     is_writing: bool,
     /// Queue of pending write operations.
+    #[allow(dead_code)]
     write_queue: Vec<Box<dyn FnOnce() -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>>,
 }
 

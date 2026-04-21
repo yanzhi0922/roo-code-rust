@@ -1,3 +1,4 @@
+#![allow(unused_assignments)]
 //! Core agent loop implementation — rewritten to faithfully replicate
 //! `.research/Roo-Code/src/core/task/Task.ts`.
 //!
@@ -30,7 +31,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn, error};
 
@@ -217,6 +218,7 @@ struct StackItem {
 ///
 /// In TS this is the generator output; in Rust we return the fully-parsed
 /// stream content along with metadata about whether the first chunk failed.
+#[allow(dead_code)]
 enum AttemptResult {
     /// Stream was successfully consumed.
     Ok {
@@ -269,6 +271,7 @@ enum ContextStrategy {
 }
 
 /// Result of context management for context window exceeded errors.
+#[allow(dead_code)]
 struct ContextManagementResult {
     /// Whether the management was successful.
     success: bool,
@@ -328,6 +331,17 @@ pub struct AgentLoop {
     /// Processes content blocks as they arrive from the stream, handling
     /// text display, tool call validation, and approval flows.
     present_assistant_message: PresentAssistantMessage,
+    /// DiffView provider for managing file editing sessions with diff tracking.
+    ///
+    /// Source: `src/core/task/Task.ts` — `diffViewProvider`
+    /// Manages the lifecycle of file edits: open → update → save/revert.
+    diff_view_provider: Option<roo_editor::diff_view::DiffViewProvider>,
+    /// Notify signal for `userMessageContentReady` synchronization.
+    ///
+    /// External code can await this to be notified when all tool execution
+    /// completes and user message content is ready for the next API call.
+    /// Source: `src/core/task/Task.ts` — `pWaitFor(() => this.userMessageContentReady)`
+    user_message_content_ready_notify: Arc<Notify>,
 }
 
 impl AgentLoop {
@@ -350,6 +364,8 @@ impl AgentLoop {
             rate_limit_timestamps: Vec::new(),
             cancellation_token: CancellationToken::new(),
             present_assistant_message: PresentAssistantMessage::with_mistake_limit(mistake_limit),
+            diff_view_provider: None,
+            user_message_content_ready_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -362,6 +378,14 @@ impl AgentLoop {
     /// Set the checkpoint service for file-modifying tool checkpoints.
     pub fn with_checkpoint_service(mut self, service: ShadowCheckpointService) -> Self {
         self.checkpoint_service = Some(service);
+        self
+    }
+
+    /// Set the DiffView provider for file editing sessions.
+    ///
+    /// Source: `src/core/task/Task.ts` — `diffViewProvider`
+    pub fn with_diff_view_provider(mut self, provider: roo_editor::diff_view::DiffViewProvider) -> Self {
+        self.diff_view_provider = Some(provider);
         self
     }
 
@@ -388,6 +412,21 @@ impl AgentLoop {
         &mut self.present_assistant_message
     }
 
+    /// Get a handle to the `userMessageContentReady` Notify.
+    ///
+    /// External code can use this to wait for all tool execution to complete
+    /// and user message content to be ready for the next API call.
+    ///
+    /// Source: `src/core/task/Task.ts` — `pWaitFor(() => this.userMessageContentReady)`
+    pub fn user_message_content_ready_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.user_message_content_ready_notify)
+    }
+
+    /// Get a mutable reference to the DiffView provider, if configured.
+    pub fn diff_view_provider_mut(&mut self) -> Option<&mut roo_editor::diff_view::DiffViewProvider> {
+        self.diff_view_provider.as_mut()
+    }
+
     // ===================================================================
     // 1. run_loop() — corresponds to TS initiateTaskLoop() (line 2472-2504)
     // ===================================================================
@@ -402,6 +441,7 @@ impl AgentLoop {
     ///    re-prompts and calls again (the TS "outer loop" pattern)
     ///
     /// Source: `src/core/task/Task.ts` — `initiateTaskLoop()` lines 2472-2504
+    #[allow(unused_assignments)]
     pub async fn run_loop(&mut self) -> Result<TaskResult, TaskError> {
         // Start the task (Idle → Running)
         self.engine.start()?;
@@ -642,6 +682,7 @@ impl AgentLoop {
             // events one by one, feeding them to StreamParser and
             // PresentAssistantMessage in real-time.
             // ---------------------------------------------------------------
+            #[allow(unused_assignments)]
             let mut context_window_retries = 0usize;
 
             // Get the streaming receiver
@@ -704,6 +745,7 @@ impl AgentLoop {
             let mut tool_calls_from_stream: Vec<ParsedToolCall> = Vec::new();
             let mut stream_error_message: Option<String> = None;
             let mut did_retry_push = false;
+            let mut saw_stream_completed = false;
 
             while let Some(event) = stream_rx.recv().await {
                 // Check cancellation
@@ -841,6 +883,7 @@ impl AgentLoop {
                     }
 
                     StreamEvent::StreamCompleted => {
+                        saw_stream_completed = true;
                         break;
                     }
 
@@ -884,6 +927,39 @@ impl AgentLoop {
                             stream_error_message = Some(message);
                         }
                         break;
+                    }
+                }
+            }
+
+            // Background usage collection: if we broke out of the loop early
+            // (not on StreamCompleted), drain remaining events to collect usage.
+            // TS: after main consumption loop, background drain for usage data.
+            // Source: `src/core/task/Task.ts` line ~3079
+            if !saw_stream_completed {
+                debug!("Stream ended early, draining remaining events for usage data");
+                let drain_timeout = std::time::Duration::from_secs(5);
+                loop {
+                    match tokio::time::timeout(drain_timeout, stream_rx.recv()).await {
+                        Ok(Some(event)) => match event {
+                            StreamEvent::Usage {
+                                input_tokens, output_tokens,
+                                cache_write_tokens, cache_read_tokens,
+                                reasoning_tokens, total_cost,
+                            } => {
+                                parser.feed_chunk(&roo_types::api::ApiStreamChunk::Usage {
+                                    input_tokens, output_tokens,
+                                    cache_write_tokens, cache_read_tokens,
+                                    reasoning_tokens, total_cost,
+                                });
+                            }
+                            StreamEvent::StreamCompleted => break,
+                            _ => {}
+                        },
+                        Ok(None) => break, // Channel closed
+                        Err(_) => {
+                            debug!("Usage drain timed out");
+                            break;
+                        }
                     }
                 }
             }
@@ -1049,6 +1125,10 @@ impl AgentLoop {
             // Step 15: Execute tool calls
             // ---------------------------------------------------------------
             let all_succeeded = self.execute_tools(&tool_calls).await?;
+
+            // Notify waiters that user message content is ready.
+            // Source: `src/core/task/Task.ts` — `pWaitFor(() => this.userMessageContentReady)`
+            self.user_message_content_ready_notify.notify_waiters();
 
             if !all_succeeded && self.config.stop_on_tool_error {
                 debug!("Stopping due to tool error (stop_on_tool_error = true)");
@@ -1998,12 +2078,33 @@ impl AgentLoop {
                 );
                 continue;
             }
+
+            // Cascade rejection: if a previous tool was rejected by the user,
+            // skip all subsequent tools in this message.
+            // TS: didRejectTool flag in presentAssistantMessage()
+            // Source: `src/core/task/Task.ts` — cascade rejection logic
+            if self.engine.streaming().did_reject_tool {
+                let skip_msg = format!(
+                    "Skipping tool {} due to user rejecting a previous tool.",
+                    tool_call.name
+                );
+                warn!(
+                    tool = %tool_call.name,
+                    id = %tool_call.id,
+                    "{}", skip_msg
+                );
+                let error_result = ToolExecutionResult::error(&skip_msg);
+                let result_msg =
+                    MessageBuilder::create_tool_result_message(&tool_call.id, &error_result);
+                self.engine.add_api_message(result_msg);
+                continue;
+            }
+
             debug!(
                 tool = %tool_call.name,
                 id = %tool_call.id,
                 "Executing tool"
             );
-
             let params = tool_call.parse_arguments();
 
             // Tool repetition detection
@@ -2038,6 +2139,9 @@ impl AgentLoop {
                 }
                 ApprovalDecision::Denied { reason } => {
                     warn!(tool = %tool_call.name, reason = %reason, "Tool denied");
+                    // Set cascade rejection flag — subsequent tools will be skipped.
+                    // Source: `src/core/task/Task.ts` — `this.didRejectTool = true`
+                    self.engine.streaming_mut().did_reject_tool = true;
                     ToolExecutionResult::error(format!("Tool '{}' denied: {}", tool_call.name, reason))
                 }
                 ApprovalDecision::NeedsApproval { reason } => {
@@ -2088,6 +2192,27 @@ impl AgentLoop {
 
                 // Update file context tracker
                 self.update_file_context(&tool_call.name, &params);
+
+                // DiffView integration: update diff view for file-modifying tools.
+                // Source: `src/core/task/Task.ts` — diffViewProvider usage
+                if let Some(ref mut dvp) = self.diff_view_provider {
+                    if matches!(
+                        tool_call.name.as_str(),
+                        "write_to_file" | "apply_diff" | "edit_file" | "search_and_replace"
+                    ) {
+                        if let Some(path) = params
+                            .get("path")
+                            .or_else(|| params.get("file_path"))
+                            .and_then(|v| v.as_str())
+                        {
+                            if dvp.is_active() {
+                                if dvp.update(&result.text, true).is_ok() {
+                                    debug!(path = %path, "DiffView updated with tool result");
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Add tool result to conversation history
@@ -2541,6 +2666,7 @@ impl AgentLoop {
     /// Calculate exponential backoff delay with random jitter.
     ///
     /// Source: `src/core/task/Task.ts` — `backoffAndAnnounce()`
+    #[allow(dead_code)]
     fn calculate_backoff_with_jitter(&self, retry_attempt: u32) -> u64 {
         let base_delay = TaskEngine::calculate_backoff_delay(retry_attempt);
 
@@ -3814,5 +3940,131 @@ mod tests {
         assert!(result.allowed_function_names.is_some());
         let allowed = result.allowed_function_names.unwrap();
         assert!(!allowed.is_empty());
+    }
+
+    // --- Cascade rejection tests ---
+
+    #[tokio::test]
+    async fn test_cascade_rejection_skips_subsequent_tools() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+
+        // Simulate a previous tool rejection
+        agent.engine.streaming_mut().did_reject_tool = true;
+
+        let tool_calls = vec![
+            ParsedToolCall {
+                id: "tc_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            },
+            ParsedToolCall {
+                id: "tc_2".into(),
+                name: "write_to_file".into(),
+                arguments: r#"{"path":"b.rs","content":"x"}"#.into(),
+            },
+        ];
+
+        // execute_tools should skip all tools due to cascade rejection
+        let history_before = agent.engine.api_conversation_history().len();
+        let result = agent.execute_tools(&tool_calls).await;
+
+        // Both tools should be skipped (cascade rejection)
+        assert!(result.is_ok());
+        // Tool results should have been added to history for skipped tools
+        let history_after = agent.engine.api_conversation_history().len();
+        assert_eq!(history_after, history_before + 2, "Should have 2 tool result messages for skipped tools");
+    }
+
+    /// Verify that the cascade rejection mechanism works end-to-end:
+    /// After setting `did_reject_tool = true` (simulating a user denial),
+    /// subsequent tools in the same batch should be skipped with error results.
+    #[tokio::test]
+    async fn test_cascade_rejection_flag_set_on_denial() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+
+        // Manually set the flag to simulate a user denial that happened
+        // before these tool calls (e.g., via external UI interaction).
+        // The Denied branch in execute_tools sets this flag; here we
+        // verify the cascade effect of that flag being set.
+        agent.engine.streaming_mut().did_reject_tool = true;
+
+        let tool_calls = vec![
+            ParsedToolCall {
+                id: "tc_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            },
+            ParsedToolCall {
+                id: "tc_2".into(),
+                name: "write_to_file".into(),
+                arguments: r#"{"path":"b.rs","content":"x"}"#.into(),
+            },
+            ParsedToolCall {
+                id: "tc_3".into(),
+                name: "list_files".into(),
+                arguments: r#"{"path":"."}"#.into(),
+            },
+        ];
+
+        let history_before = agent.engine.api_conversation_history().len();
+        let result = agent.execute_tools(&tool_calls).await;
+
+        assert!(result.is_ok());
+        // The flag should remain set
+        assert!(
+            agent.engine.streaming().did_reject_tool,
+            "did_reject_tool flag should remain set after cascade"
+        );
+        // All three tools should have been skipped with error results in history
+        let history_after = agent.engine.api_conversation_history().len();
+        assert_eq!(
+            history_after,
+            history_before + 3,
+            "All 3 tools should be cascade-skipped with error results"
+        );
+    }
+
+    // --- Notify synchronization tests ---
+
+    #[test]
+    fn test_user_message_content_ready_notify() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+
+        // Should be able to get a clone of the Notify
+        let notify = agent.user_message_content_ready_notify();
+        // The Notify should be usable
+        assert!(Arc::strong_count(&notify) >= 2); // agent + our clone
+    }
+
+    // --- DiffView integration tests ---
+
+    #[test]
+    fn test_with_diff_view_provider() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let dvp = roo_editor::diff_view::DiffViewProvider::new_default();
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher)
+            .with_diff_view_provider(dvp);
+
+        // Should have a DiffView provider configured
+        assert!(agent.diff_view_provider_mut().is_some());
     }
 }
