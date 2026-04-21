@@ -133,12 +133,22 @@ pub enum TaskEvent {
     /// A text delta was received from the streaming API response.
     /// Source: TS `presentAssistantMessage()` — text streaming state machine
     StreamingTextDelta { task_id: String, text: String },
+    /// A reasoning/thinking delta was received from the streaming API response.
+    /// Source: TS `presentAssistantMessage()` — reasoning streaming
+    StreamingReasoningDelta { task_id: String, text: String },
     /// A tool use started (tool call header received from stream).
     /// Source: TS `presentAssistantMessage()` — tool_use detection
     StreamingToolUseStarted {
         task_id: String,
         tool_name: String,
         tool_id: String,
+    },
+    /// A tool use received an argument delta during streaming.
+    /// Source: TS `presentAssistantMessage()` — tool_use streaming
+    StreamingToolUseDelta {
+        task_id: String,
+        tool_id: String,
+        delta: String,
     },
     /// A tool use completed (tool result available).
     /// Source: TS `presentAssistantMessage()` — after tool execution
@@ -401,6 +411,23 @@ impl TaskEventEmitter {
             tool_name: tool_name.to_string(),
             tool_id: tool_id.to_string(),
             success,
+        });
+    }
+
+    /// Emit a streaming reasoning delta event.
+    pub fn emit_streaming_reasoning_delta(&self, task_id: &str, text: &str) {
+        self.emit(&TaskEvent::StreamingReasoningDelta {
+            task_id: task_id.to_string(),
+            text: text.to_string(),
+        });
+    }
+
+    /// Emit a streaming tool use delta event.
+    pub fn emit_streaming_tool_use_delta(&self, task_id: &str, tool_id: &str, delta: &str) {
+        self.emit(&TaskEvent::StreamingToolUseDelta {
+            task_id: task_id.to_string(),
+            tool_id: tool_id.to_string(),
+            delta: delta.to_string(),
         });
     }
 

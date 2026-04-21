@@ -30,6 +30,8 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn, error};
 
 use roo_provider::handler::{CreateMessageMetadata, Provider};
@@ -40,9 +42,10 @@ use roo_tools::repetition::ToolRepetitionDetector;
 
 use crate::engine::TaskEngine;
 use crate::message_builder::MessageBuilder;
+use crate::present_assistant_message::PresentAssistantMessage;
 use crate::stream_parser::{ParsedStreamContent, ParsedToolCall, StreamParser};
 use crate::tool_dispatcher::{ToolContext, ToolDispatcher, ToolExecutionResult};
-use crate::types::{TaskError, TaskResult, TaskState};
+use crate::types::{StreamEvent, TaskError, TaskResult, TaskState};
 
 // ===========================================================================
 // ApprovalDecision
@@ -229,6 +232,26 @@ enum AttemptResult {
 }
 
 // ===========================================================================
+// StreamFirstChunkError — error from attempt_api_request_stream()
+// ===========================================================================
+
+/// Error when the API call fails before producing any stream chunks.
+///
+/// This is returned by `attempt_api_request_stream()` when the initial
+/// `provider.create_message()` call fails (connection error, context window
+/// exceeded, rate limit, etc.).
+#[derive(Debug)]
+struct StreamFirstChunkError {
+    message: String,
+}
+
+impl std::fmt::Display for StreamFirstChunkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+// ===========================================================================
 // Context management result types
 // ===========================================================================
 
@@ -294,6 +317,17 @@ pub struct AgentLoop {
     checkpoint_service: Option<ShadowCheckpointService>,
     /// Rate limiter: tracks request timestamps for RPM limiting.
     rate_limit_timestamps: Vec<Instant>,
+    /// Cancellation token for mid-stream abort.
+    ///
+    /// When cancelled, the spawned stream-consumer task will stop
+    /// reading chunks and send a `StreamEvent::Error` with
+    /// `is_first_chunk = false`.
+    cancellation_token: CancellationToken,
+    /// Present-assistant-message state machine for real-time content processing.
+    ///
+    /// Processes content blocks as they arrive from the stream, handling
+    /// text display, tool call validation, and approval flows.
+    present_assistant_message: PresentAssistantMessage,
 }
 
 impl AgentLoop {
@@ -304,6 +338,7 @@ impl AgentLoop {
         message_builder: MessageBuilder,
         dispatcher: ToolDispatcher,
     ) -> Self {
+        let mistake_limit = engine.config().consecutive_mistake_limit;
         Self {
             engine,
             provider: Arc::from(provider),
@@ -313,6 +348,8 @@ impl AgentLoop {
             repetition_detector: ToolRepetitionDetector::with_default_limit(),
             checkpoint_service: None,
             rate_limit_timestamps: Vec::new(),
+            cancellation_token: CancellationToken::new(),
+            present_assistant_message: PresentAssistantMessage::with_mistake_limit(mistake_limit),
         }
     }
 
@@ -336,6 +373,19 @@ impl AgentLoop {
     /// Get a mutable reference to the task engine.
     pub fn engine_mut(&mut self) -> &mut TaskEngine {
         &mut self.engine
+    }
+
+    /// Get a reference to the cancellation token.
+    ///
+    /// Used by `TaskLifecycle::cancel_current_request()` to abort a
+    /// mid-stream API request.
+    pub fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancellation_token
+    }
+
+    /// Get a mutable reference to the present-assistant-message state machine.
+    pub fn present_assistant_message_mut(&mut self) -> &mut PresentAssistantMessage {
+        &mut self.present_assistant_message
     }
 
     // ===================================================================
@@ -477,7 +527,7 @@ impl AgentLoop {
 
         // TS: while (stack.length > 0)
         while let Some(current_item) = stack.pop() {
-            let _task_id = self.engine.config().task_id.clone();
+            let task_id = self.engine.config().task_id.clone();
 
             // ---------------------------------------------------------------
             // Step 1: Check abort
@@ -584,94 +634,289 @@ impl AgentLoop {
             // (already done in prepare_for_new_api_request above)
 
             // ---------------------------------------------------------------
-            // Step 9: attemptApiRequest() → stream processing
+            // Step 9: attemptApiRequest() → real-time stream processing
             // TS: const stream = this.attemptApiRequest(retryAttempt, ...)
+            //     for await (const chunk of stream) { ... }
+            //
+            // New architecture: get a Receiver<StreamEvent> and consume
+            // events one by one, feeding them to StreamParser and
+            // PresentAssistantMessage in real-time.
             // ---------------------------------------------------------------
             let mut context_window_retries = 0usize;
 
-            let parsed = loop {
-                match self.attempt_api_request(
-                    &system_prompt,
-                    &messages,
-                    &tools,
-                    current_item.retry_attempt,
-                    context_window_retries,
-                ).await {
-                    AttemptResult::Ok { parsed, context_window_retries: cwr } => {
-                        #[allow(unused_assignments)]
-                        { context_window_retries = cwr; }
-                        break parsed;
-                    }
-                    AttemptResult::FirstChunkFailed { error, context_window_retries: cwr } => {
-                        context_window_retries = cwr;
-
-                        // Handle context window exceeded error
-                        if self.is_context_window_error(&error) {
-                            match self.handle_context_window_exceeded_error(
-                                &error,
-                                context_window_retries,
-                            ).await {
-                                Ok(new_cwr) => {
-                                    context_window_retries = new_cwr;
-                                    // Context was truncated — continue the loop to retry
-                                    // with the updated conversation history.
-                                    continue;
-                                }
-                                Err(_) => {
-                                    // Max context window retries exceeded
-                                    self.engine.abort_with_reason("context_window_exceeded")?;
-                                    return Err(TaskError::General(error));
-                                }
+            // Get the streaming receiver
+            let stream_rx: mpsc::Receiver<StreamEvent> = match self.attempt_api_request_stream(
+                &system_prompt,
+                &messages,
+                &tools,
+                current_item.retry_attempt,
+            ).await {
+                Ok(rx) => rx,
+                Err(StreamFirstChunkError { message, .. }) => {
+                    // First-chunk error handling (context window exceeded, etc.)
+                    if self.is_context_window_error(&message) {
+                        match self.handle_context_window_exceeded_error(
+                            &message,
+                            context_window_retries,
+                        ).await {
+                            Ok(new_cwr) => {
+                                context_window_retries = new_cwr;
+                                stack.push(StackItem {
+                                    user_content: None,
+                                    include_file_details: false,
+                                    retry_attempt: current_item.retry_attempt,
+                                });
+                                continue;
+                            }
+                            Err(_) => {
+                                self.engine.abort_with_reason("context_window_exceeded")?;
+                                return Err(TaskError::General(message));
                             }
                         }
-
-                        // Generic API error — backoff and retry
-                        if current_item.retry_attempt >= self.config.max_api_retries {
-                            warn!(error = %error, "API call failed after max retries");
-                            self.engine.abort_with_reason("api_error")?;
-                            return Err(TaskError::General(error));
-                        }
-
-                        // backoffAndAnnounce — pass error info for 429 parsing
-                        self.backoff_and_announce(current_item.retry_attempt, Some(&error)).await;
-
-                        // Record mistake
-                        self.engine.record_mistake();
-                        if !self.engine.should_continue() {
-                            return Err(TaskError::General(error));
-                        }
-
-                        // Push a retry item back onto the stack
-                        stack.push(StackItem {
-                            user_content: None, // Don't re-add user message on retry
-                            include_file_details: false,
-                            retry_attempt: current_item.retry_attempt + 1,
-                        });
-                        // Continue outer while loop
-                        break ParsedStreamContent::default();
                     }
+
+                    // Generic API error — backoff and retry
+                    if current_item.retry_attempt >= self.config.max_api_retries {
+                        warn!(error = %message, "API call failed after max retries");
+                        self.engine.abort_with_reason("api_error")?;
+                        return Err(TaskError::General(message));
+                    }
+
+                    self.backoff_and_announce(current_item.retry_attempt, Some(&message)).await;
+                    self.engine.record_mistake();
+                    if !self.engine.should_continue() {
+                        return Err(TaskError::General(message));
+                    }
+
+                    stack.push(StackItem {
+                        user_content: None,
+                        include_file_details: false,
+                        retry_attempt: current_item.retry_attempt + 1,
+                    });
+                    continue;
                 }
             };
 
+            // Consume stream events in real-time
+            let mut stream_rx = stream_rx;
+            let mut parser = StreamParser::new();
+            let mut assistant_text = String::new();
+            let mut tool_calls_from_stream: Vec<ParsedToolCall> = Vec::new();
+            let mut stream_error_message: Option<String> = None;
+            let mut did_retry_push = false;
+
+            while let Some(event) = stream_rx.recv().await {
+                // Check cancellation
+                if !self.engine.should_continue() {
+                    debug!("Stream consumption interrupted: should_continue is false");
+                    break;
+                }
+
+                match event {
+                    StreamEvent::TextDelta { text } => {
+                        assistant_text.push_str(&text);
+                        self.engine.emitter().emit_streaming_text_delta(&task_id, &text);
+                        parser.feed_chunk(&roo_types::api::ApiStreamChunk::Text { text });
+                    }
+
+                    StreamEvent::ReasoningDelta { text } => {
+                        self.engine.emitter().emit_streaming_reasoning_delta(&task_id, &text);
+                        parser.feed_chunk(&roo_types::api::ApiStreamChunk::Reasoning {
+                            text,
+                            signature: None,
+                        });
+                    }
+
+                    StreamEvent::ToolCallStart { id, name } => {
+                        self.engine.emitter().emit_streaming_tool_use_started(&task_id, &name, &id);
+                        parser.start_streaming_tool_call(&id, &name);
+                        self.engine.add_assistant_message_content(
+                            crate::types::AssistantMessageContent::ToolUse(
+                                crate::types::ToolUse {
+                                    content_type: "tool_use".to_string(),
+                                    name: name.clone(),
+                                    params: Default::default(),
+                                    partial: true,
+                                    id: id.clone(),
+                                    native_args: None,
+                                    original_name: None,
+                                    used_legacy_format: false,
+                                }
+                            )
+                        );
+                    }
+
+                    StreamEvent::ToolCallDelta { id, delta } => {
+                        self.engine.emitter().emit_streaming_tool_use_delta(&task_id, &id, &delta);
+                        let _ = parser.process_streaming_chunk(&id, &delta);
+                    }
+
+                    StreamEvent::ToolCallEnd { id } => {
+                        if let Some(content) = parser.finalize_streaming_tool_call(&id) {
+                            match &content {
+                                crate::types::AssistantMessageContent::ToolUse(tu) => {
+                                    tool_calls_from_stream.push(ParsedToolCall {
+                                        id: tu.id.clone(),
+                                        name: tu.name.clone(),
+                                        arguments: tu.native_args
+                                            .as_ref()
+                                            .map(|v| serde_json::to_string(v).unwrap_or_default())
+                                            .unwrap_or_default(),
+                                    });
+                                }
+                                crate::types::AssistantMessageContent::McpToolUse(mcp) => {
+                                    tool_calls_from_stream.push(ParsedToolCall {
+                                        id: mcp.id.clone(),
+                                        name: mcp.name.clone(),
+                                        arguments: serde_json::to_string(&mcp.arguments).unwrap_or_default(),
+                                    });
+                                }
+                                _ => {}
+                            }
+                            self.engine.add_assistant_message_content(content);
+                        }
+                    }
+
+                    StreamEvent::ToolCallComplete { id, name, arguments } => {
+                        self.engine.emitter().emit_streaming_tool_use_started(&task_id, &name, &id);
+                        if let Some(content) = parser.parse_tool_call(&id, &name, &arguments) {
+                            match &content {
+                                crate::types::AssistantMessageContent::ToolUse(tu) => {
+                                    tool_calls_from_stream.push(ParsedToolCall {
+                                        id: tu.id.clone(),
+                                        name: tu.name.clone(),
+                                        arguments: tu.native_args
+                                            .as_ref()
+                                            .map(|v| serde_json::to_string(v).unwrap_or_default())
+                                            .unwrap_or_default(),
+                                    });
+                                }
+                                crate::types::AssistantMessageContent::McpToolUse(mcp) => {
+                                    tool_calls_from_stream.push(ParsedToolCall {
+                                        id: mcp.id.clone(),
+                                        name: mcp.name.clone(),
+                                        arguments: serde_json::to_string(&mcp.arguments).unwrap_or_default(),
+                                    });
+                                }
+                                _ => {}
+                            }
+                            self.engine.add_assistant_message_content(content);
+                        }
+                    }
+
+                    StreamEvent::ToolCallPartial { index, id, name, arguments } => {
+                        let events = parser.process_raw_chunk(
+                            index,
+                            id.as_deref(),
+                            name.as_deref(),
+                            arguments.as_deref(),
+                        );
+                        for tc_event in events {
+                            match tc_event {
+                                crate::types::ToolCallStreamEvent::Start { id, name } => {
+                                    self.engine.emitter().emit_streaming_tool_use_started(&task_id, &name, &id);
+                                }
+                                crate::types::ToolCallStreamEvent::Delta { id, delta } => {
+                                    self.engine.emitter().emit_streaming_tool_use_delta(&task_id, &id, &delta);
+                                }
+                                crate::types::ToolCallStreamEvent::End { .. } => {}
+                            }
+                        }
+                    }
+
+                    StreamEvent::Usage { input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, reasoning_tokens, total_cost } => {
+                        parser.feed_chunk(&roo_types::api::ApiStreamChunk::Usage {
+                            input_tokens, output_tokens,
+                            cache_write_tokens, cache_read_tokens,
+                            reasoning_tokens, total_cost,
+                        });
+                    }
+
+                    StreamEvent::Grounding { sources } => {
+                        parser.feed_chunk(&roo_types::api::ApiStreamChunk::Grounding { sources });
+                    }
+
+                    StreamEvent::ThinkingComplete { signature } => {
+                        parser.feed_chunk(&roo_types::api::ApiStreamChunk::ThinkingComplete { signature });
+                    }
+
+                    StreamEvent::StreamCompleted => {
+                        break;
+                    }
+
+                    StreamEvent::Error { message, is_first_chunk } => {
+                        if is_first_chunk {
+                            if self.is_context_window_error(&message) {
+                                match self.handle_context_window_exceeded_error(
+                                    &message,
+                                    context_window_retries,
+                                ).await {
+                                    Ok(new_cwr) => {
+                                        context_window_retries = new_cwr;
+                                        stack.push(StackItem {
+                                            user_content: None,
+                                            include_file_details: false,
+                                            retry_attempt: current_item.retry_attempt,
+                                        });
+                                    }
+                                    Err(_) => {
+                                        self.engine.abort_with_reason("context_window_exceeded")?;
+                                        return Err(TaskError::General(message));
+                                    }
+                                }
+                            } else {
+                                if current_item.retry_attempt >= self.config.max_api_retries {
+                                    warn!(error = %message, "API call failed after max retries");
+                                    self.engine.abort_with_reason("api_error")?;
+                                    return Err(TaskError::General(message));
+                                }
+                                self.backoff_and_announce(current_item.retry_attempt, Some(&message)).await;
+                                self.engine.record_mistake();
+                                stack.push(StackItem {
+                                    user_content: None,
+                                    include_file_details: false,
+                                    retry_attempt: current_item.retry_attempt + 1,
+                                });
+                            }
+                            did_retry_push = true;
+                        } else {
+                            warn!(error = %message, "Mid-stream error");
+                            stream_error_message = Some(message);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Stream ended — finalize
+            self.engine.emitter().emit_streaming_completed(&task_id);
+            self.engine.streaming_mut().is_streaming = false;
+            self.engine.streaming_mut().did_complete_reading_stream = true;
+
+            // Finalize any remaining raw chunks
+            let _ = parser.finalize_raw_chunks();
+
+            // Get the final parsed content from the parser
+            let parsed = parser.finalize();
+
+            // Merge streaming tool calls with parser results
+            let mut all_tool_calls = parsed.tool_calls.clone();
+            for tc in &tool_calls_from_stream {
+                if !all_tool_calls.iter().any(|existing| existing.id == tc.id) {
+                    all_tool_calls.push(tc.clone());
+                }
+            }
+
             // If we pushed a retry item, skip the rest of this iteration
-            if !parsed.text.is_empty() || !parsed.tool_calls.is_empty() || parsed.usage.is_some() {
-                // Normal processing continues below
-            } else if !stack.is_empty() && stack.last().map_or(false, |item| item.retry_attempt > 0) {
-                // This was a retry — skip to next iteration
-                continue;
-            } else if stack.iter().any(|item| item.retry_attempt > current_item.retry_attempt) {
+            if did_retry_push {
                 continue;
             }
 
             // ---------------------------------------------------------------
             // Step 10: Check for stream error
             // ---------------------------------------------------------------
-            if let Some(ref stream_error) = parsed.error {
-                warn!(
-                    error = %stream_error.error,
-                    message = %stream_error.message,
-                    "Stream returned error"
-                );
+            if let Some(ref error_msg) = stream_error_message {
+                warn!(error = %error_msg, "Stream returned error");
                 self.engine.record_mistake();
                 continue;
             }
@@ -721,8 +966,8 @@ impl AgentLoop {
             // Step 13: Handle noToolsUsed / empty response
             // TS: if (noToolsUsed) { ... } / if (!assistantContent.length) { ... }
             // ---------------------------------------------------------------
-            let has_text = !parsed.text.is_empty();
-            let has_tool_calls = !parsed.tool_calls.is_empty();
+            let has_text = !parsed.text.is_empty() || !assistant_text.is_empty();
+            let has_tool_calls = !all_tool_calls.is_empty();
 
             // Empty response handling
             if !has_text && !has_tool_calls {
@@ -798,7 +1043,7 @@ impl AgentLoop {
             // ---------------------------------------------------------------
             // Step 14: Enforce new_task isolation
             // ---------------------------------------------------------------
-            let tool_calls = self.enforce_new_task_isolation(&parsed.tool_calls);
+            let tool_calls = self.enforce_new_task_isolation(&all_tool_calls);
 
             // ---------------------------------------------------------------
             // Step 15: Execute tool calls
@@ -913,10 +1158,14 @@ impl AgentLoop {
     }
 
     // ===================================================================
-    // 3. attempt_api_request() — TS line 3987-4376
+    // 3. attempt_api_request() — TS line 3987-4376 (DEPRECATED)
     // ===================================================================
 
     /// Attempt an API request with streaming response processing.
+    ///
+    /// **DEPRECATED**: Use `attempt_api_request_stream()` instead.
+    /// This method is kept for backward compatibility but is no longer
+    /// called by the main loop.
     ///
     /// Source: `src/core/task/Task.ts` — `attemptApiRequest()` lines 3987-4376.
     ///
@@ -930,6 +1179,7 @@ impl AgentLoop {
     ///
     /// In TS this is an async generator (`async *attemptApiRequest`).
     /// In Rust we model it as a method returning `AttemptResult`.
+    #[allow(dead_code)]
     async fn attempt_api_request(
         &mut self,
         system_prompt: &str,
@@ -1047,6 +1297,172 @@ impl AgentLoop {
         AttemptResult::Ok {
             parsed,
             context_window_retries,
+        }
+    }
+
+    // ===================================================================
+    // 3b. attempt_api_request_stream() — new streaming architecture
+    // ===================================================================
+
+    /// Attempt an API request and return a stream event receiver.
+    ///
+    /// This is the new streaming architecture that replaces the batch-oriented
+    /// `attempt_api_request()`. Instead of collecting all chunks into a
+    /// `ParsedStreamContent`, it:
+    ///
+    /// 1. Creates the API stream via `provider.create_message()`
+    /// 2. Spawns a task that converts each `ApiStreamChunk` to `StreamEvent`
+    /// 3. Returns `mpsc::Receiver<StreamEvent>` for real-time consumption
+    ///
+    /// If the API call itself fails (before any chunks), returns
+    /// `Err(StreamFirstChunkError)` so the caller can handle context window
+    /// and retry logic.
+    ///
+    /// Source: `src/core/task/Task.ts` — `attemptApiRequest()` async generator
+    async fn attempt_api_request_stream(
+        &mut self,
+        system_prompt: &str,
+        messages: &[roo_types::api::ApiMessage],
+        tools: &[serde_json::Value],
+        _retry_attempt: u32,
+    ) -> Result<mpsc::Receiver<StreamEvent>, StreamFirstChunkError> {
+        let task_id = self.engine.config().task_id.clone();
+
+        // Update streaming state
+        self.engine.streaming_mut().is_streaming = true;
+        self.engine.streaming_mut().is_waiting_for_first_chunk = true;
+
+        let metadata = CreateMessageMetadata {
+            task_id: Some(task_id.clone()),
+            mode: Some(self.engine.config().mode.clone()),
+            tools: Some(tools.to_vec()),
+            ..Default::default()
+        };
+
+        // Create the API stream
+        let stream = match self.provider.create_message(
+            system_prompt,
+            messages.to_vec(),
+            Some(tools.to_vec()),
+            metadata,
+        ).await {
+            Ok(s) => s,
+            Err(e) => {
+                let error_str = e.to_string();
+                self.engine.streaming_mut().is_streaming = false;
+                return Err(StreamFirstChunkError { message: error_str });
+            }
+        };
+
+        // Create the channel
+        let (tx, rx) = mpsc::channel(256);
+
+        // Mark that we're past the initial connection
+        self.engine.streaming_mut().is_waiting_for_first_chunk = false;
+
+        // Get cancellation token (clone for the spawned task)
+        let cancel_token = self.cancellation_token.clone();
+
+        // Spawn a task to consume the stream and send StreamEvents
+        tokio::spawn(async move {
+            let mut stream = Box::pin(stream);
+            let mut first_chunk = true;
+
+            while let Some(chunk_result) = stream.next().await {
+                // Check cancellation
+                if cancel_token.is_cancelled() {
+                    let _ = tx.send(StreamEvent::Error {
+                        message: "Request cancelled".to_string(),
+                        is_first_chunk: false,
+                    }).await;
+                    break;
+                }
+
+                match chunk_result {
+                    Ok(chunk) => {
+                        let was_first = first_chunk;
+                        if first_chunk { first_chunk = false; }
+
+                        // Convert ApiStreamChunk → StreamEvent(s)
+                        let events = Self::convert_chunk_to_events(chunk, was_first);
+                        for event in events {
+                            if tx.send(event).await.is_err() {
+                                // Receiver dropped — stop producing
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        let _ = tx.send(StreamEvent::Error {
+                            message: error_str,
+                            is_first_chunk: first_chunk,
+                        }).await;
+                        break;
+                    }
+                }
+            }
+
+            // Signal stream completion
+            let _ = tx.send(StreamEvent::StreamCompleted).await;
+        });
+
+        Ok(rx)
+    }
+
+    /// Convert an `ApiStreamChunk` into one or more `StreamEvent`s.
+    ///
+    /// This is the bridge between the provider's raw chunk format and
+    /// the internal streaming event system.
+    fn convert_chunk_to_events(
+        chunk: roo_types::api::ApiStreamChunk,
+        _is_first: bool,
+    ) -> Vec<StreamEvent> {
+        match chunk {
+            roo_types::api::ApiStreamChunk::Text { text } => {
+                vec![StreamEvent::TextDelta { text }]
+            }
+            roo_types::api::ApiStreamChunk::Reasoning { text, signature: _ } => {
+                vec![StreamEvent::ReasoningDelta { text }]
+            }
+            roo_types::api::ApiStreamChunk::ToolCall { id, name, arguments } => {
+                vec![StreamEvent::ToolCallComplete { id, name, arguments }]
+            }
+            roo_types::api::ApiStreamChunk::ToolCallStart { id, name } => {
+                vec![StreamEvent::ToolCallStart { id, name }]
+            }
+            roo_types::api::ApiStreamChunk::ToolCallDelta { id, delta } => {
+                vec![StreamEvent::ToolCallDelta { id, delta }]
+            }
+            roo_types::api::ApiStreamChunk::ToolCallEnd { id } => {
+                vec![StreamEvent::ToolCallEnd { id }]
+            }
+            roo_types::api::ApiStreamChunk::ToolCallPartial { index, id, name, arguments } => {
+                vec![StreamEvent::ToolCallPartial { index, id, name, arguments }]
+            }
+            roo_types::api::ApiStreamChunk::Usage {
+                input_tokens, output_tokens,
+                cache_write_tokens, cache_read_tokens,
+                reasoning_tokens, total_cost,
+            } => {
+                vec![StreamEvent::Usage {
+                    input_tokens, output_tokens,
+                    cache_write_tokens, cache_read_tokens,
+                    reasoning_tokens, total_cost,
+                }]
+            }
+            roo_types::api::ApiStreamChunk::Grounding { sources } => {
+                vec![StreamEvent::Grounding { sources }]
+            }
+            roo_types::api::ApiStreamChunk::ThinkingComplete { signature } => {
+                vec![StreamEvent::ThinkingComplete { signature }]
+            }
+            roo_types::api::ApiStreamChunk::Error { error: _, message } => {
+                vec![StreamEvent::Error {
+                    message,
+                    is_first_chunk: false,
+                }]
+            }
         }
     }
 

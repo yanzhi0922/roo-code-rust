@@ -43,7 +43,7 @@ pub use types::{
     TaskConfig, TaskError, TaskResult, TaskState, StreamingState,
     AssistantMessageContent, TextContent, ToolUse, McpToolUse,
     ToolCallStreamEvent, StreamingToolCallState, RawChunkTrackerEntry,
-    StackItem, AttemptResult, DiffStrategy,
+    StackItem, AttemptResult, DiffStrategy, StreamEvent,
     is_mcp_tool_name, parse_mcp_tool_name, normalize_mcp_tool_name,
     TOOL_PARAM_NAMES, is_valid_tool_param,
 };

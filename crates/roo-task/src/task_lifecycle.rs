@@ -28,6 +28,7 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use roo_types::message::{ClineAsk, ClineMessage, ClineSay, MessageType};
@@ -121,6 +122,12 @@ pub struct TaskLifecycle {
     ///
     /// Source: TS `MAX_MCP_TOOLS_THRESHOLD`
     max_mcp_tools_threshold: usize,
+    /// Cancellation token for mid-stream abort.
+    ///
+    /// When set (via `set_cancellation_token()`), this token is cancelled
+    /// when `cancel_current_request()` is called, allowing the spawned
+    /// stream-consumer task in `AgentLoop` to stop immediately.
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl TaskLifecycle {
@@ -138,6 +145,7 @@ impl TaskLifecycle {
             abort_reason: None,
             abandoned: false,
             max_mcp_tools_threshold: 128,
+            cancellation_token: None,
         }
     }
 
@@ -522,13 +530,22 @@ impl TaskLifecycle {
     // Source: `src/core/task/Task.ts` — lines 2238–2249
     // ===================================================================
 
+    /// Set the cancellation token from the `AgentLoop`.
+    ///
+    /// When set, `cancel_current_request()` will cancel this token,
+    /// causing the spawned stream-consumer task to stop immediately.
+    pub fn set_cancellation_token(&mut self, token: CancellationToken) {
+        self.cancellation_token = Some(token);
+    }
+
     /// Cancel the current API request.
     ///
     /// Source: `src/core/task/Task.ts` — `cancelCurrentRequest()` (lines 2238–2249)
     ///
     /// Aborts the current streaming API request. In the TS version, this
-    /// aborts the `currentRequestAbortController`. In Rust, we set the
-    /// streaming flag to false.
+    /// aborts the `currentRequestAbortController`. In Rust, we:
+    /// 1. Set the streaming flag to false
+    /// 2. Cancel the `CancellationToken` (if set) to stop the spawned task
     pub fn cancel_current_request(&mut self) {
         if self.abort {
             debug!("Task already aborted, ignoring cancel request");
@@ -537,6 +554,12 @@ impl TaskLifecycle {
 
         info!(task_id = %self.task_id(), "Cancelling current request");
         self.engine.streaming_mut().is_streaming = false;
+
+        // Cancel the CancellationToken to stop the spawned stream-consumer task
+        if let Some(ref token) = self.cancellation_token {
+            token.cancel();
+            debug!("CancellationToken triggered for mid-stream abort");
+        }
     }
 
     // ===================================================================

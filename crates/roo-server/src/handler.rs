@@ -1595,6 +1595,14 @@ fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Messag
             "streamingCompleted",
             json!({"taskId": task_id}),
         ),
+        TaskEvent::StreamingReasoningDelta { text, task_id } => (
+            "streamingReasoningDelta",
+            json!({"taskId": task_id, "text": text}),
+        ),
+        TaskEvent::StreamingToolUseDelta { task_id, tool_id, delta } => (
+            "streamingToolUseDelta",
+            json!({"taskId": task_id, "toolId": tool_id, "delta": delta}),
+        ),
     };
 
     Some(Message::notification(

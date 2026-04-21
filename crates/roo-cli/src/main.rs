@@ -1164,7 +1164,9 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        let mut truncated = s[..max_len].to_string();
+        // Find the nearest valid UTF-8 char boundary at or before max_len
+        let boundary = s.floor_char_boundary(max_len);
+        let mut truncated = s[..boundary].to_string();
         truncated.push_str("...");
         truncated
     }

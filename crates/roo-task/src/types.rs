@@ -629,6 +629,74 @@ pub enum ToolCallStreamEvent {
 }
 
 // ---------------------------------------------------------------------------
+// StreamEvent — real-time streaming event (replaces batch AttemptResult)
+// ---------------------------------------------------------------------------
+
+/// A real-time event from the streaming API response.
+///
+/// This is the core type for the new streaming architecture. Instead of
+/// collecting all chunks into a `ParsedStreamContent` batch, each chunk
+/// is converted into one or more `StreamEvent`s and sent via `mpsc::channel`
+/// for real-time consumption by `recursively_make_cline_requests()`.
+///
+/// Source: `src/core/task/Task.ts` — async generator `attemptApiRequest()`
+/// where each chunk is yielded individually for `for await` consumption.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Text content delta from the assistant.
+    TextDelta { text: String },
+
+    /// Reasoning/thinking content delta.
+    ReasoningDelta { text: String },
+
+    /// A tool call has started (streaming start event).
+    ToolCallStart { id: String, name: String },
+
+    /// A tool call argument delta (streaming).
+    ToolCallDelta { id: String, delta: String },
+
+    /// A tool call has ended (streaming end event).
+    ToolCallEnd { id: String },
+
+    /// A complete tool call (non-streaming provider, all-at-once).
+    ToolCallComplete { id: String, name: String, arguments: String },
+
+    /// A raw partial tool call chunk (index-based, needs NativeToolCallParser processing).
+    ToolCallPartial {
+        index: u64,
+        id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
+
+    /// Token usage information.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_write_tokens: Option<u64>,
+        cache_read_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
+        total_cost: Option<f64>,
+    },
+
+    /// Grounding sources (Gemini search-augmented models).
+    Grounding { sources: Vec<roo_types::api::GroundingSource> },
+
+    /// Thinking block completed with signature (Anthropic extended thinking).
+    ThinkingComplete { signature: String },
+
+    /// The stream has completed successfully.
+    StreamCompleted,
+
+    /// An error occurred during streaming.
+    Error {
+        message: String,
+        /// Whether this error occurred on the first chunk (context window exceeded).
+        is_first_chunk: bool,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // StreamingToolCallState — state for streaming tool call accumulation
 // ---------------------------------------------------------------------------
 // Source: `src/core/assistant-message/NativeToolCallParser.ts`
