@@ -74,6 +74,9 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     /// Task ID for logging and correlation.
     pub task_id: String,
+    /// Current model ID (e.g. "claude-3.5-sonnet") for model-dependent behavior.
+    /// When `None`, defaults are used (e.g. HTML entity unescaping is always applied).
+    pub model_id: Option<String>,
 }
 
 impl ToolContext {
@@ -82,7 +85,14 @@ impl ToolContext {
         Self {
             cwd: cwd.into(),
             task_id: task_id.into(),
+            model_id: None,
         }
+    }
+
+    /// Create a tool context with a model ID for model-dependent behavior.
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = Some(model_id.into());
+        self
     }
 }
 
@@ -352,7 +362,7 @@ impl ToolHandler for WriteToFileHandler {
 
         let write_params = roo_types::tool::WriteToFileParams { path, content };
 
-        match roo_tools_fs::process_write_to_file(&write_params, &context.cwd, None) {
+        match roo_tools_fs::process_write_to_file(&write_params, &context.cwd, None, context.model_id.as_deref()) {
             Ok(result) => {
                 let msg = if result.is_new_file {
                     format!(
