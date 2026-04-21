@@ -42,6 +42,7 @@ pub struct UserSettings {
 }
 
 /// Errors that can occur during cloud operations.
+/// Mirrors packages/cloud/src/errors.ts
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum CloudError {
     #[error("not authenticated")]
@@ -58,12 +59,95 @@ pub enum CloudError {
 
     #[error("serialization error: {0}")]
     SerializationError(String),
+
+    #[error("task not found: {0}")]
+    TaskNotFound(String),
+
+    #[error("invalid client token")]
+    InvalidClientToken,
+
+    #[error("API error: {0} (status: {1:?})")]
+    ApiError(String, u16, Option<String>),
+
+    #[error("cloud settings error: {0}")]
+    SettingsError(String),
+
+    #[error("rate limited: retry after {0:?}ms")]
+    RateLimited(Option<u64>),
 }
 
 impl From<serde_json::Error> for CloudError {
     fn from(err: serde_json::Error) -> Self {
         CloudError::SerializationError(err.to_string())
     }
+}
+
+/// Cloud settings including organization and user-level configuration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CloudSettingsConfig {
+    pub enable_task_sharing: bool,
+    #[serde(default)]
+    pub allow_public_task_sharing: bool,
+}
+
+/// Extension settings response combining organization and user settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExtensionSettings {
+    pub organization: OrganizationSettings,
+    pub user: UserSettingsData,
+}
+
+/// User settings data with versioning.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserSettingsData {
+    pub version: u64,
+    pub cloud_settings: Option<CloudSettingsConfig>,
+    pub features: Option<UserFeatures>,
+}
+
+/// User features / feature flags.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UserFeatures {
+    #[serde(default)]
+    pub task_sync: bool,
+    #[serde(default)]
+    pub task_sharing: bool,
+    #[serde(default)]
+    pub code_indexing: bool,
+}
+
+/// Organization-level settings with versioning.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OrganizationSettingsData {
+    pub version: u64,
+    pub allow_list: Vec<String>,
+    pub mcps: Vec<Value>,
+    pub cloud_settings: Option<CloudSettingsConfig>,
+}
+
+/// Share visibility type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareVisibility {
+    Organization,
+    Public,
+}
+
+/// Response from sharing a task.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareResponse {
+    pub success: bool,
+    pub share_url: Option<String>,
+    pub task_id: Option<String>,
+}
+
+/// Auth credentials for Clerk-based authentication.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthCredentials {
+    pub client_token: String,
+    pub session_id: String,
+    pub organization_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -165,6 +249,14 @@ mod tests {
             "network error: timeout",
             format!("{}", CloudError::NetworkError("timeout".to_string()))
         );
+        assert_eq!(
+            "task not found: task-123",
+            format!("{}", CloudError::TaskNotFound("task-123".to_string()))
+        );
+        assert_eq!(
+            "invalid client token",
+            format!("{}", CloudError::InvalidClientToken)
+        );
     }
 
     #[test]
@@ -177,5 +269,42 @@ mod tests {
                 _ => panic!("expected SerializationError"),
             }
         }
+    }
+
+    #[test]
+    fn test_cloud_settings_config_default() {
+        let config = CloudSettingsConfig::default();
+        assert!(!config.enable_task_sharing);
+        assert!(!config.allow_public_task_sharing);
+    }
+
+    #[test]
+    fn test_user_features_default() {
+        let features = UserFeatures::default();
+        assert!(!features.task_sync);
+        assert!(!features.task_sharing);
+        assert!(!features.code_indexing);
+    }
+
+    #[test]
+    fn test_auth_credentials_serialization() {
+        let creds = AuthCredentials {
+            client_token: "tok123".to_string(),
+            session_id: "sess456".to_string(),
+            organization_id: Some("org789".to_string()),
+        };
+        let json = serde_json::to_string(&creds).unwrap();
+        let deserialized: AuthCredentials = serde_json::from_str(&json).unwrap();
+        assert_eq!("tok123", deserialized.client_token);
+        assert_eq!("sess456", deserialized.session_id);
+        assert_eq!(Some("org789".to_string()), deserialized.organization_id);
+    }
+
+    #[test]
+    fn test_share_response_deserialization() {
+        let json = r#"{"success": true, "shareUrl": "https://example.com/s/1", "taskId": "t1"}"#;
+        let resp: ShareResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.success);
+        assert_eq!(Some("https://example.com/s/1".to_string()), resp.share_url);
     }
 }

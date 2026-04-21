@@ -3,6 +3,7 @@
 pub mod anthropic_filter;
 pub mod ai_sdk;
 pub mod bedrock_converse_format;
+pub mod cache_strategy;
 pub mod caching;
 pub mod gemini_format;
 pub mod image_cleaning;

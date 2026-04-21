@@ -34,6 +34,7 @@
 //! }
 //! ```
 
+pub mod output_interceptor;
 pub mod process;
 pub mod registry;
 pub mod terminal;

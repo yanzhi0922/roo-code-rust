@@ -17,6 +17,10 @@ pub mod types;
 pub mod diff_view;
 pub mod file_editor;
 pub mod undo_stack;
+pub mod extract_text;
+pub mod indentation_reader;
+pub mod line_counter;
+pub mod read_lines;
 
 // Re-export the primary public API at the crate root for convenience.
 pub use types::{DiffViewOptions, EditOperation, EditResult, EditorState, FileChange};

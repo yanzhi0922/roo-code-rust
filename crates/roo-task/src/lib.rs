@@ -30,6 +30,7 @@ pub mod message_builder;
 pub mod agent_loop;
 pub mod task_manager;
 pub mod ask_say;
+pub mod native_tool_call_parser;
 pub mod task_lifecycle;
 
 // ---------------------------------------------------------------------------
