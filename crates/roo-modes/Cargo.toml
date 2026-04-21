@@ -11,3 +11,11 @@ roo-types = { workspace = true }
 roo-tools = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"

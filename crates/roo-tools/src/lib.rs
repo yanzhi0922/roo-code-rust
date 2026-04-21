@@ -15,6 +15,7 @@ pub mod definition;
 pub mod filter;
 pub mod groups;
 pub mod repetition;
+pub mod tag_matcher;
 pub mod validate;
 
 // Re-export key types

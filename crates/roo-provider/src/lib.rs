@@ -20,6 +20,7 @@ pub mod fetcher;
 pub mod handler;
 pub mod metrics;
 pub mod openai_compatible;
+pub mod single_completion;
 pub mod transform;
 pub mod vertex_auth;
 

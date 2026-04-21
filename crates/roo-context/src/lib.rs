@@ -8,6 +8,7 @@
 //! Behavior and exports are preserved exactly from the previous sliding-window implementation.
 
 pub mod management;
+pub mod tiktoken;
 pub mod token;
 pub mod truncation;
 

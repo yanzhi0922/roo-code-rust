@@ -41,3 +41,4 @@ pub mod vscode_extension_host;
 pub mod type_fu;
 
 pub mod error;
+pub mod utils_error;

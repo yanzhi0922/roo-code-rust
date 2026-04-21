@@ -37,12 +37,18 @@
 pub mod output_interceptor;
 pub mod process;
 pub mod registry;
+pub mod shell_integration;
+pub mod shell_utils;
 pub mod terminal;
 pub mod types;
 
 // Re-export the most commonly used types at the crate root.
 pub use process::{ProcessState, SharedTerminalProcess, TerminalProcess};
 pub use registry::TerminalRegistry;
+pub use shell_integration::{
+    ShellIntegrationManager, ShellType, ExecaTerminalConfig, ExecaProcessResult,
+    merge_promise,
+};
 pub use terminal::{DefaultTerminal, RooTerminal, TerminalError, get_env};
 pub use types::{
     CommandResult, NoopCallbacks, ShellExecutionDetails, TerminalCallbacks, TerminalId, TerminalState,

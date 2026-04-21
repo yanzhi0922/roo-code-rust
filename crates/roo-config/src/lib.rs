@@ -4,8 +4,11 @@
 //! configuration loading with merge support, settings import/export,
 //! provider settings management, and settings migration.
 
+pub mod auto_import_settings;
+pub mod context_proxy;
 pub mod error;
 pub mod filesystem;
+pub mod git_utils;
 pub mod import_export;
 pub mod loader;
 pub mod migrate_settings;
@@ -42,3 +45,8 @@ pub use provider_settings_manager::{
     ProviderProfiles as ProviderSettingsProfiles, MigrationState,
 };
 pub use safe_write_json::{safe_write_json, SafeWriteJsonError, SafeWriteJsonOptions};
+pub use context_proxy::{
+    ContextProxy, StateStore, InMemoryStateStore,
+    is_pass_through_state_key, PASS_THROUGH_STATE_KEYS,
+    GLOBAL_STATE_KEYS, SECRET_STATE_KEYS, GLOBAL_SECRET_KEYS,
+};

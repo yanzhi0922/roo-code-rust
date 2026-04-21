@@ -33,6 +33,7 @@ pub mod ask_say;
 pub mod native_tool_call_parser;
 pub mod task_lifecycle;
 pub mod debug_log;
+pub mod present_assistant_message;
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -60,3 +61,10 @@ pub use ask_say::{AskSayHandler, AskResponse, AskResult, AskIgnoredError, SayOpt
 pub use task_lifecycle::{TaskLifecycle, ServiceRefs};
 
 pub use debug_log::{set_debug_log_enabled, is_debug_log_enabled, debug_log, DebugLogger};
+pub use present_assistant_message::{
+    PresentAssistantMessage, PresentAssistantMessageState, PresentAssistantMessageError,
+    ToolResult, ToolCallbacks, ApprovalFeedback, ImageBlock, BlockProcessingResult,
+    strip_thinking_tags, sanitize_tool_use_id, format_tool_error, format_tool_denied,
+    format_tool_denied_with_feedback, format_tool_approved_with_feedback, format_tool_result,
+    is_file_modifying_tool,
+};

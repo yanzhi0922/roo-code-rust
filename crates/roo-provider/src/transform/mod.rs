@@ -14,6 +14,9 @@ pub mod openai_format;
 pub mod r1_zai_format;
 pub mod reasoning;
 pub mod responses_api;
+pub mod responses_api_stream;
+pub mod stream;
+pub mod vscode_lm_format;
 
 pub use anthropic_filter::filter_non_anthropic_blocks;
 pub use gemini_format::{

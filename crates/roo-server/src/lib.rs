@@ -43,11 +43,18 @@
 //! server.serve_stdio().await?;
 //! ```
 
+pub mod aggregate_task_costs;
+pub mod checkpoint_restore_handler;
+pub mod diagnostics_handler;
 pub mod error;
+pub mod generate_system_prompt;
 pub mod handler;
+pub mod message_enhancer;
 pub mod router;
 pub mod server;
+pub mod skills_message_handler;
 pub mod transport;
+pub mod webview_message_handler;
 
 pub use error::ServerResult;
 pub use router::Router;

@@ -5,6 +5,7 @@
 //! Provides mode selection, tool mapping, helper functions, and file restriction
 //! checking. Derived from `src/shared/modes.ts`.
 
+pub mod custom_modes_manager;
 pub mod helpers;
 pub mod restriction;
 pub mod selection;
@@ -18,3 +19,7 @@ pub use helpers::{
 pub use restriction::{check_file_restriction, FileRestrictionError};
 pub use selection::{get_mode_selection, ModeSelection};
 pub use tools::{get_group_name, get_tools_for_mode};
+pub use custom_modes_manager::{
+    CustomModesManager, RuleFile, ExportedModeConfig, ExportResult, ImportResult,
+    ROOMODES_FILENAME, CACHE_TTL_MS,
+};
