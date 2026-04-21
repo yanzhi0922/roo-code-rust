@@ -10,3 +10,5 @@ description = "Telemetry service for Roo Code Rust"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }

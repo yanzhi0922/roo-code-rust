@@ -46,6 +46,8 @@ pub mod metadata;
 pub mod storage;
 pub mod history;
 pub mod task_history_store;
+pub mod consolidate_token_usage;
+pub mod safe_json_parse;
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -67,3 +69,10 @@ pub use storage::{OsFileSystem, TaskFileSystem, api_messages_path, ensure_task_d
 pub use history::{delete_task, get_history_item, list_history, search_history};
 
 pub use task_history_store::{TaskHistoryStore, TaskHistoryStoreOptions};
+
+pub use consolidate_token_usage::{
+    consolidate_token_usage, has_token_usage_changed, TokenUsage, ClineMessageRef,
+    ParsedApiReqStartedText,
+};
+
+pub use safe_json_parse::{safe_json_parse, safe_json_parse_or};

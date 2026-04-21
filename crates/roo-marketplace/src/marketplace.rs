@@ -160,6 +160,7 @@ mod tests {
             url: format!("https://example.com/{id}"),
             tags: vec!["test".to_string()],
             installed: false,
+            extra: serde_json::Map::new(),
         }
     }
 

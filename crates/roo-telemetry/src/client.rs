@@ -82,6 +82,16 @@ impl BaseTelemetryClient {
     pub fn is_debug(&self) -> bool {
         self.debug
     }
+
+    /// Check if telemetry is currently enabled.
+    pub fn is_telemetry_enabled(&self) -> bool {
+        self.telemetry_enabled
+    }
+
+    /// Set telemetry enabled state.
+    pub fn set_telemetry_enabled(&mut self, enabled: bool) {
+        self.telemetry_enabled = enabled;
+    }
 }
 
 impl TelemetryClient for BaseTelemetryClient {

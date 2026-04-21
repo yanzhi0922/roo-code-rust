@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Types of items available in the marketplace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +21,10 @@ pub struct MarketplaceItem {
     pub url: String,
     pub tags: Vec<String>,
     pub installed: bool,
+    /// Extra fields such as `content`, `parameters`, etc.
+    /// Stored as a JSON map to support flexible marketplace item data.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Response payload containing a list of marketplace items.
@@ -109,6 +114,7 @@ mod tests {
             url: "https://example.com".to_string(),
             tags: vec!["test".to_string()],
             installed: false,
+            extra: serde_json::Map::new(),
         };
         let json = serde_json::to_string(&item).unwrap();
         let deserialized: MarketplaceItem = serde_json::from_str(&json).unwrap();
@@ -161,6 +167,7 @@ mod tests {
                     url: "https://example.com/1".to_string(),
                     tags: vec![],
                     installed: false,
+                    extra: serde_json::Map::new(),
                 },
             ],
         };

@@ -32,6 +32,7 @@ pub mod task_manager;
 pub mod ask_say;
 pub mod native_tool_call_parser;
 pub mod task_lifecycle;
+pub mod debug_log;
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -57,3 +58,5 @@ pub use agent_loop::{AgentLoop, AgentLoopConfig};
 pub use task_manager::TaskManager;
 pub use ask_say::{AskSayHandler, AskResponse, AskResult, AskIgnoredError, SayOptions};
 pub use task_lifecycle::{TaskLifecycle, ServiceRefs};
+
+pub use debug_log::{set_debug_log_enabled, is_debug_log_enabled, debug_log, DebugLogger};
