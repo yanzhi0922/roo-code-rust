@@ -1860,6 +1860,7 @@ pub struct PresentAssistantMessageProcessor {
     /// The tool dispatcher for executing tools.
     dispatcher: ToolDispatcher,
     /// The tool call validator.
+    #[allow(dead_code)]
     validator: ToolCallValidator,
     /// The auto-approval checker.
     auto_approval: AutoApprovalChecker,

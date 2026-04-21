@@ -45,6 +45,7 @@ pub mod api_messages;
 pub mod metadata;
 pub mod storage;
 pub mod history;
+pub mod task_history_store;
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -64,3 +65,5 @@ pub use metadata::{compute_history_item, compute_task_metadata};
 pub use storage::{OsFileSystem, TaskFileSystem, api_messages_path, ensure_task_dir, messages_path, metadata_path, task_dir};
 
 pub use history::{delete_task, get_history_item, list_history, search_history};
+
+pub use task_history_store::{TaskHistoryStore, TaskHistoryStoreOptions};

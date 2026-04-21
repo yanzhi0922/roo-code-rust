@@ -57,6 +57,7 @@ impl TagMatcher {
     }
 
     /// Flush any remaining buffered content.
+    #[allow(dead_code)]
     pub fn finalize(&mut self) -> Vec<TagResult> {
         let mut out = self.drain_completed();
         if !self.buffer.is_empty() {

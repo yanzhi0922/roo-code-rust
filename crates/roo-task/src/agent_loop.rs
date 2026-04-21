@@ -565,7 +565,8 @@ impl AgentLoop {
                     context_window_retries,
                 ).await {
                     AttemptResult::Ok { parsed, context_window_retries: cwr } => {
-                        context_window_retries = cwr;
+                        #[allow(unused_assignments)]
+                        { context_window_retries = cwr; }
                         break parsed;
                     }
                     AttemptResult::FirstChunkFailed { error, context_window_retries: cwr } => {
