@@ -169,6 +169,14 @@ pub enum TaskEvent {
     /// Streaming response completed.
     /// Source: TS `recursivelyMakeClineRequests()` — after stream ends
     StreamingCompleted { task_id: String },
+
+    // --- Rate limit events ---
+    /// Rate limit countdown tick.
+    /// Source: TS `maybeWaitForProviderRateLimit()` → `say("api_req_rate_limit_wait")`
+    ApiRateLimitWait {
+        task_id: String,
+        seconds: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------

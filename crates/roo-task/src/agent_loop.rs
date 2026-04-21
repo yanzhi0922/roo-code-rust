@@ -325,8 +325,6 @@ pub struct AgentLoop {
     repetition_detector: ToolRepetitionDetector,
     /// Checkpoint service for file-modifying tools.
     checkpoint_service: Option<ShadowCheckpointService>,
-    /// Rate limiter: tracks request timestamps for RPM limiting.
-    rate_limit_timestamps: Vec<Instant>,
     /// Cancellation token for mid-stream abort.
     ///
     /// When cancelled, the spawned stream-consumer task will stop
@@ -374,7 +372,6 @@ impl AgentLoop {
             config: AgentLoopConfig::default(),
             repetition_detector: ToolRepetitionDetector::with_default_limit(),
             checkpoint_service: None,
-            rate_limit_timestamps: Vec::new(),
             cancellation_token: CancellationToken::new(),
             present_assistant_message: PresentAssistantMessage::with_mistake_limit(mistake_limit),
             diff_view_provider: None,
@@ -619,7 +616,7 @@ impl AgentLoop {
             // Step 3: Rate limit wait
             // TS: await this.maybeWaitForProviderRateLimit()
             // ---------------------------------------------------------------
-            self.maybe_wait_for_rate_limit().await;
+            self.maybe_wait_for_rate_limit(current_item.retry_attempt).await;
 
             // TS L2586: Task.lastGlobalApiRequestTime = performance.now()
             // Set the timestamp right after rate limit wait to reserve this slot
@@ -1857,46 +1854,46 @@ impl AgentLoop {
     // 5. maybe_wait_for_rate_limit() — TS line 3959-3985
     // ===================================================================
 
-    /// Wait if the rate limit has been reached.
+    /// Enforce the user-configured provider rate limit.
     ///
     /// Source: `src/core/task/Task.ts` — `maybeWaitForProviderRateLimit()`
     /// lines 3959-3985.
     ///
-    /// Implements a simple sliding window rate limiter: tracks request
-    /// timestamps and waits if the number of requests in the last minute
-    /// exceeds the configured RPM limit.
-    async fn maybe_wait_for_rate_limit(&mut self) {
-        let rpm = self.config.rate_limit_rpm;
-        if rpm == 0 {
+    /// Uses `rate_limit_rpm` (reused as `rateLimitSeconds`) from config and
+    /// `last_global_api_request_time` to calculate the remaining delay.
+    /// Shows countdown UX only on the first attempt (retryAttempt === 0).
+    async fn maybe_wait_for_rate_limit(&mut self, retry_attempt: u32) {
+        // TS: const rateLimitSeconds = state?.apiConfiguration?.rateLimitSeconds ?? 0
+        let rate_limit_seconds = self.config.rate_limit_rpm as u64; // Reuse as rateLimitSeconds
+
+        // TS: if (rateLimitSeconds <= 0 || !Task.lastGlobalApiRequestTime) { return }
+        if rate_limit_seconds == 0 || self.last_global_api_request_time.is_none() {
             return;
         }
 
+        let last_request_time = self.last_global_api_request_time.unwrap();
         let now = Instant::now();
-        let one_minute = std::time::Duration::from_secs(60);
+        let elapsed = now.duration_since(last_request_time);
+        let rate_limit_duration = std::time::Duration::from_secs(rate_limit_seconds);
 
-        // Remove timestamps older than 1 minute
-        self.rate_limit_timestamps.retain(|&ts| now.duration_since(ts) < one_minute);
+        // TS: const rateLimitDelay = Math.ceil(
+        //   Math.min(rateLimitSeconds, Math.max(0, rateLimitSeconds * 1000 - timeSinceLastRequest) / 1000),
+        // )
+        let remaining = rate_limit_duration.saturating_sub(elapsed);
+        let rate_limit_delay_secs = std::cmp::min(rate_limit_seconds, remaining.as_secs());
 
-        // Check if we've hit the limit
-        if self.rate_limit_timestamps.len() >= rpm as usize {
-            if let Some(&oldest) = self.rate_limit_timestamps.first() {
-                let elapsed = now.duration_since(oldest);
-                let wait_time = one_minute.saturating_sub(elapsed);
-                if !wait_time.is_zero() {
-                    info!(
-                        rpm_limit = rpm,
-                        wait_ms = wait_time.as_millis(),
-                        "Rate limit reached, waiting"
-                    );
-                    tokio::time::sleep(wait_time).await;
-                }
+        // TS: Only show the countdown UX on the first attempt.
+        // Retry flows have their own delay messaging.
+        if rate_limit_delay_secs > 0 && retry_attempt == 0 {
+            for i in (1..=rate_limit_delay_secs).rev() {
+                // TS: await this.say("api_req_rate_limit_wait", JSON.stringify({ seconds: i }), ...)
+                self.engine.emitter().emit(&crate::events::TaskEvent::ApiRateLimitWait {
+                    task_id: self.engine.config().task_id.clone(),
+                    seconds: i,
+                });
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            let now = Instant::now();
-            self.rate_limit_timestamps.retain(|&ts| now.duration_since(ts) < one_minute);
         }
-
-        // Record this request
-        self.rate_limit_timestamps.push(Instant::now());
     }
 
     // ===================================================================
@@ -2070,69 +2067,67 @@ impl AgentLoop {
     ///    through with their content intact.
     /// 4. **Image stripping** — Images are removed if the model doesn't support them.
     /// 5. **Empty message filtering** — Messages with no content are removed.
+    /// Build a clean conversation history for API requests.
+    ///
+    /// Source: `src/core/task/Task.ts` — `buildCleanConversationHistory` (L4458-4598)
+    ///
+    /// Handles:
+    /// - Standalone reasoning messages (skip — stored for history, not sent to API)
+    /// - Encrypted reasoning (Thinking/RedactedThinking blocks with signature)
+    /// - Plain text reasoning (Thinking blocks without signature) with preserveReasoning flag
+    /// - Default assistant and user messages
     fn build_clean_conversation_history(&self) -> Vec<roo_types::api::ApiMessage> {
         let history = self.engine.api_conversation_history();
         let supports_images = self.message_builder.supports_images();
-        let preserve_reasoning = false; // TODO: get from model info when available
+
+        // TS L4562: this.api.getModel().info.preserveReasoning === true
+        let (_, model_info) = self.provider.get_model();
+        let preserve_reasoning = model_info.preserve_reasoning.unwrap_or(false);
 
         let mut clean: Vec<roo_types::api::ApiMessage> = Vec::with_capacity(history.len());
 
         for msg in history {
             // --- Standalone reasoning message ---
-            // TS: if (msg.type === "reasoning") { ... }
-            // In Rust, we detect standalone reasoning by checking if the message
-            // has reasoning content but no regular text/tool content.
+            // TS L4474-4484: if (msg.type === "reasoning") { ... continue }
+            // In Rust, standalone reasoning is detected by reasoning field + empty content.
+            // TS only preserves encrypted_content standalone reasoning; skips plain text.
+            // Since Rust doesn't distinguish encrypted from plain at the message level,
+            // we skip all standalone reasoning (stored for history, not sent to API).
             if msg.reasoning.is_some() && msg.content.is_empty() {
-                let reasoning_text = msg.reasoning.as_ref().unwrap();
-
-                // If reasoning looks like encrypted content (base64-like), preserve it
-                // as a separate reasoning item. Otherwise skip it (plain text reasoning
-                // is stored for history only, not sent back to API).
-                let is_encrypted = reasoning_text.len() > 20
-                    && !reasoning_text.chars().all(|c| c.is_ascii_graphic() || c == '\n');
-
-                if is_encrypted {
-                    // Emit as a reasoning-only message
-                    clean.push(roo_types::api::ApiMessage {
-                        role: msg.role.clone(),
-                        content: vec![roo_types::api::ContentBlock::Text {
-                            text: format!("[reasoning]{}", reasoning_text),
-                        }],
-                        reasoning: msg.reasoning.clone(),
-                        ts: msg.ts,
-                        truncation_parent: msg.truncation_parent.clone(),
-                        is_truncation_marker: msg.is_truncation_marker,
-                        truncation_id: msg.truncation_id.clone(),
-                        condense_parent: msg.condense_parent.clone(),
-                        is_summary: msg.is_summary,
-                        condense_id: msg.condense_id.clone(),
-                    });
-                }
-                // Plain text standalone reasoning: skip (stored for history, not sent to API)
                 continue;
             }
 
             // --- Assistant message with content ---
+            // TS L4487-4586: if (msg.role === "assistant") { ... }
             if msg.role == roo_types::api::MessageRole::Assistant && !msg.content.is_empty() {
                 let raw_content = &msg.content;
-
-                // Check if the first content block is a thinking/reasoning block
                 let first = &raw_content[0];
-                let is_thinking_block = matches!(
+                let rest = &raw_content[1..];
+
+                // TS L4525-4528: Check for encrypted reasoning
+                // (first block is "reasoning" with encrypted_content)
+                // In Rust: Thinking block with non-empty signature, or RedactedThinking
+                let has_encrypted_reasoning = match first {
+                    roo_types::api::ContentBlock::Thinking { signature, .. } => !signature.is_empty(),
+                    roo_types::api::ContentBlock::RedactedThinking { .. } => true,
+                    _ => false,
+                };
+
+                // TS L4527-4528: Check for plain text reasoning
+                // (first block is "reasoning" with text property)
+                // In Rust: Thinking block with non-empty thinking but empty signature
+                let has_plain_text_reasoning = matches!(
                     first,
-                    roo_types::api::ContentBlock::Thinking { .. }
-                        | roo_types::api::ContentBlock::RedactedThinking { .. }
+                    roo_types::api::ContentBlock::Thinking { thinking, signature }
+                        if !thinking.is_empty() && signature.is_empty()
                 );
 
-                if is_thinking_block {
-                    // Embedded encrypted reasoning (Thinking/RedactedThinking)
-                    // TS: hasEncryptedReasoning path
-                    let rest = &raw_content[1..];
-
-                    // Build clean assistant content without the reasoning block
+                if has_encrypted_reasoning {
+                    // TS L4530-4557: Encrypted reasoning path
+                    // TS pushes a separate reasoning item + assistant message without reasoning.
+                    // In Rust, we keep the thinking block if preserve_reasoning, else strip it.
                     let clean_content = Self::build_assistant_content(rest, supports_images);
 
-                    // If the model preserves reasoning, include the thinking block
                     let final_content = if preserve_reasoning {
                         let mut with_reasoning = vec![first.clone()];
                         with_reasoning.extend(clean_content);
@@ -2144,7 +2139,7 @@ impl AgentLoop {
                     clean.push(roo_types::api::ApiMessage {
                         role: msg.role.clone(),
                         content: final_content,
-                        reasoning: None, // Reasoning separated out
+                        reasoning: None,
                         ts: msg.ts,
                         truncation_parent: msg.truncation_parent.clone(),
                         is_truncation_marker: msg.is_truncation_marker,
@@ -2154,17 +2149,21 @@ impl AgentLoop {
                         condense_id: msg.condense_id.clone(),
                     });
                     continue;
-                }
+                } else if has_plain_text_reasoning {
+                    // TS L4558-4585: Plain text reasoning path
+                    // Check preserveReasoning flag from model info.
+                    let final_content = if preserve_reasoning {
+                        // TS L4567: Include reasoning block in the content sent to API
+                        raw_content.clone()
+                    } else {
+                        // TS L4569-4576: Strip reasoning out
+                        Self::build_assistant_content(rest, supports_images)
+                    };
 
-                // Check for reasoning field on assistant message (OpenRouter/Gemini format)
-                // TS: msgWithDetails.reasoning_details path
-                if msg.reasoning.is_some() {
-                    // Include reasoning in the message for providers that support it
-                    let clean_content = Self::build_assistant_content(raw_content, supports_images);
                     clean.push(roo_types::api::ApiMessage {
                         role: msg.role.clone(),
-                        content: clean_content,
-                        reasoning: msg.reasoning.clone(),
+                        content: final_content,
+                        reasoning: None,
                         ts: msg.ts,
                         truncation_parent: msg.truncation_parent.clone(),
                         is_truncation_marker: msg.is_truncation_marker,
@@ -2182,7 +2181,7 @@ impl AgentLoop {
                     clean.push(roo_types::api::ApiMessage {
                         role: msg.role.clone(),
                         content: clean_content,
-                        reasoning: None,
+                        reasoning: msg.reasoning.clone(),
                         ts: msg.ts,
                         truncation_parent: msg.truncation_parent.clone(),
                         is_truncation_marker: msg.is_truncation_marker,
@@ -2196,7 +2195,7 @@ impl AgentLoop {
             }
 
             // --- Default path: regular messages (user, tool_result) ---
-            // TS: if (msg.role) { cleanConversationHistory.push({ role, content }) }
+            // TS L4589-4594: if (msg.role) { push { role, content } }
             let clean_content = Self::filter_content_blocks(&msg.content, supports_images);
             if !clean_content.is_empty() {
                 clean.push(roo_types::api::ApiMessage {
@@ -3734,9 +3733,9 @@ mod tests {
                 ..AgentLoopConfig::default()
             });
 
-        agent.maybe_wait_for_rate_limit().await;
-        agent.maybe_wait_for_rate_limit().await;
-        agent.maybe_wait_for_rate_limit().await;
+        agent.maybe_wait_for_rate_limit(0).await;
+        agent.maybe_wait_for_rate_limit(0).await;
+        agent.maybe_wait_for_rate_limit(0).await;
     }
 
     // --- Issue #7: Backoff with jitter tests ---
