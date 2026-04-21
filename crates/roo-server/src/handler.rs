@@ -1603,6 +1603,14 @@ fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Messag
             "streamingToolUseDelta",
             json!({"taskId": task_id, "toolId": tool_id, "delta": delta}),
         ),
+        TaskEvent::Error { task_id: _tid, error } => (
+            "error",
+            json!({"taskId": task_id, "error": error}),
+        ),
+        TaskEvent::ApiRateLimitWait { task_id: _tid, seconds } => (
+            "apiRateLimitWait",
+            json!({"taskId": task_id, "seconds": seconds}),
+        ),
     };
 
     Some(Message::notification(

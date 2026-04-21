@@ -235,6 +235,13 @@ impl AnthropicHandler {
         let mut current_tool_name: Option<String> = Option::None;
         let mut current_tool_args: String = String::new();
         let mut usage_info: Option<AnthropicUsage> = Option::None;
+        let mut prev_block_index: Option<u64> = Option::None;
+        let mut prev_block_was_thinking: bool = false;
+        let mut prev_block_was_text: bool = false;
+        let mut total_input_tokens: u64 = 0;
+        let mut total_output_tokens: u64 = 0;
+        let mut total_cache_write_tokens: u64 = 0;
+        let mut total_cache_read_tokens: u64 = 0;
 
         let processed = stream.flat_map(move |event_result| {
             let model_info = model_info.clone();
@@ -243,6 +250,13 @@ impl AnthropicHandler {
             let mut tool_name = current_tool_name.clone();
             let mut tool_args = current_tool_args.clone();
             let mut usage = usage_info.clone();
+            let mut prev_idx = prev_block_index;
+            let mut prev_thinking = prev_block_was_thinking;
+            let mut prev_text = prev_block_was_text;
+            let mut acc_input = total_input_tokens;
+            let mut acc_output = total_output_tokens;
+            let mut acc_cache_write = total_cache_write_tokens;
+            let mut acc_cache_read = total_cache_read_tokens;
 
             let chunks: Vec<Result<ApiStreamChunk>> = match event_result {
                 Ok(event) => {
@@ -250,7 +264,8 @@ impl AnthropicHandler {
 
                     match event {
                         AnthropicSseEvent::ContentBlockStart {
-                            content_block, ..
+                            index,
+                            content_block,
                         } => {
                             match content_block {
                                 crate::types::AnthropicContentBlock::ToolUse {
@@ -261,14 +276,50 @@ impl AnthropicHandler {
                                     tool_id = Some(id.clone());
                                     tool_name = Some(name.clone());
                                     tool_args = String::new();
-                                    results.push(Ok(ApiStreamChunk::ToolCallStart {
-                                        id: id.clone(),
-                                        name,
+                                    // Emit tool_call_partial matching TS behavior
+                                    results.push(Ok(ApiStreamChunk::ToolCallPartial {
+                                        index,
+                                        id: Some(id.clone()),
+                                        name: Some(name.clone()),
+                                        arguments: None,
                                     }));
                                 }
-                                crate::types::AnthropicContentBlock::Text { .. } => {}
-                                crate::types::AnthropicContentBlock::Thinking { .. } => {}
+                                crate::types::AnthropicContentBlock::Text { text } => {
+                                    // TS emits text at content_block_start with newline
+                                    // separator between multiple text blocks
+                                    if prev_text && prev_idx.map_or(false, |p| p > 0) {
+                                        results.push(Ok(ApiStreamChunk::Text {
+                                            text: "\n".to_string(),
+                                        }));
+                                    }
+                                    if !text.is_empty() {
+                                        results.push(Ok(ApiStreamChunk::Text {
+                                            text: text.clone(),
+                                        }));
+                                    }
+                                    prev_text = true;
+                                    prev_thinking = false;
+                                }
+                                crate::types::AnthropicContentBlock::Thinking { thinking } => {
+                                    // TS emits reasoning at content_block_start with newline
+                                    // separator between multiple thinking blocks
+                                    if prev_thinking && prev_idx.map_or(false, |p| p > 0) {
+                                        results.push(Ok(ApiStreamChunk::Reasoning {
+                                            text: "\n".to_string(),
+                                            signature: None,
+                                        }));
+                                    }
+                                    if !thinking.is_empty() {
+                                        results.push(Ok(ApiStreamChunk::Reasoning {
+                                            text: thinking.clone(),
+                                            signature: None,
+                                        }));
+                                    }
+                                    prev_thinking = true;
+                                    prev_text = false;
+                                }
                             }
+                            prev_idx = Some(index);
                         }
                         AnthropicSseEvent::ContentBlockDelta { delta, .. } => match delta {
                             AnthropicDelta::TextDelta { text } => {
@@ -282,10 +333,13 @@ impl AnthropicHandler {
                             }
                             AnthropicDelta::InputJsonDelta { partial_json } => {
                                 tool_args.push_str(&partial_json);
-                                if let Some(ref id) = tool_id {
-                                    results.push(Ok(ApiStreamChunk::ToolCallDelta {
-                                        id: id.clone(),
-                                        delta: partial_json,
+                                if let Some(ref _id) = tool_id {
+                                    // Emit tool_call_partial matching TS behavior
+                                    results.push(Ok(ApiStreamChunk::ToolCallPartial {
+                                        index: idx,
+                                        id: None,
+                                        name: None,
+                                        arguments: Some(partial_json),
                                     }));
                                 }
                             }
@@ -311,13 +365,46 @@ impl AnthropicHandler {
                         }
                         AnthropicSseEvent::MessageDelta { delta, usage: msg_usage } => {
                             let _ = delta;
-                            if let Some(u) = msg_usage {
-                                usage = Some(u);
+                            if let Some(ref u) = msg_usage {
+                                // TS emits usage at message_delta for output_tokens
+                                let output_tokens = u.output_tokens.unwrap_or(0);
+                                if output_tokens > 0 {
+                                    results.push(Ok(ApiStreamChunk::Usage {
+                                        input_tokens: 0,
+                                        output_tokens,
+                                        cache_write_tokens: None,
+                                        cache_read_tokens: None,
+                                        reasoning_tokens: None,
+                                        total_cost: None,
+                                    }));
+                                    acc_output += output_tokens;
+                                }
+                                usage = Some(u.clone());
                             }
                         }
                         AnthropicSseEvent::MessageStart { message } => {
-                            if let Some(u) = message.usage {
-                                usage = Some(u);
+                            if let Some(ref u) = message.usage {
+                                // TS emits usage at message_start
+                                let input_tokens = u.input_tokens.unwrap_or(0);
+                                let output_tokens = u.output_tokens.unwrap_or(0);
+                                let cache_write = u.cache_creation_input_tokens.unwrap_or(0);
+                                let cache_read = u.cache_read_input_tokens.unwrap_or(0);
+
+                                results.push(Ok(ApiStreamChunk::Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                    cache_write_tokens: if cache_write > 0 { Some(cache_write) } else { None },
+                                    cache_read_tokens: if cache_read > 0 { Some(cache_read) } else { None },
+                                    reasoning_tokens: None,
+                                    total_cost: None,
+                                }));
+
+                                acc_input += input_tokens;
+                                acc_output += output_tokens;
+                                acc_cache_write += cache_write;
+                                acc_cache_read += cache_read;
+
+                                usage = Some(u.clone());
                             }
                         }
                         AnthropicSseEvent::Error { error } => {
@@ -329,9 +416,23 @@ impl AnthropicHandler {
                             }));
                         }
                         AnthropicSseEvent::MessageStop => {
-                            // Emit usage if we have it
-                            if let Some(ref u) = usage {
-                                results.push(Ok(calculate_anthropic_usage(u, &model_info)));
+                            // TS emits total cost at the end
+                            if acc_input > 0 || acc_output > 0 || acc_cache_write > 0 || acc_cache_read > 0 {
+                                let total_cost = roo_provider::cost::calculate_api_cost(
+                                    &model_info,
+                                    acc_input,
+                                    acc_output,
+                                    if acc_cache_write > 0 { Some(acc_cache_write) } else { None },
+                                    if acc_cache_read > 0 { Some(acc_cache_read) } else { None },
+                                );
+                                results.push(Ok(ApiStreamChunk::Usage {
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                    cache_write_tokens: None,
+                                    cache_read_tokens: None,
+                                    reasoning_tokens: None,
+                                    total_cost: Some(total_cost),
+                                }));
                             }
                         }
                         AnthropicSseEvent::Ping => {}
@@ -347,6 +448,13 @@ impl AnthropicHandler {
             current_tool_name = tool_name;
             current_tool_args = tool_args;
             usage_info = usage;
+            prev_block_index = prev_idx;
+            prev_block_was_thinking = prev_thinking;
+            prev_block_was_text = prev_text;
+            total_input_tokens = acc_input;
+            total_output_tokens = acc_output;
+            total_cache_write_tokens = acc_cache_write;
+            total_cache_read_tokens = acc_cache_read;
 
             futures::stream::iter(chunks)
         });
@@ -551,38 +659,6 @@ fn apply_cache_control_to_user_messages(messages: &mut Vec<Value>) {
     }
 }
 
-/// Calculate usage metrics for Anthropic.
-fn calculate_anthropic_usage(usage: &AnthropicUsage, model_info: &ModelInfo) -> ApiStreamChunk {
-    let input_tokens = usage.input_tokens.unwrap_or(0);
-    let output_tokens = usage.output_tokens.unwrap_or(0);
-    let cache_write_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
-    let cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
-
-    let input_cost = model_info.input_price.unwrap_or(0.0) * input_tokens as f64 / 1_000_000.0;
-    let output_cost = model_info.output_price.unwrap_or(0.0) * output_tokens as f64 / 1_000_000.0;
-    let cache_write_cost =
-        model_info.cache_writes_price.unwrap_or(0.0) * cache_write_tokens as f64 / 1_000_000.0;
-    let cache_read_cost =
-        model_info.cache_reads_price.unwrap_or(0.0) * cache_read_tokens as f64 / 1_000_000.0;
-    let total_cost = input_cost + output_cost + cache_write_cost + cache_read_cost;
-
-    ApiStreamChunk::Usage {
-        input_tokens,
-        output_tokens,
-        cache_write_tokens: if cache_write_tokens > 0 {
-            Some(cache_write_tokens)
-        } else {
-            None
-        },
-        cache_read_tokens: if cache_read_tokens > 0 {
-            Some(cache_read_tokens)
-        } else {
-            None
-        },
-        reasoning_tokens: None,
-        total_cost: Some(total_cost),
-    }
-}
 
 #[async_trait]
 impl Provider for AnthropicHandler {
@@ -1383,24 +1459,14 @@ mod tests {
             ..Default::default()
         };
 
-        let result = calculate_anthropic_usage(&usage, &model_info);
-        match result {
-            ApiStreamChunk::Usage {
-                input_tokens,
-                output_tokens,
-                cache_write_tokens,
-                cache_read_tokens,
-                total_cost,
-                ..
-            } => {
-                assert_eq!(input_tokens, 100);
-                assert_eq!(output_tokens, 50);
-                assert_eq!(cache_write_tokens, Some(20));
-                assert_eq!(cache_read_tokens, Some(10));
-                assert!(total_cost.unwrap() > 0.0);
-            }
-            _ => panic!("Expected Usage chunk"),
-        }
+        let total_cost = roo_provider::cost::calculate_api_cost(
+            &model_info,
+            usage.input_tokens.unwrap_or(0),
+            usage.output_tokens.unwrap_or(0),
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        );
+        assert!(total_cost > 0.0);
     }
 
     #[tokio::test]
