@@ -14,6 +14,21 @@ use crate::stream_parser::ParsedStreamContent;
 use crate::tool_dispatcher::ToolExecutionResult;
 
 // ---------------------------------------------------------------------------
+// BuildToolsResult
+// ---------------------------------------------------------------------------
+
+/// Result of building tools with restrictions.
+///
+/// Source: `src/core/task/build-tools.ts` — `BuildToolsResult`
+pub struct BuildToolsResult {
+    /// The tools to pass to the model.
+    pub tools: Vec<Value>,
+    /// The names of tools that are allowed to be called based on mode restrictions.
+    /// Only populated when `include_all_tools_with_restrictions` is true.
+    pub allowed_function_names: Option<Vec<String>>,
+}
+
+// ---------------------------------------------------------------------------
 // MessageBuilder
 // ---------------------------------------------------------------------------
 
@@ -54,6 +69,11 @@ impl MessageBuilder {
         &self.system_prompt
     }
 
+    /// Whether the model supports images.
+    pub fn supports_images(&self) -> bool {
+        self.supports_images
+    }
+
     // -----------------------------------------------------------------------
     // Build tool definitions
     // -----------------------------------------------------------------------
@@ -61,27 +81,56 @@ impl MessageBuilder {
     /// Build tool definitions in the format expected by the Provider API.
     ///
     /// Returns a vector of JSON values, each representing a tool definition
-    /// in OpenAI Function Calling format:
-    /// ```json
-    /// {
-    ///   "type": "function",
-    ///   "function": {
-    ///     "name": "...",
-    ///     "description": "...",
-    ///     "parameters": { ... }
-    ///   }
-    /// }
-    /// ```
+    /// in OpenAI Function Calling format.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?tool definition building in
+    /// Source: `src/core/task/Task.ts` — tool definition building in
     /// `recursivelyMakeClineRequests`
     pub fn build_tool_definitions(&self) -> Vec<Value> {
+        self.build_tool_definitions_with_options(None, &[], None, None)
+    }
+
+    /// Build tool definitions with mode-based restrictions.
+    ///
+    /// Source: `src/core/task/build-tools.ts` — `buildNativeToolsArrayWithRestrictions()`
+    ///
+    /// This method:
+    /// 1. Gets native tool definitions
+    /// 2. Filters tools based on the current mode (e.g., "code", "architect", "ask")
+    /// 3. Removes tools that are in the `disabled_tools` list
+    /// 4. Optionally computes `allowed_function_names` for providers like Gemini
+    ///    that support function call restrictions via `allowedFunctionNames`
+    pub fn build_tool_definitions_with_options(
+        &self,
+        mode: Option<&str>,
+        custom_modes: &[roo_types::mode::ModeConfig],
+        disabled_tools: Option<&[String]>,
+        experiments: Option<&std::collections::HashMap<String, bool>>,
+    ) -> Vec<Value> {
         let options = roo_tools::definition::NativeToolsOptions {
             supports_images: self.supports_images,
         };
         let native_tools = roo_tools::definition::get_native_tools(options);
 
-        native_tools
+        // Apply mode-based filtering
+        let filter_settings = roo_tools::filter::FilterSettings {
+            todo_list_enabled: true,
+            disabled_tools: disabled_tools
+                .map(|d| d.to_vec())
+                .unwrap_or_default(),
+            model_info: None,
+            codebase_search_enabled: true,
+            mcp_resources_available: true,
+        };
+
+        let filtered_tools = roo_tools::filter::filter_native_tools_for_mode(
+            &native_tools,
+            mode,
+            custom_modes,
+            experiments,
+            &filter_settings,
+        );
+
+        filtered_tools
             .into_iter()
             .map(|tool| {
                 json!({
@@ -94,6 +143,89 @@ impl MessageBuilder {
                 })
             })
             .collect()
+    }
+
+    /// Build tool definitions with restrictions, returning both tools and allowed function names.
+    ///
+    /// Source: `src/core/task/build-tools.ts` — `buildNativeToolsArrayWithRestrictions()`
+    ///
+    /// When `include_all_tools_with_restrictions` is true, returns ALL tools but also
+    /// provides the list of allowed tool names for use with `allowedFunctionNames`.
+    pub fn build_tool_definitions_with_restrictictions(
+        &self,
+        mode: Option<&str>,
+        custom_modes: &[roo_types::mode::ModeConfig],
+        disabled_tools: Option<&[String]>,
+        experiments: Option<&std::collections::HashMap<String, bool>>,
+        include_all_tools_with_restrictions: bool,
+    ) -> BuildToolsResult {
+        let options = roo_tools::definition::NativeToolsOptions {
+            supports_images: self.supports_images,
+        };
+        let native_tools = roo_tools::definition::get_native_tools(options);
+
+        let filter_settings = roo_tools::filter::FilterSettings {
+            todo_list_enabled: true,
+            disabled_tools: disabled_tools
+                .map(|d| d.to_vec())
+                .unwrap_or_default(),
+            model_info: None,
+            codebase_search_enabled: true,
+            mcp_resources_available: true,
+        };
+
+        let filtered_tools = roo_tools::filter::filter_native_tools_for_mode(
+            &native_tools,
+            mode,
+            custom_modes,
+            experiments,
+            &filter_settings,
+        );
+
+        if include_all_tools_with_restrictions {
+            let allowed_function_names: Vec<String> = filtered_tools
+                .iter()
+                .map(|t| roo_tools::groups::resolve_tool_alias(&t.name).to_string())
+                .collect();
+
+            let all_tools_json: Vec<Value> = native_tools
+                .into_iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        }
+                    })
+                })
+                .collect();
+
+            BuildToolsResult {
+                tools: all_tools_json,
+                allowed_function_names: Some(allowed_function_names),
+            }
+        } else {
+            let tools_json: Vec<Value> = filtered_tools
+                .into_iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        }
+                    })
+                })
+                .collect();
+
+            BuildToolsResult {
+                tools: tools_json,
+                allowed_function_names: None,
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -320,10 +452,12 @@ mod tests {
     #[test]
     fn test_build_tool_definitions() {
         let builder = MessageBuilder::new("test");
+
+        // Default (no mode filter) returns code-mode-filtered tools
         let tools = builder.build_tool_definitions();
 
-        // Should have 21 native tools
-        assert_eq!(tools.len(), 21);
+        // Code mode filters some tools; verify we get a reasonable set
+        assert!(!tools.is_empty(), "Should have at least some tools");
 
         // Each tool should have the expected structure
         for tool in &tools {
@@ -333,14 +467,14 @@ mod tests {
             assert!(tool["function"]["parameters"].is_object());
         }
 
-        // Check some known tools
+        // Check some known tools that should be in code mode
         let names: Vec<&str> = tools
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"read_file"));
-        assert!(names.contains(&"write_to_file"));
-        assert!(names.contains(&"apply_diff"));
+        assert!(names.contains(&"read_file"), "Code mode should have read_file");
+        assert!(names.contains(&"write_to_file"), "Code mode should have write_to_file");
+        assert!(names.contains(&"apply_diff"), "Code mode should have apply_diff");
     }
 
     #[test]

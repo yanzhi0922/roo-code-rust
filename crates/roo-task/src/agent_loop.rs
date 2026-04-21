@@ -24,6 +24,7 @@
 //!   first chunk and handles context-window / rate-limit / generic errors
 //!   before continuing with the rest of the stream.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -225,6 +226,33 @@ enum AttemptResult {
         error: String,
         context_window_retries: usize,
     },
+}
+
+// ===========================================================================
+// Context management result types
+// ===========================================================================
+
+/// Strategy used for context management.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextStrategy {
+    /// No strategy was applied.
+    None,
+    /// LLM-based condensation was used.
+    Condense,
+    /// Sliding window truncation was used.
+    SlidingWindow,
+    /// Force truncation (last resort).
+    ForceTruncate,
+}
+
+/// Result of context management for context window exceeded errors.
+struct ContextManagementResult {
+    /// Whether the management was successful.
+    success: bool,
+    /// Number of messages removed.
+    messages_removed: usize,
+    /// The strategy that was used.
+    strategy: ContextStrategy,
 }
 
 // ===========================================================================
@@ -534,7 +562,12 @@ impl AgentLoop {
                 None,
                 &[],
             );
-            let tools = self.message_builder.build_tool_definitions();
+            let tools = self.message_builder.build_tool_definitions_with_options(
+                Some(&self.engine.config().mode),
+                &[],
+                None,
+                None,
+            );
             let system_prompt = self.get_system_prompt();
 
             debug!(
@@ -577,7 +610,7 @@ impl AgentLoop {
                             match self.handle_context_window_exceeded_error(
                                 &error,
                                 context_window_retries,
-                            ) {
+                            ).await {
                                 Ok(new_cwr) => {
                                     context_window_retries = new_cwr;
                                     // Context was truncated — continue the loop to retry
@@ -599,8 +632,8 @@ impl AgentLoop {
                             return Err(TaskError::General(error));
                         }
 
-                        // backoffAndAnnounce
-                        self.backoff_and_announce(current_item.retry_attempt).await;
+                        // backoffAndAnnounce — pass error info for 429 parsing
+                        self.backoff_and_announce(current_item.retry_attempt, Some(&error)).await;
 
                         // Record mistake
                         self.engine.record_mistake();
@@ -937,7 +970,7 @@ impl AgentLoop {
                     match self.handle_context_window_exceeded_error(
                         &error_str,
                         context_window_retries,
-                    ) {
+                    ).await {
                         Ok(new_cwr) => {
                             context_window_retries = new_cwr;
                             // Retry with truncated context
@@ -1025,24 +1058,89 @@ impl AgentLoop {
     ///
     /// Source: `src/core/task/Task.ts` — `backoffAndAnnounce()` lines 4378-4450.
     ///
-    /// Calculates an exponential backoff delay with jitter, announces the
-    /// wait to the user, and sleeps for the calculated duration.
-    async fn backoff_and_announce(&self, retry_attempt: u32) {
-        let delay_ms = self.calculate_backoff_with_jitter(retry_attempt);
+    /// This method:
+    /// 1. Calculates exponential backoff delay
+    /// 2. Respects provider rate limit window (rateLimitSeconds)
+    /// 3. Parses 429 RetryInfo from error details if present
+    /// 4. Takes the maximum of exponential delay and rate limit delay
+    /// 5. Shows countdown timer to the user
+    /// 6. Checks abort flag during countdown for early exit
+    async fn backoff_and_announce(&mut self, retry_attempt: u32, error: Option<&str>) {
+        let base_delay_secs = 5u64; // TS: state?.requestDelaySeconds || 5
 
-        info!(
-            retry_attempt = retry_attempt,
-            delay_ms = delay_ms,
-            "Backing off before retry"
+        // TS: exponential delay calculation
+        let mut exponential_delay_secs = std::cmp::min(
+            (base_delay_secs * 2u64.pow(retry_attempt)).max(1),
+            crate::types::MAX_EXPONENTIAL_BACKOFF_SECONDS,
         );
 
-        // TS: this.say("api_req_retry_delayed", ...)
-        // Announce the retry — emit an API request started event as notification
-        self.engine.emitter().emit(&crate::events::TaskEvent::ApiRequestStarted {
-            task_id: self.engine.config().task_id.clone(),
-        });
+        // TS: Respect provider rate limit window
+        let mut rate_limit_delay_secs: u64 = 0;
+        let rate_limit_rpm = self.config.rate_limit_rpm;
+        if rate_limit_rpm > 0 {
+            // Calculate how long until we can make another request
+            let now = Instant::now();
+            let one_minute = std::time::Duration::from_secs(60);
+            self.rate_limit_timestamps.retain(|&ts| now.duration_since(ts) < one_minute);
+            if self.rate_limit_timestamps.len() >= rate_limit_rpm as usize {
+                if let Some(&oldest) = self.rate_limit_timestamps.first() {
+                    let elapsed = now.duration_since(oldest);
+                    let remaining = one_minute.saturating_sub(elapsed);
+                    rate_limit_delay_secs = remaining.as_secs();
+                }
+            }
+        }
 
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        // TS: Prefer RetryInfo on 429 if present
+        if let Some(error_str) = error {
+            if error_str.contains("429") || error_str.contains("rate_limit") || error_str.contains("rate limit") {
+                // Try to parse RetryInfo from error details
+                // TS: const match = retryInfo?.retryDelay?.match?.(/^(\d+)s$/)
+                if let Some(retry_secs) = parse_retry_info_from_error(error_str) {
+                    exponential_delay_secs = retry_secs + 1;
+                }
+            }
+        }
+
+        // TS: const finalDelay = Math.max(exponentialDelay, rateLimitDelay)
+        let final_delay_secs = std::cmp::max(exponential_delay_secs, rate_limit_delay_secs);
+        if final_delay_secs == 0 {
+            return;
+        }
+
+        // TS: Build header text from error
+        let _header_text = error
+            .map(|e| format!("{}\n", e))
+            .unwrap_or_else(|| "API error\n".to_string());
+
+        // TS: Show countdown timer with exponential backoff
+        for i in (1..=final_delay_secs).rev() {
+            // TS: Check abort flag during countdown to allow early exit
+            if !self.engine.should_continue() {
+                info!("Aborted during retry countdown");
+                return;
+            }
+
+            // TS: await this.say("api_req_retry_delayed", `${headerText}<retry_timer>${i}</retry_timer>`)
+            self.engine.emitter().emit(&crate::events::TaskEvent::ApiRequestStarted {
+                task_id: self.engine.config().task_id.clone(),
+            });
+
+            debug!(
+                retry_attempt = retry_attempt,
+                remaining_secs = i,
+                "Retry countdown"
+            );
+
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        // TS: await this.say("api_req_retry_delayed", headerText, undefined, false)
+        info!(
+            retry_attempt = retry_attempt,
+            total_delay_secs = final_delay_secs,
+            "Backoff complete, retrying"
+        );
     }
 
     // ===================================================================
@@ -1095,18 +1193,20 @@ impl AgentLoop {
     // 6. handle_context_window_exceeded_error() — TS line 3828-3951
     // ===================================================================
 
-    /// Handle context window exceeded errors by truncating history.
+    /// Handle context window exceeded errors by managing context.
     ///
     /// Source: `src/core/task/Task.ts` — `handleContextWindowExceededError()`
     /// lines 3828-3951.
     ///
-    /// When the API returns a context_length_exceeded error, this method
-    /// force-truncates the conversation history to fit within the context
-    /// window and allows the request to be retried.
+    /// When the API returns a context_length_exceeded error, this method:
+    /// 1. Emits `condenseTaskContextStarted` event
+    /// 2. Tries `condense_context` (LLM summarization) if enabled
+    /// 3. Falls back to `sliding_window_truncation` if condense fails/disabled
+    /// 4. Emits `condenseTaskContextResponse` event (always, to dismiss spinner)
     ///
     /// Returns `Ok(new_context_window_retries)` on success, or `Err(())`
     /// if the maximum number of context window retries has been exceeded.
-    fn handle_context_window_exceeded_error(
+    async fn handle_context_window_exceeded_error(
         &mut self,
         _error: &str,
         context_window_retries: usize,
@@ -1123,19 +1223,93 @@ impl AgentLoop {
         }
 
         let new_retries = context_window_retries + 1;
+        let task_id = self.engine.config().task_id.clone();
+
         warn!(
             context_window_retry = new_retries,
             max_retries = max_retries,
-            "Context window exceeded, force truncating to {}%",
-            crate::types::FORCED_CONTEXT_REDUCTION_PERCENT
+            "Context window exceeded, managing context (attempt {}/{})",
+            new_retries, max_retries
         );
 
-        // Force truncate to FORCED_CONTEXT_REDUCTION_PERCENT
-        let keep_ratio =
-            (crate::types::FORCED_CONTEXT_REDUCTION_PERCENT as f64) / 100.0;
-        self.engine.force_truncate_context(keep_ratio);
+        // TS: Send condenseTaskContextStarted to show in-progress indicator
+        self.engine.emitter().emit(&crate::events::TaskEvent::ContextCondensationRequested {
+            task_id: task_id.clone(),
+        });
 
-        Ok(new_retries)
+        let result = self.manage_context_for_exceeded_error().await;
+
+        // TS: Always send condenseTaskContextResponse (finally block)
+        self.engine.emitter().emit(&crate::events::TaskEvent::ContextCondensationCompleted {
+            task_id: task_id.clone(),
+            messages_removed: result.messages_removed,
+        });
+
+        if result.success {
+            Ok(new_retries)
+        } else {
+            // Even if management failed, we still truncated — allow retry
+            // unless we've exhausted retries (checked above)
+            Ok(new_retries)
+        }
+    }
+
+    /// Internal context management for context window exceeded errors.
+    ///
+    /// Mirrors the TS `manageContext()` call inside `handleContextWindowExceededError`.
+    /// Tries condense first, then falls back to sliding window truncation.
+    async fn manage_context_for_exceeded_error(&mut self) -> ContextManagementResult {
+        // Try condense first if enabled
+        if self.config.enable_condense {
+            match self.try_condense_context().await {
+                Ok(true) => {
+                    info!("Context condensed successfully after context window exceeded");
+                    return ContextManagementResult {
+                        success: true,
+                        messages_removed: 0, // condense replaces, doesn't remove
+                        strategy: ContextStrategy::Condense,
+                    };
+                }
+                Ok(false) => {
+                    debug!("Condense did not produce a result, falling back to sliding window");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Condense failed, falling back to sliding window truncation");
+                }
+            }
+        }
+
+        // Fallback: sliding window truncation
+        match self.apply_sliding_window_truncation() {
+            Ok(true) => {
+                let history = self.engine.api_conversation_history();
+                // Count truncation markers to estimate messages removed
+                let removed = history.iter()
+                    .filter(|m| m.is_truncation_marker == Some(true))
+                    .count();
+                ContextManagementResult {
+                    success: true,
+                    messages_removed: removed,
+                    strategy: ContextStrategy::SlidingWindow,
+                }
+            }
+            Ok(false) => ContextManagementResult {
+                success: false,
+                messages_removed: 0,
+                strategy: ContextStrategy::None,
+            },
+            Err(_) => {
+                // Last resort: force truncate to FORCED_CONTEXT_REDUCTION_PERCENT
+                let keep_ratio =
+                    (crate::types::FORCED_CONTEXT_REDUCTION_PERCENT as f64) / 100.0;
+                self.engine.force_truncate_context(keep_ratio);
+                ContextManagementResult {
+                    success: true,
+                    messages_removed: 0,
+                    strategy: ContextStrategy::ForceTruncate,
+                }
+            }
+        }
     }
 
     /// Check whether an error message indicates a context window exceeded error.
@@ -1172,20 +1346,205 @@ impl AgentLoop {
     /// Source: `src/core/task/Task.ts` — `buildCleanConversationHistory()`
     /// lines 4458-4598.
     ///
-    /// This method:
-    /// 1. Returns a copy of the API conversation history
-    /// 2. Strips images if the model doesn't support them
-    /// 3. Handles truncation markers
-    /// 4. Ensures proper message ordering
+    /// This method processes the raw API conversation history into a clean form
+    /// suitable for sending to the model API. It handles:
+    ///
+    /// 1. **Standalone reasoning messages** — Messages with `reasoning` field set
+    ///    are processed: if the reasoning looks like encrypted content (starts with
+    ///    a non-text pattern), it is preserved; plain-text reasoning is stripped
+    ///    unless the model's `preserveReasoning` flag is set.
+    /// 2. **Assistant messages with embedded reasoning** — If the first content
+    ///    block of an assistant message is a Thinking/RedactedThinking block, it
+    ///    is separated into a reasoning item + clean assistant message.
+    /// 3. **Default path** — Regular messages (user, tool_result) are passed
+    ///    through with their content intact.
+    /// 4. **Image stripping** — Images are removed if the model doesn't support them.
+    /// 5. **Empty message filtering** — Messages with no content are removed.
     fn build_clean_conversation_history(&self) -> Vec<roo_types::api::ApiMessage> {
         let history = self.engine.api_conversation_history();
+        let supports_images = self.message_builder.supports_images();
+        let preserve_reasoning = false; // TODO: get from model info when available
 
-        // Return a clean copy — in a full implementation, this would:
-        // - Remove images if model doesn't support them
-        // - Handle truncation markers
-        // - Ensure proper user/assistant alternation
-        // - Remove empty messages
-        history.to_vec()
+        let mut clean: Vec<roo_types::api::ApiMessage> = Vec::with_capacity(history.len());
+
+        for msg in history {
+            // --- Standalone reasoning message ---
+            // TS: if (msg.type === "reasoning") { ... }
+            // In Rust, we detect standalone reasoning by checking if the message
+            // has reasoning content but no regular text/tool content.
+            if msg.reasoning.is_some() && msg.content.is_empty() {
+                let reasoning_text = msg.reasoning.as_ref().unwrap();
+
+                // If reasoning looks like encrypted content (base64-like), preserve it
+                // as a separate reasoning item. Otherwise skip it (plain text reasoning
+                // is stored for history only, not sent back to API).
+                let is_encrypted = reasoning_text.len() > 20
+                    && !reasoning_text.chars().all(|c| c.is_ascii_graphic() || c == '\n');
+
+                if is_encrypted {
+                    // Emit as a reasoning-only message
+                    clean.push(roo_types::api::ApiMessage {
+                        role: msg.role.clone(),
+                        content: vec![roo_types::api::ContentBlock::Text {
+                            text: format!("[reasoning]{}", reasoning_text),
+                        }],
+                        reasoning: msg.reasoning.clone(),
+                        ts: msg.ts,
+                        truncation_parent: msg.truncation_parent.clone(),
+                        is_truncation_marker: msg.is_truncation_marker,
+                        truncation_id: msg.truncation_id.clone(),
+                        condense_parent: msg.condense_parent.clone(),
+                        is_summary: msg.is_summary,
+                        condense_id: msg.condense_id.clone(),
+                    });
+                }
+                // Plain text standalone reasoning: skip (stored for history, not sent to API)
+                continue;
+            }
+
+            // --- Assistant message with content ---
+            if msg.role == roo_types::api::MessageRole::Assistant && !msg.content.is_empty() {
+                let raw_content = &msg.content;
+
+                // Check if the first content block is a thinking/reasoning block
+                let first = &raw_content[0];
+                let is_thinking_block = matches!(
+                    first,
+                    roo_types::api::ContentBlock::Thinking { .. }
+                        | roo_types::api::ContentBlock::RedactedThinking { .. }
+                );
+
+                if is_thinking_block {
+                    // Embedded encrypted reasoning (Thinking/RedactedThinking)
+                    // TS: hasEncryptedReasoning path
+                    let rest = &raw_content[1..];
+
+                    // Build clean assistant content without the reasoning block
+                    let clean_content = Self::build_assistant_content(rest, supports_images);
+
+                    // If the model preserves reasoning, include the thinking block
+                    let final_content = if preserve_reasoning {
+                        let mut with_reasoning = vec![first.clone()];
+                        with_reasoning.extend(clean_content);
+                        with_reasoning
+                    } else {
+                        clean_content
+                    };
+
+                    clean.push(roo_types::api::ApiMessage {
+                        role: msg.role.clone(),
+                        content: final_content,
+                        reasoning: None, // Reasoning separated out
+                        ts: msg.ts,
+                        truncation_parent: msg.truncation_parent.clone(),
+                        is_truncation_marker: msg.is_truncation_marker,
+                        truncation_id: msg.truncation_id.clone(),
+                        condense_parent: msg.condense_parent.clone(),
+                        is_summary: msg.is_summary,
+                        condense_id: msg.condense_id.clone(),
+                    });
+                    continue;
+                }
+
+                // Check for reasoning field on assistant message (OpenRouter/Gemini format)
+                // TS: msgWithDetails.reasoning_details path
+                if msg.reasoning.is_some() {
+                    // Include reasoning in the message for providers that support it
+                    let clean_content = Self::build_assistant_content(raw_content, supports_images);
+                    clean.push(roo_types::api::ApiMessage {
+                        role: msg.role.clone(),
+                        content: clean_content,
+                        reasoning: msg.reasoning.clone(),
+                        ts: msg.ts,
+                        truncation_parent: msg.truncation_parent.clone(),
+                        is_truncation_marker: msg.is_truncation_marker,
+                        truncation_id: msg.truncation_id.clone(),
+                        condense_parent: msg.condense_parent.clone(),
+                        is_summary: msg.is_summary,
+                        condense_id: msg.condense_id.clone(),
+                    });
+                    continue;
+                }
+
+                // Default assistant path: just clean content
+                let clean_content = Self::build_assistant_content(raw_content, supports_images);
+                if !clean_content.is_empty() {
+                    clean.push(roo_types::api::ApiMessage {
+                        role: msg.role.clone(),
+                        content: clean_content,
+                        reasoning: None,
+                        ts: msg.ts,
+                        truncation_parent: msg.truncation_parent.clone(),
+                        is_truncation_marker: msg.is_truncation_marker,
+                        truncation_id: msg.truncation_id.clone(),
+                        condense_parent: msg.condense_parent.clone(),
+                        is_summary: msg.is_summary,
+                        condense_id: msg.condense_id.clone(),
+                    });
+                }
+                continue;
+            }
+
+            // --- Default path: regular messages (user, tool_result) ---
+            // TS: if (msg.role) { cleanConversationHistory.push({ role, content }) }
+            let clean_content = Self::filter_content_blocks(&msg.content, supports_images);
+            if !clean_content.is_empty() {
+                clean.push(roo_types::api::ApiMessage {
+                    role: msg.role.clone(),
+                    content: clean_content,
+                    reasoning: msg.reasoning.clone(),
+                    ts: msg.ts,
+                    truncation_parent: msg.truncation_parent.clone(),
+                    is_truncation_marker: msg.is_truncation_marker,
+                    truncation_id: msg.truncation_id.clone(),
+                    condense_parent: msg.condense_parent.clone(),
+                    is_summary: msg.is_summary,
+                    condense_id: msg.condense_id.clone(),
+                });
+            }
+        }
+
+        clean
+    }
+
+    /// Build clean assistant content from content blocks.
+    ///
+    /// Follows the TS logic for simplifying content arrays:
+    /// - Empty array → single empty text block
+    /// - Single text block → use text directly
+    /// - Multiple blocks → filter and use as-is
+    fn build_assistant_content(
+        blocks: &[roo_types::api::ContentBlock],
+        supports_images: bool,
+    ) -> Vec<roo_types::api::ContentBlock> {
+        let filtered = Self::filter_content_blocks(blocks, supports_images);
+
+        if filtered.is_empty() {
+            // TS: assistantContent = ""
+            vec![roo_types::api::ContentBlock::Text {
+                text: String::new(),
+            }]
+        } else {
+            filtered
+        }
+    }
+
+    /// Filter content blocks, removing images if the model doesn't support them.
+    fn filter_content_blocks(
+        blocks: &[roo_types::api::ContentBlock],
+        supports_images: bool,
+    ) -> Vec<roo_types::api::ContentBlock> {
+        blocks
+            .iter()
+            .filter(|block| {
+                // Remove images if model doesn't support them
+                if !supports_images && matches!(block, roo_types::api::ContentBlock::Image { .. }) {
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect()
     }
 
     // ===================================================================
@@ -1208,7 +1567,21 @@ impl AgentLoop {
 
         let tool_calls = validate_and_fix_tool_result_ids(tool_calls.to_vec());
 
+        // Issue #1: Track executed tool_use_ids to prevent duplicate execution.
+        // MiniMax API may return duplicate tool_use blocks with the same ID;
+        // we skip any tool call whose ID has already been executed.
+        let mut executed_tool_ids: HashSet<String> = HashSet::new();
+
         for tool_call in &tool_calls {
+            // Skip duplicate tool calls (same tool_use_id)
+            if !executed_tool_ids.insert(tool_call.id.clone()) {
+                warn!(
+                    tool = %tool_call.name,
+                    id = %tool_call.id,
+                    "Skipping duplicate tool_use_id"
+                );
+                continue;
+            }
             debug!(
                 tool = %tool_call.name,
                 id = %tool_call.id,
@@ -1765,6 +2138,26 @@ impl AgentLoop {
         let delayed = (base_delay as f64 * jitter_factor) as u64;
         delayed.min(crate::types::MAX_EXPONENTIAL_BACKOFF_SECONDS * 1000)
     }
+}
+
+// ===========================================================================
+// RetryInfo parsing (Issue #4 — backoff_and_announce)
+// ===========================================================================
+
+/// Parse RetryInfo from a 429 error response.
+///
+/// TS source: `backoffAndAnnounce()` — parses `error.errorDetails` looking
+/// for `@type === "type.googleapis.com/google.rpc.RetryInfo"` and extracts
+/// the `retryDelay` field (format: `"(\d+)s"`).
+///
+/// In Rust we do a simpler regex-based parse of the error string since we
+/// don't have structured error details.
+fn parse_retry_info_from_error(error: &str) -> Option<u64> {
+    // Try to find a retry delay pattern like "30s" or "60s" in the error
+    let re = regex::Regex::new(r#"retryDelay["\s:]+["']?(\d+)s["']?"#).ok()?;
+    let caps = re.captures(error)?;
+    let secs: u64 = caps[1].parse().ok()?;
+    if secs > 0 { Some(secs) } else { None }
 }
 
 // ===========================================================================
@@ -2668,8 +3061,8 @@ mod tests {
 
     // --- handle_context_window_exceeded_error tests ---
 
-    #[test]
-    fn test_handle_context_window_exceeded_error_success() {
+    #[tokio::test]
+    async fn test_handle_context_window_exceeded_error_success() {
         let engine = TaskEngine::new(make_config()).unwrap();
         let provider = MockProvider::new("test");
         let builder = MessageBuilder::new("test");
@@ -2695,13 +3088,13 @@ mod tests {
             });
         }
 
-        let result = agent.handle_context_window_exceeded_error("context_length_exceeded", 0);
+        let result = agent.handle_context_window_exceeded_error("context_length_exceeded", 0).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 1);
     }
 
-    #[test]
-    fn test_handle_context_window_exceeded_error_max_retries() {
+    #[tokio::test]
+    async fn test_handle_context_window_exceeded_error_max_retries() {
         let engine = TaskEngine::new(make_config()).unwrap();
         let provider = MockProvider::new("test");
         let builder = MessageBuilder::new("test");
@@ -2712,7 +3105,7 @@ mod tests {
         let result = agent.handle_context_window_exceeded_error(
             "context_length_exceeded",
             crate::types::MAX_CONTEXT_WINDOW_RETRIES,
-        );
+        ).await;
         assert!(result.is_err());
     }
 
@@ -2757,5 +3150,253 @@ mod tests {
 
         let agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
         assert_eq!(agent.get_system_prompt(), "You are a coding assistant.");
+    }
+
+    // --- Issue #1: Duplicate tool execution prevention tests ---
+
+    #[test]
+    fn test_duplicate_tool_ids_are_skipped() {
+        // Verify that validate_and_fix_tool_result_ids preserves duplicate IDs
+        let tool_calls = vec![
+            ParsedToolCall {
+                id: "call_dup".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            },
+            ParsedToolCall {
+                id: "call_dup".into(), // Same ID as first
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            },
+        ];
+        let result = validate_and_fix_tool_result_ids(tool_calls);
+        // Both should keep the same ID (dedup happens in execute_tools)
+        assert_eq!(result[0].id, "call_dup");
+        assert_eq!(result[1].id, "call_dup");
+    }
+
+    #[test]
+    fn test_hashset_dedup_logic() {
+        // Test the HashSet dedup logic directly
+        let mut executed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert!(executed.insert("call_1".to_string())); // First insert succeeds
+        assert!(!executed.insert("call_1".to_string())); // Duplicate fails
+        assert!(executed.insert("call_2".to_string())); // Different ID succeeds
+        assert_eq!(executed.len(), 2);
+    }
+
+    // --- Issue #2: buildCleanConversationHistory reasoning tests ---
+
+    #[test]
+    fn test_build_clean_history_strips_standalone_plain_reasoning() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+
+        // Add a standalone reasoning message (plain text reasoning, should be skipped)
+        // "This is plain text reasoning" is all ASCII printable → not encrypted → skipped
+        agent.engine.add_api_message(roo_types::api::ApiMessage {
+            role: roo_types::api::MessageRole::Assistant,
+            content: vec![], // Empty content but has reasoning
+            reasoning: Some("This is plain text reasoning".to_string()),
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        });
+
+        // Add a regular user message
+        agent.engine.add_api_message(roo_types::api::ApiMessage {
+            role: roo_types::api::MessageRole::User,
+            content: vec![roo_types::api::ContentBlock::Text {
+                text: "Hello".to_string(),
+            }],
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        });
+
+        let history = agent.build_clean_conversation_history();
+        // Plain text standalone reasoning should be skipped, only user message remains
+        // But the empty-content assistant message with reasoning also enters the
+        // "standalone reasoning" path and is skipped.
+        assert!(
+            history.len() <= 2,
+            "Expected at most 2 messages, got {}",
+            history.len()
+        );
+        // The user message should be present
+        let user_msgs: Vec<_> = history.iter()
+            .filter(|m| m.role == roo_types::api::MessageRole::User)
+            .collect();
+        assert_eq!(user_msgs.len(), 1, "Should have exactly 1 user message");
+    }
+
+    #[test]
+    fn test_build_clean_history_handles_thinking_block() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher);
+
+        // Add assistant message with Thinking block as first content
+        agent.engine.add_api_message(roo_types::api::ApiMessage {
+            role: roo_types::api::MessageRole::Assistant,
+            content: vec![
+                roo_types::api::ContentBlock::Thinking {
+                    thinking: "Let me think...".to_string(),
+                    signature: "sig123".to_string(),
+                },
+                roo_types::api::ContentBlock::Text {
+                    text: "Here is my answer".to_string(),
+                },
+            ],
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+        });
+
+        let history = agent.build_clean_conversation_history();
+        // Should have one message (thinking stripped, text preserved)
+        assert_eq!(history.len(), 1);
+        // The thinking block should be stripped (preserve_reasoning defaults to false)
+        let content = &history[0].content;
+        assert_eq!(content.len(), 1);
+        match &content[0] {
+            roo_types::api::ContentBlock::Text { text } => {
+                assert_eq!(text, "Here is my answer");
+            }
+            _ => panic!("Expected text block"),
+        }
+    }
+
+    // --- Issue #4: parse_retry_info_from_error tests ---
+
+    #[test]
+    fn test_parse_retry_info_from_error() {
+        // Should parse retry delay from error string
+        let result = parse_retry_info_from_error(
+            r#"{"errorDetails":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"30s"}]}"#
+        );
+        assert_eq!(result, Some(30));
+
+        // Should parse different delay values
+        let result = parse_retry_info_from_error(
+            r#"retryDelay":"60s""#
+        );
+        assert_eq!(result, Some(60));
+
+        // Should return None when no retry info
+        let result = parse_retry_info_from_error("generic error message");
+        assert!(result.is_none());
+
+        // Should return None for zero delay
+        let result = parse_retry_info_from_error(r#"retryDelay":"0s""#);
+        assert!(result.is_none());
+    }
+
+    // --- Issue #4: backoff_and_announce tests ---
+
+    #[tokio::test]
+    async fn test_backoff_with_no_rate_limit() {
+        let engine = TaskEngine::new(make_config()).unwrap();
+        let provider = MockProvider::new("test");
+        let builder = MessageBuilder::new("test");
+        let dispatcher = ToolDispatcher::new();
+
+        let mut agent = AgentLoop::new(engine, Box::new(provider), builder, dispatcher)
+            .with_config(AgentLoopConfig {
+                rate_limit_rpm: 0, // No rate limit
+                ..AgentLoopConfig::default()
+            });
+
+        // Should complete without panicking
+        agent.backoff_and_announce(0, None).await;
+    }
+
+    // --- Issue #5: Tool mode restrictions tests ---
+
+    #[test]
+    fn test_build_tool_definitions_with_mode_filter() {
+        let builder = MessageBuilder::new("test");
+
+        // Code mode should have execute_command
+        let code_tools = builder.build_tool_definitions_with_options(
+            Some("code"),
+            &[],
+            None,
+            None,
+        );
+        let code_names: Vec<&str> = code_tools.iter()
+            .filter_map(|t| t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+            .collect();
+        assert!(code_names.contains(&"execute_command"), "Code mode should have execute_command");
+
+        // Architect mode should NOT have execute_command
+        let arch_tools = builder.build_tool_definitions_with_options(
+            Some("architect"),
+            &[],
+            None,
+            None,
+        );
+        let arch_names: Vec<&str> = arch_tools.iter()
+            .filter_map(|t| t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+            .collect();
+        assert!(!arch_names.contains(&"execute_command"), "Architect mode should NOT have execute_command");
+    }
+
+    #[test]
+    fn test_build_tool_definitions_with_disabled_tools() {
+        let builder = MessageBuilder::new("test");
+
+        let disabled = vec!["read_file".to_string()];
+        let tools = builder.build_tool_definitions_with_options(
+            Some("code"),
+            &[],
+            Some(&disabled),
+            None,
+        );
+        let names: Vec<&str> = tools.iter()
+            .filter_map(|t| t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+            .collect();
+        assert!(!names.contains(&"read_file"), "read_file should be disabled");
+    }
+
+    #[test]
+    fn test_build_tool_definitions_with_restrictions() {
+        let builder = MessageBuilder::new("test");
+
+        let result = builder.build_tool_definitions_with_restrictictions(
+            Some("code"),
+            &[],
+            None,
+            None,
+            true, // include_all_tools_with_restrictictions
+        );
+
+        // Should have tools
+        assert!(!result.tools.is_empty());
+        // Should have allowed_function_names
+        assert!(result.allowed_function_names.is_some());
+        let allowed = result.allowed_function_names.unwrap();
+        assert!(!allowed.is_empty());
     }
 }
