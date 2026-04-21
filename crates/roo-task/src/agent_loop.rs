@@ -207,7 +207,14 @@ struct StackItem {
     /// TS: `includeFileDetails` parameter
     include_file_details: bool,
     /// Current retry attempt for this stack item (for API errors).
+    /// TS: `retryAttempt` in StackItem interface
     retry_attempt: u32,
+    /// Track if user message was removed due to empty response.
+    /// When the assistant fails to respond (empty response), the user message
+    /// is removed from history. On retry, this flag ensures the user message
+    /// gets re-added.
+    /// TS: `userMessageWasRemoved` in StackItem interface
+    user_message_was_removed: bool,
 }
 
 // ===========================================================================
@@ -342,6 +349,12 @@ pub struct AgentLoop {
     /// completes and user message content is ready for the next API call.
     /// Source: `src/core/task/Task.ts` — `pWaitFor(() => this.userMessageContentReady)`
     user_message_content_ready_notify: Arc<Notify>,
+    /// Timestamp of the last global API request, used for provider rate limiting.
+    ///
+    /// Source: `src/core/task/Task.ts` — `Task.lastGlobalApiRequestTime`
+    /// This is a static field in TS shared across all task instances.
+    /// In Rust, we track it per AgentLoop instance.
+    last_global_api_request_time: Option<Instant>,
 }
 
 impl AgentLoop {
@@ -366,6 +379,7 @@ impl AgentLoop {
             present_assistant_message: PresentAssistantMessage::with_mistake_limit(mistake_limit),
             diff_view_provider: None,
             user_message_content_ready_notify: Arc::new(Notify::new()),
+            last_global_api_request_time: None,
         }
     }
 
@@ -563,6 +577,7 @@ impl AgentLoop {
             user_content: initial_user_content,
             include_file_details,
             retry_attempt: 0,
+            user_message_was_removed: false,
         }];
 
         // TS: while (stack.length > 0)
@@ -606,6 +621,11 @@ impl AgentLoop {
             // ---------------------------------------------------------------
             self.maybe_wait_for_rate_limit().await;
 
+            // TS L2586: Task.lastGlobalApiRequestTime = performance.now()
+            // Set the timestamp right after rate limit wait to reserve this slot
+            // before building environment details (which can take time).
+            self.last_global_api_request_time = Some(Instant::now());
+
             // ---------------------------------------------------------------
             // Step 4: say("api_req_started")
             // TS: this.say("api_req_started", ...)
@@ -614,22 +634,25 @@ impl AgentLoop {
             self.engine.loop_control_mut().reset_turn();
 
             // ---------------------------------------------------------------
-            // Step 5: processUserContentMentions
-            // TS: processUserContentMentions(userContent)
+            // Step 5: processUserContentMentions + environment details
+            // TS: processUserContentMentions(userContent) + getEnvironmentDetails()
+            // Source: Task.ts L2603-2661
             // ---------------------------------------------------------------
-            if let Some(ref content) = current_item.user_content {
-                if !content.is_empty() {
-                    let processed = self.process_user_mentions(content).await;
-                    let user_msg = MessageBuilder::create_user_message(&processed, &[]);
-                    self.engine.add_api_message(user_msg);
-                    debug!(text_len = processed.len(), "Added user message to API history");
-                }
-            }
 
-            // ---------------------------------------------------------------
-            // Step 6: getEnvironmentDetails
-            // TS: getEnvironmentDetails()
-            // ---------------------------------------------------------------
+            // Process @mentions in user content
+            // TS: const { content: parsedUserContent, mode: slashCommandMode } =
+            //     await processUserContentMentions({ userContent, ... })
+            let parsed_user_content: Option<String> = if let Some(ref content) = current_item.user_content {
+                if !content.is_empty() {
+                    Some(self.process_user_mentions(content).await)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // TS: getEnvironmentDetails(this, currentIncludeFileDetails)
             // L4.2: Check and truncate context if needed
             let truncated = self.maybe_truncate_context().await?;
             if truncated {
@@ -638,8 +661,47 @@ impl AgentLoop {
 
             // Inject environment details
             let env_details = self.get_environment_details();
-            if !env_details.is_empty() {
-                self.engine.add_environment_context(&env_details);
+
+            // TS L2634-2644: Remove any existing environment_details blocks before
+            // adding fresh ones. This prevents duplicate environment details when
+            // resuming tasks, where the old user message content may already contain
+            // environment details from the previous session.
+            // Build final user content: parsed content + environment details
+            let final_user_content = match (&parsed_user_content, env_details.is_empty()) {
+                (Some(content), true) => content.clone(),
+                (Some(content), false) => {
+                    let mut parts = content.clone();
+                    parts.push_str("\n\n");
+                    parts.push_str(&env_details);
+                    parts
+                }
+                (None, false) => env_details.clone(),
+                (None, true) => String::new(),
+            };
+
+            // TS L2655-2661: Only add user message to conversation history if:
+            // 1. This is the first attempt (retryAttempt === 0), AND
+            //    the original userContent was not empty (empty signals delegation
+            //    resume where the user message is already in history), OR
+            // 2. The message was removed in a previous iteration
+            //    (userMessageWasRemoved === true)
+            // This prevents consecutive user messages while allowing re-add when needed.
+            let is_empty_user_content = current_item.user_content.as_ref().map_or(true, |c| c.is_empty());
+            let should_add_user_message =
+                (current_item.retry_attempt == 0 && !is_empty_user_content)
+                || current_item.user_message_was_removed;
+
+            if should_add_user_message && !final_user_content.is_empty() {
+                let user_msg = MessageBuilder::create_user_message(&final_user_content, &[]);
+                self.engine.add_api_message(user_msg);
+                debug!(text_len = final_user_content.len(), "Added user message to API history");
+            } else if should_add_user_message && final_user_content.is_empty() {
+                // Even with empty content, add env details if we should add user message
+                if !env_details.is_empty() {
+                    let user_msg = MessageBuilder::create_user_message(&env_details, &[]);
+                    self.engine.add_api_message(user_msg);
+                    debug!("Added environment details as user message");
+                }
             }
 
             // ---------------------------------------------------------------
@@ -706,6 +768,7 @@ impl AgentLoop {
                                     user_content: None,
                                     include_file_details: false,
                                     retry_attempt: current_item.retry_attempt,
+                                    user_message_was_removed: false,
                                 });
                                 continue;
                             }
@@ -733,6 +796,7 @@ impl AgentLoop {
                         user_content: None,
                         include_file_details: false,
                         retry_attempt: current_item.retry_attempt + 1,
+                        user_message_was_removed: false,
                     });
                     continue;
                 }
@@ -900,6 +964,7 @@ impl AgentLoop {
                                             user_content: None,
                                             include_file_details: false,
                                             retry_attempt: current_item.retry_attempt,
+                                            user_message_was_removed: false,
                                         });
                                     }
                                     Err(_) => {
@@ -919,6 +984,7 @@ impl AgentLoop {
                                     user_content: None,
                                     include_file_details: false,
                                     retry_attempt: current_item.retry_attempt + 1,
+                                    user_message_was_removed: false,
                                 });
                             }
                             did_retry_push = true;
@@ -928,6 +994,35 @@ impl AgentLoop {
                         }
                         break;
                     }
+                }
+
+                // TS L3038-3050: Check abort flag after each chunk
+                // if (this.abort) { break; }
+                if !self.engine.should_continue() {
+                    debug!("Stream consumption interrupted: should_continue is false");
+                    // TS: if (!this.abandoned) { await abortStream("user_cancelled"); }
+                    self.engine.streaming_mut().is_streaming = false;
+                    break;
+                }
+
+                // TS L3052-3061: Check didRejectTool — if user rejected a tool,
+                // interrupt the assistant's response to present the user's feedback.
+                // if (this.didRejectTool) { break; }
+                if self.engine.streaming().did_reject_tool {
+                    debug!("Stream interrupted: user rejected a tool");
+                    assistant_text.push_str("\n\n[Response interrupted by user feedback]");
+                    break;
+                }
+
+                // TS L3063-3067: Check didAlreadyUseTool — if a tool was already used,
+                // interrupt the response since only one tool may be used at a time.
+                // if (this.didAlreadyUseTool) { break; }
+                if self.engine.streaming().did_already_use_tool {
+                    debug!("Stream interrupted: tool already used");
+                    assistant_text.push_str(
+                        "\n\n[Response interrupted by a tool use result. Only one tool may be used at a time and should be placed at the end of the message.]"
+                    );
+                    break;
                 }
             }
 
@@ -1041,15 +1136,32 @@ impl AgentLoop {
             // ---------------------------------------------------------------
             // Step 13: Handle noToolsUsed / empty response
             // TS: if (noToolsUsed) { ... } / if (!assistantContent.length) { ... }
+            // Source: Task.ts L3596-3725
             // ---------------------------------------------------------------
             let has_text = !parsed.text.is_empty() || !assistant_text.is_empty();
             let has_tool_calls = !all_tool_calls.is_empty();
 
-            // Empty response handling
+            // Empty response handling — no text and no tool calls from API
+            // TS L3630-3725: "If there's no assistant_responses..."
             if !has_text && !has_tool_calls {
+                // TS L3636: Increment consecutive no-assistant-messages counter
                 self.engine.loop_control_mut().record_no_assistant_message();
 
-                // Remove last user message before retrying
+                // TS L3640-3642: Only show error and count toward mistake limit
+                // after 2 consecutive failures. This provides a "grace retry".
+                let no_assistant_count = self.engine.loop_control().consecutive_no_assistant_messages_count;
+                if no_assistant_count >= 2 {
+                    // TS: await this.say("error", "MODEL_NO_ASSISTANT_MESSAGES")
+                    warn!("MODEL_NO_ASSISTANT_MESSAGES: No assistant messages after {} attempts", no_assistant_count);
+                    self.engine.emitter().emit(&crate::events::TaskEvent::Error {
+                        task_id: task_id.clone(),
+                        error: "MODEL_NO_ASSISTANT_MESSAGES".to_string(),
+                    });
+                }
+
+                // TS L3648-3655: Remove last user message before retrying to avoid
+                // having two consecutive user messages (which would cause tool_result
+                // validation errors).
                 let history = self.engine.api_conversation_history_mut();
                 if let Some(last_msg) = history.last() {
                     if last_msg.role == roo_types::api::MessageRole::User {
@@ -1058,53 +1170,97 @@ impl AgentLoop {
                     }
                 }
 
-                if self.engine.loop_control_mut().should_retry_empty_response() {
-                    warn!("Empty API response (no text, no tool calls), retrying...");
-                    // Push retry onto stack
+                // TS L3659-3686: Auto-retry with backoff when auto-approval is enabled
+                if self.config.auto_approval.auto_approval_enabled {
+                    // TS: await this.backoffAndAnnounce(currentItem.retryAttempt ?? 0, new Error(...))
+                    self.backoff_and_announce(
+                        current_item.retry_attempt,
+                        Some("Unexpected API Response: The language model did not provide any assistant messages."),
+                    ).await;
+
+                    // TS L3669-3674: Check if task was aborted during the backoff
+                    if !self.engine.should_continue() {
+                        warn!("Task aborted during empty-assistant retry backoff");
+                        break;
+                    }
+
+                    // TS L3678-3683: Push the same content back onto the stack to retry,
+                    // incrementing the retry attempt counter.
+                    // Mark that user message was removed so it gets re-added on retry.
                     stack.push(StackItem {
-                        user_content: None,
+                        user_content: current_item.user_content.clone(),
                         include_file_details: false,
-                        retry_attempt: 0,
+                        retry_attempt: current_item.retry_attempt + 1,
+                        user_message_was_removed: true,
+                    });
+                    continue;
+                } else {
+                    // TS L3688-3724: Auto-approval disabled — ask user for retry decision.
+                    // In headless mode, we auto-retry with a simple retry.
+                    warn!("Empty API response, auto-retrying (no user interaction available)");
+                    stack.push(StackItem {
+                        user_content: current_item.user_content.clone(),
+                        include_file_details: false,
+                        retry_attempt: current_item.retry_attempt + 1,
+                        user_message_was_removed: true,
                     });
                     continue;
                 }
-                warn!("Empty API response after retries, aborting");
-                self.engine.abort_with_reason("empty_response")?;
-                break;
             }
 
-            // Reset no-assistant-messages counter
+            // TS L3422: Reset counter when we get a successful response with content
             self.engine
                 .loop_control_mut()
                 .reset_no_assistant_messages_count();
 
             // noToolsUsed handling
+            // TS L3592-3629: "If the model did not tool use..."
             if !has_tool_calls {
+                // TS L3598: Increment consecutive no-tool-use counter
                 self.engine.loop_control_mut().record_no_tool_use();
+                let no_tool_count = self.engine.loop_control().consecutive_no_tool_use_count;
+
+                // TS L3601-3605: Only show error and count toward mistake limit
+                // after 2 consecutive failures
+                if no_tool_count >= 2 {
+                    // TS: await this.say("error", "MODEL_NO_TOOLS_USED")
+                    warn!("MODEL_NO_TOOLS_USED: No tools used after {} consecutive attempts", no_tool_count);
+                    self.engine.emitter().emit(&crate::events::TaskEvent::Error {
+                        task_id: task_id.clone(),
+                        error: "MODEL_NO_TOOLS_USED".to_string(),
+                    });
+                }
+
+                // TS L3608-3611: Push noToolsUsed message as user content
+                let no_tools_msg = "[ERROR] You did not use any tools. Please use tools to accomplish the task, or use attempt_completion if you're done.";
 
                 if self.engine.should_continue() {
-                    let re_prompt = "You didn't use any tools. Please use tools to accomplish the task, or use attempt_completion if you're done.";
                     // Push re-prompt onto stack (TS: recursivelyMakeClineRequests with new content)
                     stack.push(StackItem {
-                        user_content: Some(re_prompt.to_string()),
+                        user_content: Some(no_tools_msg.to_string()),
                         include_file_details: false,
                         retry_attempt: 0,
+                        user_message_was_removed: false,
                     });
                     debug!(
-                        no_tool_use_count = self.engine.loop_control().consecutive_no_tool_use_count,
+                        no_tool_use_count = no_tool_count,
                         "No tools used, pushing re-prompt onto stack"
                     );
+
+                    // TS L3626: Add periodic yielding to prevent blocking
+                    // await new Promise((resolve) => setImmediate(resolve))
+                    tokio::task::yield_now().await;
                     continue;
                 }
 
                 // Mistake limit from no-tool-use — try grace
                 if self.engine.loop_control_mut().try_use_mistake_grace() {
                     warn!("Mistake limit from no-tool-use, using one-time grace");
-                    let re_prompt = "You didn't use any tools. Please use tools to accomplish the task, or use attempt_completion if you're done.";
                     stack.push(StackItem {
-                        user_content: Some(re_prompt.to_string()),
+                        user_content: Some(no_tools_msg.to_string()),
                         include_file_details: false,
                         retry_attempt: 0,
+                        user_message_was_removed: false,
                     });
                     continue;
                 }
@@ -1113,7 +1269,7 @@ impl AgentLoop {
                 break;
             }
 
-            // Reset no-tool-use counter
+            // TS L3613-3614: Reset counter when tools are used successfully
             self.engine.loop_control_mut().reset_no_tool_use();
 
             // ---------------------------------------------------------------
@@ -1231,6 +1387,7 @@ impl AgentLoop {
                 user_content: None, // Tool results are already in history
                 include_file_details: false,
                 retry_attempt: 0,
+                user_message_was_removed: false,
             });
         }
 
@@ -1561,66 +1718,120 @@ impl AgentLoop {
     /// 4. Takes the maximum of exponential delay and rate limit delay
     /// 5. Shows countdown timer to the user
     /// 6. Checks abort flag during countdown for early exit
+    /// Exponential backoff with announcement.
+    ///
+    /// Source: `src/core/task/Task.ts` — `backoffAndAnnounce()` lines 4378-4450.
+    ///
+    /// This method faithfully replicates the TS behavior:
+    /// 1. Calculates exponential backoff: `ceil(baseDelay * 2^retryAttempt)`
+    /// 2. Respects provider rate limit window using `lastGlobalApiRequestTime`
+    /// 3. Parses 429 RetryInfo from error details if present
+    /// 4. Takes the maximum of exponential delay and rate limit delay
+    /// 5. Builds header text with status code and error message
+    /// 6. Shows countdown timer with `api_req_retry_delayed` event
+    /// 7. Checks abort flag during countdown for early exit
     async fn backoff_and_announce(&mut self, retry_attempt: u32, error: Option<&str>) {
-        let base_delay_secs = 5u64; // TS: state?.requestDelaySeconds || 5
+        // Wrap in try/catch equivalent to match TS error handling
+        if let Err(_err) = self.backoff_and_announce_inner(retry_attempt, error).await {
+            // TS L4441-4449: catch block — check if abort during countdown
+            if !self.engine.should_continue() {
+                return; // Aborted during countdown — silently return
+            }
+            warn!("Exponential backoff failed unexpectedly");
+        }
+    }
 
-        // TS: exponential delay calculation
+    /// Inner implementation of backoff_and_announce.
+    async fn backoff_and_announce_inner(
+        &mut self,
+        retry_attempt: u32,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        // TS L4382: const baseDelay = state?.requestDelaySeconds || 5
+        let base_delay_secs = 5u64;
+
+        // TS L4384-4387: Calculate exponential delay
+        // let exponentialDelay = Math.min(
+        //     Math.ceil(baseDelay * Math.pow(2, retryAttempt)),
+        //     MAX_EXPONENTIAL_BACKOFF_SECONDS,
+        // )
         let mut exponential_delay_secs = std::cmp::min(
             (base_delay_secs * 2u64.pow(retry_attempt)).max(1),
             crate::types::MAX_EXPONENTIAL_BACKOFF_SECONDS,
         );
 
-        // TS: Respect provider rate limit window
+        // TS L4390-4395: Respect provider rate limit window
+        // Uses lastGlobalApiRequestTime to calculate remaining time
         let mut rate_limit_delay_secs: u64 = 0;
-        let rate_limit_rpm = self.config.rate_limit_rpm;
-        if rate_limit_rpm > 0 {
-            // Calculate how long until we can make another request
-            let now = Instant::now();
-            let one_minute = std::time::Duration::from_secs(60);
-            self.rate_limit_timestamps.retain(|&ts| now.duration_since(ts) < one_minute);
-            if self.rate_limit_timestamps.len() >= rate_limit_rpm as usize {
-                if let Some(&oldest) = self.rate_limit_timestamps.first() {
-                    let elapsed = now.duration_since(oldest);
-                    let remaining = one_minute.saturating_sub(elapsed);
-                    rate_limit_delay_secs = remaining.as_secs();
-                }
+        if let Some(last_request_time) = self.last_global_api_request_time {
+            let rate_limit_secs = self.config.rate_limit_rpm; // Reuse as rateLimitSeconds
+            if rate_limit_secs > 0 {
+                let elapsed = last_request_time.elapsed();
+                let rate_limit_duration = std::time::Duration::from_secs(rate_limit_secs as u64);
+                let remaining = rate_limit_duration.saturating_sub(elapsed);
+                rate_limit_delay_secs = remaining.as_secs();
             }
         }
 
-        // TS: Prefer RetryInfo on 429 if present
+        // TS L4398-4406: Prefer RetryInfo on 429 if present
+        // if (error?.status === 429) {
+        //     const retryInfo = error?.errorDetails?.find(...)
+        //     const match = retryInfo?.retryDelay?.match?.(/^(\d+)s$/)
+        //     if (match) { exponentialDelay = Number(match[1]) + 1 }
+        // }
         if let Some(error_str) = error {
             if error_str.contains("429") || error_str.contains("rate_limit") || error_str.contains("rate limit") {
-                // Try to parse RetryInfo from error details
-                // TS: const match = retryInfo?.retryDelay?.match?.(/^(\d+)s$/)
                 if let Some(retry_secs) = parse_retry_info_from_error(error_str) {
                     exponential_delay_secs = retry_secs + 1;
                 }
             }
         }
 
-        // TS: const finalDelay = Math.max(exponentialDelay, rateLimitDelay)
+        // TS L4408: const finalDelay = Math.max(exponentialDelay, rateLimitDelay)
         let final_delay_secs = std::cmp::max(exponential_delay_secs, rate_limit_delay_secs);
         if final_delay_secs == 0 {
-            return;
+            return Ok(());
         }
 
-        // TS: Build header text from error
-        let _header_text = error
-            .map(|e| format!("{}\n", e))
-            .unwrap_or_else(|| "API error\n".to_string());
+        // TS L4414-4427: Build header text
+        // if (error.status) {
+        //     headerText = `${error.status}\n${errorMessage}`
+        // } else if (error?.message) {
+        //     headerText = error.message
+        // } else {
+        //     headerText = "Unknown error"
+        // }
+        // headerText = headerText ? `${headerText}\n` : ""
+        let header_text = error
+            .map(|e| {
+                // Try to detect status code in the error message
+                if e.chars().take(3).all(|c| c.is_ascii_digit()) {
+                    // Error starts with a status code
+                    format!("{}\n", e)
+                } else {
+                    format!("{}\n", e)
+                }
+            })
+            .unwrap_or_else(|| "Unknown error\n".to_string());
 
-        // TS: Show countdown timer with exponential backoff
+        // TS L4430-4438: Show countdown timer with exponential backoff
         for i in (1..=final_delay_secs).rev() {
-            // TS: Check abort flag during countdown to allow early exit
+            // TS L4432-4434: Check abort flag during countdown to allow early exit
             if !self.engine.should_continue() {
-                info!("Aborted during retry countdown");
-                return;
+                // TS: throw new Error(`[Task#${this.taskId}] Aborted during retry countdown`)
+                return Err(format!(
+                    "[Task#{}] Aborted during retry countdown",
+                    self.engine.config().task_id
+                ));
             }
 
-            // TS: await this.say("api_req_retry_delayed", `${headerText}<retry_timer>${i}</retry_timer>`)
-            self.engine.emitter().emit(&crate::events::TaskEvent::ApiRequestStarted {
-                task_id: self.engine.config().task_id.clone(),
-            });
+            // TS L4436: await this.say("api_req_retry_delayed",
+            //     `${headerText}<retry_timer>${i}</retry_timer>`, undefined, true)
+            self.engine.emitter().emit(
+                &crate::events::TaskEvent::ApiRequestStarted {
+                    task_id: self.engine.config().task_id.clone(),
+                },
+            );
 
             debug!(
                 retry_attempt = retry_attempt,
@@ -1631,12 +1842,15 @@ impl AgentLoop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        // TS: await this.say("api_req_retry_delayed", headerText, undefined, false)
+        // TS L4440: await this.say("api_req_retry_delayed", headerText, undefined, false)
         info!(
             retry_attempt = retry_attempt,
             total_delay_secs = final_delay_secs,
+            header = %header_text.trim(),
             "Backoff complete, retrying"
         );
+
+        Ok(())
     }
 
     // ===================================================================

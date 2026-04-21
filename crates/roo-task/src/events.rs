@@ -99,6 +99,14 @@ pub enum TaskEvent {
         messages_removed: usize,
     },
 
+    // --- Error events ---
+    /// An error occurred during task execution.
+    /// Source: TS `say("error", ...)` — e.g., "MODEL_NO_TOOLS_USED", "MODEL_NO_ASSISTANT_MESSAGES"
+    Error {
+        task_id: String,
+        error: String,
+    },
+
     // --- Checkpoint events ---
     /// Checkpoint saved.
     /// Source: TS `checkpointSave()` → emit
