@@ -53,6 +53,7 @@ pub use loop_control::LoopControl;
 pub use engine::TaskEngine;
 pub use config::{validate_config, default_config, DEFAULT_MAX_MISTAKES, DEFAULT_MODE};
 pub use stream_parser::{StreamParser, ParsedStreamContent, ParsedToolCall, StreamUsage};
+pub use native_tool_call_parser::NativeToolCallParser;
 pub use tool_dispatcher::{ToolDispatcher, ToolExecutionResult, ToolContext, ToolHandler};
 pub use message_builder::MessageBuilder;
 pub use agent_loop::{AgentLoop, AgentLoopConfig};
