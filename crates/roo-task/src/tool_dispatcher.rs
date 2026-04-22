@@ -625,6 +625,283 @@ impl ToolHandler for EditFileHandler {
     }
 }
 
+/// Handler for the `search_replace` tool.
+///
+/// Performs literal string search-and-replace on a single file.
+/// Wraps [`roo_tools_fs::search_and_replace`] functions.
+pub struct SearchReplaceHandler;
+
+#[async_trait]
+impl ToolHandler for SearchReplaceHandler {
+    async fn execute(&self, params: Value, context: &ToolContext) -> ToolExecutionResult {
+        let file_path = match params
+            .get("filePath")
+            .or_else(|| params.get("file_path"))
+            .and_then(|v| v.as_str())
+        {
+            Some(p) => p.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: filePath"),
+        };
+        let old_string = match params
+            .get("oldString")
+            .or_else(|| params.get("old_string"))
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: oldString"),
+        };
+        let new_string = match params
+            .get("newString")
+            .or_else(|| params.get("new_string"))
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: newString"),
+        };
+
+        let sr_params = roo_tools_fs::search_and_replace::SearchReplaceParams {
+            file_path,
+            old_string,
+            new_string,
+        };
+
+        // Validate
+        if let Err(e) = roo_tools_fs::search_and_replace::validate_search_replace_params(&sr_params)
+        {
+            return ToolExecutionResult::error(format!("search_replace validation error: {}", e));
+        }
+
+        // Resolve path
+        let full_path = context.cwd.join(&sr_params.file_path);
+        if !full_path.exists() {
+            return ToolExecutionResult::error(format!(
+                "File not found: {}",
+                sr_params.file_path
+            ));
+        }
+
+        // Read file
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(s) => s,
+            Err(e) => return ToolExecutionResult::error(format!("Failed to read file: {}", e)),
+        };
+
+        // Apply search and replace
+        match roo_tools_fs::search_and_replace::apply_search_replace(
+            &content,
+            &sr_params.old_string,
+            &sr_params.new_string,
+        ) {
+            Ok(result) => {
+                // Write result
+                if let Err(e) = std::fs::write(&full_path, &result.new_content) {
+                    return ToolExecutionResult::error(format!("Failed to write file: {}", e));
+                }
+                ToolExecutionResult::success(format!(
+                    "Search and replace applied to {}",
+                    sr_params.file_path
+                ))
+            }
+            Err(e) => ToolExecutionResult::error(format!("search_replace error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "search_replace"
+    }
+}
+
+/// Handler for the `edit` tool (legacy alias for `edit_file`).
+///
+/// Uses the same [`roo_tools_fs::process_edit_file`] implementation as
+/// [`EditFileHandler`] but is registered under the legacy `"edit"` tool name.
+pub struct EditHandler;
+
+#[async_trait]
+impl ToolHandler for EditHandler {
+    async fn execute(&self, params: Value, context: &ToolContext) -> ToolExecutionResult {
+        let file_path = match params
+            .get("filePath")
+            .or_else(|| params.get("file_path"))
+            .and_then(|v| v.as_str())
+        {
+            Some(p) => p.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: filePath"),
+        };
+        let old_string = match params
+            .get("oldString")
+            .or_else(|| params.get("old_string"))
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: oldString"),
+        };
+        let new_string = match params
+            .get("newString")
+            .or_else(|| params.get("new_string"))
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: newString"),
+        };
+
+        let edit_params = roo_types::tool::EditFileParams {
+            file_path,
+            old_string,
+            new_string,
+            expected_replacements: params
+                .get("expectedReplacements")
+                .or_else(|| params.get("expected_replacements"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+        };
+
+        match roo_tools_fs::process_edit_file(&edit_params, &context.cwd, None) {
+            Ok(result) => {
+                let msg = result
+                    .message
+                    .unwrap_or_else(|| format!("Edit applied to {}", result.path));
+                if result.success {
+                    ToolExecutionResult::success(msg)
+                } else {
+                    ToolExecutionResult::error(msg)
+                }
+            }
+            Err(e) => ToolExecutionResult::error(format!("edit error: {}", e)),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "edit"
+    }
+}
+
+/// Handler for the `apply_patch` tool.
+///
+/// Parses and applies a patch in the Codex `apply_patch` format using
+/// [`roo_tools_fs::apply_patch`] functions.
+pub struct ApplyPatchHandler;
+
+#[async_trait]
+impl ToolHandler for ApplyPatchHandler {
+    async fn execute(&self, params: Value, context: &ToolContext) -> ToolExecutionResult {
+        let patch = match params.get("patch").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: patch"),
+        };
+
+        // Validate
+        if let Err(e) = roo_tools_fs::apply_patch::validate_apply_patch_params(&patch) {
+            return ToolExecutionResult::error(format!("apply_patch validation error: {}", e));
+        }
+
+        // Parse patch
+        let parsed = match roo_tools_fs::apply_patch::parse_patch(&patch) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolExecutionResult::error(format!("apply_patch parse error: {}", e))
+            }
+        };
+
+        // Process all hunks — resolve file paths relative to cwd
+        let cwd = context.cwd.clone();
+        let changes = match roo_tools_fs::apply_patch::process_all_hunks(
+            &parsed.hunks,
+            |file_path| {
+                let full_path = if std::path::Path::new(file_path).is_absolute() {
+                    std::path::PathBuf::from(file_path)
+                } else {
+                    cwd.join(file_path)
+                };
+                std::fs::read_to_string(&full_path)
+            },
+        ) {
+            Ok(c) => c,
+            Err(e) => return ToolExecutionResult::error(format!("apply_patch error: {}", e)),
+        };
+
+        // Apply changes to disk
+        let mut results = Vec::new();
+        for change in &changes {
+            let full_path = if std::path::Path::new(&change.path).is_absolute() {
+                std::path::PathBuf::from(&change.path)
+            } else {
+                context.cwd.join(&change.path)
+            };
+
+            match change.change_type {
+                roo_tools_fs::apply_patch::FileChangeType::Add => {
+                    if let Some(parent) = full_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            return ToolExecutionResult::error(format!(
+                                "Failed to create directory: {}",
+                                e
+                            ));
+                        }
+                    }
+                    if let Some(ref content) = change.new_content {
+                        if let Err(e) = std::fs::write(&full_path, content) {
+                            return ToolExecutionResult::error(format!(
+                                "Failed to write file: {}",
+                                e
+                            ));
+                        }
+                    }
+                    results.push(format!("Added: {}", change.path));
+                }
+                roo_tools_fs::apply_patch::FileChangeType::Delete => {
+                    if let Err(e) = std::fs::remove_file(&full_path) {
+                        return ToolExecutionResult::error(format!(
+                            "Failed to delete file: {}",
+                            e
+                        ));
+                    }
+                    results.push(format!("Deleted: {}", change.path));
+                }
+                roo_tools_fs::apply_patch::FileChangeType::Update => {
+                    if let Some(ref content) = change.new_content {
+                        if let Err(e) = std::fs::write(&full_path, content) {
+                            return ToolExecutionResult::error(format!(
+                                "Failed to write file: {}",
+                                e
+                            ));
+                        }
+                    }
+                    if let Some(ref move_path) = change.move_path {
+                        let new_full_path = if std::path::Path::new(move_path).is_absolute() {
+                            std::path::PathBuf::from(move_path)
+                        } else {
+                            context.cwd.join(move_path)
+                        };
+                        if let Err(e) = std::fs::rename(&full_path, &new_full_path) {
+                            return ToolExecutionResult::error(format!(
+                                "Failed to move file: {}",
+                                e
+                            ));
+                        }
+                        results.push(format!(
+                            "Updated and moved: {} -> {}",
+                            change.path, move_path
+                        ));
+                    } else {
+                        results.push(format!("Updated: {}", change.path));
+                    }
+                }
+            }
+        }
+
+        ToolExecutionResult::success(format!(
+            "Applied patch with {} change(s):\n{}",
+            results.len(),
+            results.join("\n")
+        ))
+    }
+
+    fn tool_name(&self) -> &str {
+        "apply_patch"
+    }
+}
+
 /// Handler for the `list_files` tool.
 ///
 /// Lists files and directories in the given path.
@@ -1601,6 +1878,9 @@ pub fn default_dispatcher() -> ToolDispatcher {
     dispatcher.register("write_to_file", Box::new(WriteToFileHandler));
     dispatcher.register("apply_diff", Box::new(ApplyDiffHandler));
     dispatcher.register("edit_file", Box::new(EditFileHandler));
+    dispatcher.register("search_replace", Box::new(SearchReplaceHandler));
+    dispatcher.register("edit", Box::new(EditHandler));
+    dispatcher.register("apply_patch", Box::new(ApplyPatchHandler));
 
     // Search tools
     dispatcher.register("list_files", Box::new(ListFilesHandler));
@@ -1862,6 +2142,57 @@ impl ToolCallValidator {
                     return Err("Missing required parameter: path".to_string());
                 }
             }
+            "search_replace" => {
+                if params.get("filePath")
+                    .or_else(|| params.get("file_path"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: filePath".to_string());
+                }
+                if params.get("oldString")
+                    .or_else(|| params.get("old_string"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: oldString".to_string());
+                }
+                if params.get("newString")
+                    .or_else(|| params.get("new_string"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: newString".to_string());
+                }
+            }
+            "edit" => {
+                if params.get("filePath")
+                    .or_else(|| params.get("file_path"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: filePath".to_string());
+                }
+                if params.get("oldString")
+                    .or_else(|| params.get("old_string"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: oldString".to_string());
+                }
+                if params.get("newString")
+                    .or_else(|| params.get("new_string"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    return Err("Missing required parameter: newString".to_string());
+                }
+            }
+            "apply_patch" => {
+                if params.get("patch").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: patch".to_string());
+                }
+            }
             "custom_tool" => {
                 // Custom tools don't have fixed parameters; skip validation
             }
@@ -1882,6 +2213,9 @@ impl ToolCallValidator {
                 | "write_to_file"
                 | "apply_diff"
                 | "edit_file"
+                | "search_replace"
+                | "edit"
+                | "apply_patch"
                 | "execute_command"
                 | "read_command_output"
                 | "search_files"
