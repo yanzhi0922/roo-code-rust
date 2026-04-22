@@ -986,7 +986,7 @@ impl ToolHandler for AttemptCompletionHandler {
             command,
         };
 
-        match roo_tools_misc::process_attempt_completion(&completion_params, &[]) {
+        match roo_tools_misc::process_attempt_completion(&completion_params, &[], false, false) {
             Ok(result) => {
                 let mut output = completion_params.result.clone();
                 if let Some(warning) = &result.todo_warning {

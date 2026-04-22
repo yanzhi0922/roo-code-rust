@@ -65,6 +65,7 @@ pub use debug_log::{set_debug_log_enabled, is_debug_log_enabled, debug_log, Debu
 pub use present_assistant_message::{
     PresentAssistantMessage, PresentAssistantMessageState, PresentAssistantMessageError,
     ToolResult, ToolCallbacks, ApprovalFeedback, ImageBlock, BlockProcessingResult,
+    ToolDispatchAction, McpDispatchAction,
     strip_thinking_tags, sanitize_tool_use_id, format_tool_error, format_tool_denied,
     format_tool_denied_with_feedback, format_tool_approved_with_feedback, format_tool_result,
     is_file_modifying_tool,

@@ -64,6 +64,18 @@ pub struct RewindResult {
 /// state directly), this Rust implementation is **pure**: it borrows the
 /// current message lists and returns new ones, leaving persistence to the
 /// caller.
+///
+/// # TS Source Mapping
+///
+/// | TS Method                          | Rust Method                        |
+/// |------------------------------------|------------------------------------|
+/// | `rewindToTimestamp`                | [`rewind_to_timestamp`]            |
+/// | `rewindToIndex`                    | [`rewind_to_index`]                |
+/// | `performRewind`                    | [`perform_rewind`]                 |
+/// | `collectRemovedContextEventIds`    | [`collect_removed_context_event_ids`] |
+/// | `truncateClineMessages`            | inline in `perform_rewind`         |
+/// | `truncateApiHistoryWithCleanup`    | [`truncate_api_history_with_cleanup`] |
+/// | `cleanupOrphanedArtifacts`         | handled via [`compute_valid_ids`]  |
 pub struct MessageManager;
 
 impl MessageManager {
@@ -142,6 +154,8 @@ impl MessageManager {
     // -----------------------------------------------------------------------
 
     /// Internal method that performs the actual rewind operation.
+    ///
+    /// Maps to TS `performRewind`.
     fn perform_rewind(
         &self,
         cline_messages: &[ClineMessage],
@@ -153,10 +167,10 @@ impl MessageManager {
         // Step 1: Collect context event IDs from messages being removed
         let removed_ids = Self::collect_removed_context_event_ids(cline_messages, to_index);
 
-        // Step 2: Truncate clineMessages
+        // Step 2: Truncate clineMessages (matches TS `truncateClineMessages`)
         let new_cline = cline_messages[..to_index].to_vec();
 
-        // Step 3: Truncate and clean API history
+        // Step 3: Truncate and clean API history (matches TS `truncateApiHistoryWithCleanup`)
         let new_api = Self::truncate_api_history_with_cleanup(
             api_history,
             &new_cline,
@@ -165,7 +179,7 @@ impl MessageManager {
             options.skip_cleanup,
         );
 
-        // Step 4: Compute valid artifact IDs
+        // Step 4: Compute valid artifact IDs (matches TS `cleanupOrphanedArtifacts`)
         let valid_artifact_ids = compute_valid_ids(&new_cline, &new_api);
 
         RewindResult {
@@ -178,6 +192,8 @@ impl MessageManager {
 
     /// Collect `condenseId` and `truncationId` values from context-management
     /// events that will be removed during the rewind.
+    ///
+    /// Maps to TS `collectRemovedContextEventIds`.
     pub fn collect_removed_context_event_ids(
         cline_messages: &[ClineMessage],
         from_index: usize,
@@ -208,15 +224,25 @@ impl MessageManager {
     /// Truncate API history by timestamp, remove orphaned summaries/markers,
     /// and clean up orphaned tags.
     ///
+    /// Maps to TS `truncateApiHistoryWithCleanup`.
+    ///
     /// # Timestamp race handling
     ///
     /// Due to async execution during streaming, `clineMessage` timestamps may
     /// not perfectly align with API message timestamps. If there is no exact
     /// match but there are earlier messages, we find the first API user message
     /// at or after the cutoff and use its timestamp as the actual boundary.
+    ///
+    /// # Steps (matching TS source)
+    ///
+    /// 1. Determine the actual cutoff timestamp
+    /// 2. Filter by the actual cutoff timestamp
+    /// 3. Remove Summaries whose `condense_context` was removed
+    /// 4. Remove truncation markers whose event was removed
+    /// 5. Cleanup orphaned tags via [`cleanup_after_truncation`]
     pub fn truncate_api_history_with_cleanup(
         api_history: &[ApiMessage],
-        cline_messages: &[ClineMessage],
+        _cline_messages: &[ClineMessage],
         cutoff_ts: i64,
         removed_ids: &ContextEventIds,
         skip_cleanup: bool,
@@ -273,8 +299,9 @@ impl MessageManager {
         }
 
         // Step 5: Cleanup orphaned tags (unless skipped)
+        // Matches TS: `cleanupAfterTruncation(apiHistory)` — only clears parent refs
         if !skip_cleanup {
-            api = cleanup_after_truncation(&api, cline_messages);
+            api = cleanup_after_truncation(&api);
         }
 
         api
@@ -513,7 +540,7 @@ mod tests {
             &api, &cline, 300, &removed, false,
         );
 
-        // Summary with condense-1 should be removed
+        // Summary with condense-1 should be removed (it was in removed_ids)
         assert!(!result.iter().any(|m| m.is_summary));
     }
 
@@ -567,16 +594,42 @@ mod tests {
             ApiMessage::summary(Some(150), "orphan"),
             ApiMessage::assistant(200),
         ];
-        let cline: Vec<ClineMessage> = vec![]; // no condense_context → summary is orphaned
+        let cline: Vec<ClineMessage> = vec![];
         let removed = ContextEventIds::default();
 
         let result = MessageManager::truncate_api_history_with_cleanup(
             &api, &cline, 300, &removed, true, // skip_cleanup = true
         );
 
-        // With skip_cleanup, orphaned summary is NOT removed by cleanup
-        // (it would only be removed if it was in removed_ids)
+        // With skip_cleanup, orphaned parent tags are NOT cleared
+        // The summary is NOT removed because it wasn't in removed_ids
         assert!(result.iter().any(|m| m.is_summary));
+    }
+
+    #[test]
+    fn truncate_api_clears_orphaned_parent_via_cleanup() {
+        // When a summary is removed by step 3, messages with condense_parent
+        // pointing to it should have their parent cleared by step 5
+        let mut msg_with_parent = ApiMessage::user(100);
+        msg_with_parent.condense_parent = Some("condense-1".into());
+
+        let api = vec![
+            msg_with_parent,
+            ApiMessage::summary(Some(150), "condense-1"),
+            ApiMessage::assistant(200),
+        ];
+        let cline: Vec<ClineMessage> = vec![];
+        let removed = ContextEventIds {
+            condense_ids: HashSet::from(["condense-1".into()]),
+            truncation_ids: HashSet::new(),
+        };
+
+        let result = MessageManager::truncate_api_history_with_cleanup(
+            &api, &cline, 300, &removed, false,
+        );
+
+        // Summary removed by step 3, then parent cleared by step 5
+        assert!(result[0].condense_parent.is_none());
     }
 
     // -- integration: full rewind workflow ----------------------------------

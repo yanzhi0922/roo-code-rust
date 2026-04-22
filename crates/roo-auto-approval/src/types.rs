@@ -70,6 +70,60 @@ pub enum CheckAutoApprovalResult {
 }
 
 // ---------------------------------------------------------------------------
+// AutoApprovalLimitResult — mirrors AutoApprovalResult from AutoApprovalHandler.ts
+// ---------------------------------------------------------------------------
+
+/// Type of auto-approval limit that was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalLimitType {
+    /// Maximum number of consecutive auto-approved requests.
+    Requests,
+    /// Maximum cost of consecutive auto-approved requests.
+    Cost,
+}
+
+/// Result of checking auto-approval limits.
+///
+/// Mirrors `AutoApprovalResult` from `AutoApprovalHandler.ts`.
+///
+/// When `requires_approval` is `true`, the caller should ask the user for
+/// approval. If the user approves, call
+/// [`AutoApprovalHandler::approve_and_reset`] to reset tracking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoApprovalLimitResult {
+    /// Whether the operation should proceed.
+    pub should_proceed: bool,
+    /// Whether user approval was required (limit was exceeded).
+    pub requires_approval: bool,
+    /// The type of limit that was exceeded, if any.
+    pub approval_type: Option<ApprovalLimitType>,
+    /// The count/value of the limit that was exceeded, if any.
+    pub approval_count: Option<String>,
+}
+
+impl AutoApprovalLimitResult {
+    /// Create a result indicating no limits were exceeded.
+    pub fn proceed() -> Self {
+        Self {
+            should_proceed: true,
+            requires_approval: false,
+            approval_type: None,
+            approval_count: None,
+        }
+    }
+
+    /// Create a result indicating a limit was exceeded.
+    pub fn limit_exceeded(approval_type: ApprovalLimitType, count: impl std::fmt::Display) -> Self {
+        Self {
+            should_proceed: false,
+            requires_approval: true,
+            approval_type: Some(approval_type),
+            approval_count: Some(count.to_string()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AutoApprovalState — mirrors ExtensionState subset used in checkAutoApproval
 // ---------------------------------------------------------------------------
 

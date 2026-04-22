@@ -9,8 +9,8 @@
 //!
 //! - Removing orphaned Summary messages when their `condense_context` event
 //!   is removed.
-//! - Removing orphaned truncation markers when their
-//!   `sliding_window_truncation` event is removed.
+//! - Removing orphaned truncation markers when their `sliding_window_truncation`
+//!   event is removed.
 //! - Cleaning up orphaned `condenseParent` / `truncationParent` tags.
 //! - Detecting orphaned command-output artifacts.
 //!
@@ -22,8 +22,16 @@
 //! |--------|---------------|
 //! | [`types`] | Core data types (`ClineMessage`, `ApiMessage`, `RewindOptions`, …) |
 //! | [`manager`] | [`MessageManager`] — the main entry point for rewind operations |
-//! | [`cleanup`] | Post-truncation cleanup of orphaned summaries / markers |
+//! | [`cleanup`] | Post-truncation cleanup of orphaned parent references |
 //! | [`artifact`] | Orphaned artifact detection |
+//!
+//! ## TS Source Mapping
+//!
+//! | TS Source | Rust Module |
+//! |-----------|-------------|
+//! | `core/message-manager/index.ts` | [`manager`] |
+//! | `core/condense/index.ts` — `cleanupAfterTruncation` | [`cleanup`] |
+//! | `core/message-manager/index.ts` — `cleanupOrphanedArtifacts` | [`artifact`] |
 //!
 //! ## Usage
 //!
@@ -50,7 +58,9 @@ pub mod types;
 
 // Re-export the primary public API at the crate root.
 pub use artifact::{compute_valid_ids, find_orphaned_artifacts};
-pub use cleanup::cleanup_after_truncation;
+pub use cleanup::{
+    cleanup_after_truncation, find_orphaned_condense_ids, find_orphaned_truncation_ids,
+};
 pub use manager::{MessageManager, MessageManagerError, RewindResult};
 pub use types::{
     ApiMessage, ClineMessage, ContextCondenseInfo, ContextEventIds, ContextTruncationInfo,

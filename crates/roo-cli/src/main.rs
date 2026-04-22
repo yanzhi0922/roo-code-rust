@@ -346,6 +346,7 @@ fn build_handler(
                 use_cross_region_inference: false,
                 endpoint_url: None,
                 request_timeout: config.timeout,
+                temperature: None,
             };
             Ok(Box::new(AwsBedrockHandler::new(cfg)
                 .context("Failed to create Bedrock handler")?))

@@ -42,6 +42,24 @@ struct OpenAiDelta {
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
     reasoning_content: Option<String>,
     reasoning: Option<String>,
+    /// OpenRouter reasoning_details array (used by Gemini 3, Claude, etc.)
+    /// See: https://openrouter.ai/docs/use-cases/reasoning-tokens#preserving-reasoning-blocks
+    reasoning_details: Option<Vec<OpenAiReasoningDetail>>,
+}
+
+/// A single reasoning detail entry from OpenRouter.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct OpenAiReasoningDetail {
+    #[serde(rename = "type")]
+    detail_type: Option<String>,
+    text: Option<String>,
+    summary: Option<String>,
+    data: Option<String>,
+    id: Option<Option<String>>,
+    format: Option<String>,
+    signature: Option<String>,
+    index: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -403,20 +421,46 @@ impl OpenAiCompatibleProvider {
                             }));
                         }
 
-                        // Handle reasoning content
-                        if let Some(ref reasoning) = delta.reasoning_content {
-                            if !reasoning.trim().is_empty() {
-                                results.push(Ok(ApiStreamChunk::Reasoning {
-                                    text: reasoning.clone(),
-                                    signature: None,
-                                }));
+                        // Handle reasoning_details (OpenRouter format for Gemini 3, Claude, etc.)
+                        // Priority: reasoning_details > reasoning_content > reasoning
+                        // If reasoning_details has displayable content, skip top-level reasoning
+                        // to avoid duplicate display (matches TS behavior).
+                        let mut has_reasoning_from_details = false;
+                        if let Some(ref details) = delta.reasoning_details {
+                            for detail in details {
+                                let reasoning_text = match detail.detail_type.as_deref() {
+                                    Some("reasoning.text") => detail.text.as_deref(),
+                                    Some("reasoning.summary") => detail.summary.as_deref(),
+                                    _ => None, // Skip reasoning.encrypted and other types
+                                };
+                                if let Some(text) = reasoning_text {
+                                    if !text.is_empty() {
+                                        has_reasoning_from_details = true;
+                                        results.push(Ok(ApiStreamChunk::Reasoning {
+                                            text: text.to_string(),
+                                            signature: None,
+                                        }));
+                                    }
+                                }
                             }
-                        } else if let Some(ref reasoning) = delta.reasoning {
-                            if !reasoning.trim().is_empty() {
-                                results.push(Ok(ApiStreamChunk::Reasoning {
-                                    text: reasoning.clone(),
-                                    signature: None,
-                                }));
+                        }
+
+                        // Handle reasoning content (fallback when no reasoning_details)
+                        if !has_reasoning_from_details {
+                            if let Some(ref reasoning) = delta.reasoning_content {
+                                if !reasoning.trim().is_empty() {
+                                    results.push(Ok(ApiStreamChunk::Reasoning {
+                                        text: reasoning.clone(),
+                                        signature: None,
+                                    }));
+                                }
+                            } else if let Some(ref reasoning) = delta.reasoning {
+                                if !reasoning.trim().is_empty() {
+                                    results.push(Ok(ApiStreamChunk::Reasoning {
+                                        text: reasoning.clone(),
+                                        signature: None,
+                                    }));
+                                }
                             }
                         }
 
@@ -506,20 +550,43 @@ impl Provider for OpenAiCompatibleProvider {
                             }));
                         }
 
-                        // Handle reasoning content
-                        if let Some(ref reasoning) = delta.reasoning_content {
-                            if !reasoning.trim().is_empty() {
-                                results.push(Ok(ApiStreamChunk::Reasoning {
-                                    text: reasoning.clone(),
-                                    signature: None,
-                                }));
+                        // Handle reasoning_details (OpenRouter format for Gemini 3, Claude, etc.)
+                        let mut has_reasoning_from_details = false;
+                        if let Some(ref details) = delta.reasoning_details {
+                            for detail in details {
+                                let reasoning_text = match detail.detail_type.as_deref() {
+                                    Some("reasoning.text") => detail.text.as_deref(),
+                                    Some("reasoning.summary") => detail.summary.as_deref(),
+                                    _ => None,
+                                };
+                                if let Some(text) = reasoning_text {
+                                    if !text.is_empty() {
+                                        has_reasoning_from_details = true;
+                                        results.push(Ok(ApiStreamChunk::Reasoning {
+                                            text: text.to_string(),
+                                            signature: None,
+                                        }));
+                                    }
+                                }
                             }
-                        } else if let Some(ref reasoning) = delta.reasoning {
-                            if !reasoning.trim().is_empty() {
-                                results.push(Ok(ApiStreamChunk::Reasoning {
-                                    text: reasoning.clone(),
-                                    signature: None,
-                                }));
+                        }
+
+                        // Handle reasoning content (fallback when no reasoning_details)
+                        if !has_reasoning_from_details {
+                            if let Some(ref reasoning) = delta.reasoning_content {
+                                if !reasoning.trim().is_empty() {
+                                    results.push(Ok(ApiStreamChunk::Reasoning {
+                                        text: reasoning.clone(),
+                                        signature: None,
+                                    }));
+                                }
+                            } else if let Some(ref reasoning) = delta.reasoning {
+                                if !reasoning.trim().is_empty() {
+                                    results.push(Ok(ApiStreamChunk::Reasoning {
+                                        text: reasoning.clone(),
+                                        signature: None,
+                                    }));
+                                }
                             }
                         }
 

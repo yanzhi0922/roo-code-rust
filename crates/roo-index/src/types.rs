@@ -29,7 +29,7 @@ pub struct VectorStoreSearchResult {
 }
 
 /// Configuration for the code index.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeIndexConfig {
     pub enabled: bool,
     pub max_file_size: u64,

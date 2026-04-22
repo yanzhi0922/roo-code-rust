@@ -3,10 +3,23 @@
 //! Handles parsing and validation of diff parameters, coordinating
 //! the actual diff application (delegated to roo-diff).
 
-use crate::helpers::check_roo_ignore;
+use crate::helpers::{check_roo_ignore, unescape_html_entities};
 use crate::types::*;
 use roo_ignore::RooIgnoreController;
 use roo_types::tool::ApplyDiffParams;
+
+/// Clean diff content by unescaping HTML entities for non-Claude models.
+///
+/// Matches TS: `if (modelId.includes("claude")) { ... } else {
+///     diffContent = unescapeHtmlEntities(diffContent) }`
+pub fn clean_diff_content(diff: &str, model_id: Option<&str>) -> String {
+    let is_claude = model_id.map_or(false, |id| id.contains("claude"));
+    if is_claude {
+        diff.to_string()
+    } else {
+        unescape_html_entities(diff)
+    }
+}
 
 /// Validate apply_diff parameters.
 pub fn validate_apply_diff_params(params: &ApplyDiffParams) -> Result<(), FsToolError> {
@@ -755,6 +768,27 @@ bar
     fn test_part_fail_hint_all_applied() {
         let hint = part_fail_hint("/path/to/file.txt", 3, 3);
         assert!(hint.is_empty());
+    }
+
+    #[test]
+    fn test_clean_diff_content_non_claude() {
+        let diff = "foo &lt;bar&gt; baz &amp; qux &quot;";
+        let result = clean_diff_content(diff, None);
+        assert_eq!(result, "foo <bar> baz & qux \"");
+    }
+
+    #[test]
+    fn test_clean_diff_content_claude() {
+        let diff = "foo &lt;bar&gt;";
+        let result = clean_diff_content(diff, Some("claude-3.5-sonnet"));
+        assert_eq!(result, diff);
+    }
+
+    #[test]
+    fn test_clean_diff_content_claude_no_unescape() {
+        let diff = "keep &amp; as is &lt; and &gt;";
+        let result = clean_diff_content(diff, Some("claude-3-opus"));
+        assert_eq!(result, diff);
     }
 
     #[test]

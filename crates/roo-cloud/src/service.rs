@@ -1,12 +1,20 @@
 use crate::types::{AuthState, CloudError, CloudUserInfo, OrganizationSettings, UserSettings};
 
 /// Cloud service for managing authentication, user info, and organization settings.
+///
+/// Corresponds to TS: `CloudService` class in `packages/cloud/src/CloudService.ts`.
+/// Manages auth state, user info, organization settings, and provides a facade
+/// over the underlying auth/settings/share/telemetry services.
 pub struct CloudService {
     auth_state: AuthState,
     user_info: Option<CloudUserInfo>,
     org_id: Option<String>,
+    org_name: Option<String>,
+    org_role: Option<String>,
     org_settings: Option<OrganizationSettings>,
     user_settings: Option<UserSettings>,
+    is_initialized: bool,
+    is_cloud_agent: bool,
 }
 
 impl CloudService {
@@ -16,8 +24,12 @@ impl CloudService {
             auth_state: AuthState::LoggedOut,
             user_info: None,
             org_id: None,
+            org_name: None,
+            org_role: None,
             org_settings: None,
             user_settings: None,
+            is_initialized: false,
+            is_cloud_agent: false,
         }
     }
 
@@ -85,11 +97,35 @@ impl CloudService {
                 .unwrap_or("enabled")
                 .to_string(),
         });
+        self.is_initialized = true;
 
         Ok(())
     }
 
+    /// Initialize the cloud service.
+    /// Corresponds to TS: `CloudService.initialize()`
+    pub async fn initialize(&mut self) -> Result<(), CloudError> {
+        if self.is_initialized {
+            return Ok(());
+        }
+
+        // Check for static token (cloud agent mode)
+        // Corresponds to TS: checking ROO_CODE_CLOUD_TOKEN env var
+        if let Ok(cloud_token) = std::env::var("ROO_CODE_CLOUD_TOKEN") {
+            if !cloud_token.is_empty() {
+                self.is_cloud_agent = true;
+                self.login(None, Some(&cloud_token)).await?;
+                return Ok(());
+            }
+        }
+
+        // Default: mark as initialized without auth
+        self.is_initialized = true;
+        Ok(())
+    }
+
     /// Log out and clear all session data.
+    /// Corresponds to TS: `CloudService.logout()`
     pub fn logout(&mut self) -> Result<(), CloudError> {
         if self.auth_state == AuthState::LoggedOut {
             return Err(CloudError::NotAuthenticated);
@@ -98,24 +134,92 @@ impl CloudService {
         self.auth_state = AuthState::LoggedOut;
         self.user_info = None;
         self.org_id = None;
+        self.org_name = None;
+        self.org_role = None;
         self.org_settings = None;
         self.user_settings = None;
         Ok(())
     }
 
     /// Check whether the service currently has an active session.
+    /// Corresponds to TS: `CloudService.isAuthenticated()`
     pub fn is_authenticated(&self) -> bool {
         matches!(self.auth_state, AuthState::ActiveSession)
     }
 
+    /// Check whether the service has an active session or is acquiring one.
+    /// Corresponds to TS: `CloudService.hasOrIsAcquiringActiveSession()`
+    pub fn has_or_is_acquiring_active_session(&self) -> bool {
+        matches!(
+            self.auth_state,
+            AuthState::ActiveSession | AuthState::AttemptingSession
+        )
+    }
+
+    /// Check whether the service has a stored active session.
+    /// Corresponds to TS: `CloudService.hasActiveSession()`
+    pub fn has_active_session(&self) -> bool {
+        matches!(self.auth_state, AuthState::ActiveSession)
+    }
+
     /// Get the current user info, if authenticated.
+    /// Corresponds to TS: `CloudService.getUserInfo()`
     pub fn get_user_info(&self) -> Option<&CloudUserInfo> {
         self.user_info.as_ref()
     }
 
     /// Get the current organization ID, if set.
+    /// Corresponds to TS: `CloudService.getOrganizationId()`
     pub fn get_organization_id(&self) -> Option<&str> {
         self.org_id.as_deref()
+    }
+
+    /// Get the current organization name, if set.
+    /// Corresponds to TS: `CloudService.getOrganizationName()`
+    pub fn get_organization_name(&self) -> Option<&str> {
+        self.org_name.as_deref()
+    }
+
+    /// Get the current organization role, if set.
+    /// Corresponds to TS: `CloudService.getOrganizationRole()`
+    pub fn get_organization_role(&self) -> Option<&str> {
+        self.org_role.as_deref()
+    }
+
+    /// Check whether a stored organization ID exists.
+    /// Corresponds to TS: `CloudService.hasStoredOrganizationId()`
+    pub fn has_stored_organization_id(&self) -> bool {
+        self.org_id.is_some()
+    }
+
+    /// Get the current auth state as a string.
+    /// Corresponds to TS: `CloudService.getAuthState()`
+    pub fn get_auth_state_string(&self) -> &str {
+        match self.auth_state {
+            AuthState::LoggedOut => "logged-out",
+            AuthState::Initializing => "initializing",
+            AuthState::AttemptingSession => "attempting-session",
+            AuthState::ActiveSession => "active-session",
+            AuthState::InactiveSession => "inactive-session",
+        }
+    }
+
+    /// Switch to a different organization.
+    /// Corresponds to TS: `CloudService.switchOrganization(organizationId)`
+    pub async fn switch_organization(
+        &mut self,
+        organization_id: Option<&str>,
+    ) -> Result<(), CloudError> {
+        self.ensure_initialized()?;
+
+        // Update the org ID
+        if let Some(id) = organization_id {
+            self.org_id = Some(id.to_string());
+        } else {
+            self.org_id = None;
+        }
+
+        Ok(())
     }
 
     /// Explicitly set the authentication state.
@@ -133,12 +237,23 @@ impl CloudService {
         self.org_id = Some(org_id);
     }
 
+    /// Set the organization name.
+    pub fn set_organization_name(&mut self, name: String) {
+        self.org_name = Some(name);
+    }
+
+    /// Set the organization role.
+    pub fn set_organization_role(&mut self, role: String) {
+        self.org_role = Some(role);
+    }
+
     /// Get a reference to the current authentication state.
     pub fn get_auth_state(&self) -> &AuthState {
         &self.auth_state
     }
 
     /// Check whether task sync is enabled in user settings.
+    /// Corresponds to TS: `CloudService.isTaskSyncEnabled()`
     ///
     /// Returns `false` if user settings are not available.
     pub fn is_task_sync_enabled(&self) -> bool {
@@ -160,6 +275,40 @@ impl CloudService {
     /// Set the user settings.
     pub fn set_user_settings(&mut self, settings: UserSettings) {
         self.user_settings = Some(settings);
+    }
+
+    /// Check whether this is a cloud agent (running with static token).
+    /// Corresponds to TS: `CloudService.isCloudAgent`
+    pub fn is_cloud_agent(&self) -> bool {
+        self.is_cloud_agent
+    }
+
+    /// Check whether the service has been initialized.
+    /// Corresponds to TS: `CloudService.isInitialized`
+    pub fn is_initialized(&self) -> bool {
+        self.is_initialized
+    }
+
+    /// Dispose the service, clearing all state.
+    /// Corresponds to TS: `CloudService.dispose()`
+    pub fn dispose(&mut self) {
+        self.auth_state = AuthState::LoggedOut;
+        self.user_info = None;
+        self.org_id = None;
+        self.org_name = None;
+        self.org_role = None;
+        self.org_settings = None;
+        self.user_settings = None;
+        self.is_initialized = false;
+    }
+
+    /// Ensure the service is initialized before performing operations.
+    /// Corresponds to TS: `CloudService.ensureInitialized()`
+    fn ensure_initialized(&self) -> Result<(), CloudError> {
+        if !self.is_initialized {
+            return Err(CloudError::NotAuthenticated);
+        }
+        Ok(())
     }
 }
 

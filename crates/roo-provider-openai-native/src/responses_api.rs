@@ -311,7 +311,11 @@ pub fn parse_sse_event(data: &str, provider_name: &str) -> Result<Option<ApiStre
         // Content part events
         "response.content_part.added" | "response.content_part.done" => {
             let part = &event["part"];
-            let part_text = part.get("text").and_then(|t| t.as_str());
+            // TS checks both `part.text` (string) and `part.text.value` (object with value field)
+            let part_text = part
+                .get("text")
+                .and_then(|t| t.as_str())
+                .or_else(|| part.get("text").and_then(|t| t.get("value")).and_then(|v| v.as_str()));
             if let Some(text) = part_text {
                 if !text.is_empty() {
                     return Ok(Some(ApiStreamChunk::Text {
@@ -350,27 +354,31 @@ pub fn parse_sse_event(data: &str, provider_name: &str) -> Result<Option<ApiStre
             Ok(None)
         }
 
-        // Tool/function call deltas
+        // Tool/function call deltas — emit ToolCallPartial for NativeToolCallParser
+        // (matches TS behavior: yields tool_call_partial chunks)
         "response.function_call_arguments.delta" | "response.tool_call_arguments.delta" => {
             let call_id = event["call_id"]
                 .as_str()
                 .or_else(|| event["tool_call_id"].as_str())
-                .or_else(|| event["id"].as_str())
-                .unwrap_or("");
+                .or_else(|| event["id"].as_str());
             let name = event["name"]
                 .as_str()
-                .or_else(|| event["function_name"].as_str())
-                .unwrap_or("");
+                .or_else(|| event["function_name"].as_str());
             let args = event["delta"]
                 .as_str()
-                .or_else(|| event["arguments"].as_str())
-                .unwrap_or("");
+                .or_else(|| event["arguments"].as_str());
+            let index = event["index"].as_u64().unwrap_or(0);
 
-            if !call_id.is_empty() && !name.is_empty() {
-                return Ok(Some(ApiStreamChunk::ToolCallDelta {
-                    id: call_id.to_string(),
-                    delta: args.to_string(),
-                }));
+            // TS requires both id and name to be non-empty for a valid partial
+            if let (Some(id), Some(n)) = (call_id, name) {
+                if !id.is_empty() && !n.is_empty() {
+                    return Ok(Some(ApiStreamChunk::ToolCallPartial {
+                        index,
+                        id: Some(id.to_string()),
+                        name: Some(n.to_string()),
+                        arguments: args.map(|s| s.to_string()),
+                    }));
+                }
             }
             Ok(None)
         }

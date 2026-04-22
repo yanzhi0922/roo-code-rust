@@ -72,11 +72,70 @@ pub struct GeminiResponseContent {
 }
 
 /// A single part in a Gemini response.
+///
+/// In the Gemini API, `thought` is a boolean flag indicating whether
+/// this part is a thinking/reasoning part. The text content of the
+/// thought is in the `text` field. `thought_signature` is used for
+/// Gemini 3 models to validate thought signatures during tool calling.
 #[derive(Debug, Deserialize, Clone)]
 pub struct GeminiResponsePart {
     pub text: Option<String>,
     pub function_call: Option<GeminiFunctionCall>,
-    pub thought: Option<String>,
+    /// Whether this part is a thinking/reasoning part (boolean in the API).
+    /// Deserialized from either a boolean or a string for compatibility.
+    pub thought: Option<GeminiThoughtValue>,
+    /// Thought signature for Gemini 3 models (required for tool calling round-trips).
+    pub thought_signature: Option<String>,
+}
+
+/// Wrapper for the `thought` field which can be a boolean or string in the Gemini API.
+/// The TS source checks `part.thought` as a boolean, but some API versions may send it
+/// as a string. We handle both cases.
+#[derive(Debug, Clone)]
+pub enum GeminiThoughtValue {
+    Bool(bool),
+    String(String),
+}
+
+impl<'de> serde::de::Deserialize<'de> for GeminiThoughtValue {
+    fn deserialize<D: serde::de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{self, Visitor};
+        use std::fmt;
+
+        struct ThoughtValueVisitor;
+
+        impl<'de> Visitor<'de> for ThoughtValueVisitor {
+            type Value = GeminiThoughtValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a boolean or a string")
+            }
+
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(GeminiThoughtValue::Bool(v))
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(GeminiThoughtValue::String(v.to_string()))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(GeminiThoughtValue::String(v))
+            }
+        }
+
+        deserializer.deserialize_any(ThoughtValueVisitor)
+    }
+}
+
+impl GeminiThoughtValue {
+    /// Returns true if the thought value indicates this is a thinking part.
+    pub fn is_thinking(&self) -> bool {
+        match self {
+            GeminiThoughtValue::Bool(b) => *b,
+            GeminiThoughtValue::String(s) => !s.is_empty(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -90,6 +149,8 @@ pub struct GeminiUsageMetadata {
     pub prompt_token_count: Option<u64>,
     pub candidates_token_count: Option<u64>,
     pub cached_content_token_count: Option<u64>,
+    /// Token count for thinking/reasoning (thoughtsTokenCount in TS).
+    pub thoughts_token_count: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

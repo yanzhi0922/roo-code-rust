@@ -147,9 +147,22 @@ impl TelemetryService {
     }
 
     /// Capture a context condensed event.
-    pub fn capture_context_condensed(&self, task_id: &str) {
+    /// Corresponds to TS: `captureContextCondensed(taskId, isAutomaticTrigger, usedCustomPrompt?)`
+    pub fn capture_context_condensed(
+        &self,
+        task_id: &str,
+        is_automatic_trigger: bool,
+        used_custom_prompt: Option<bool>,
+    ) {
         let mut props = HashMap::new();
         props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        props.insert(
+            "isAutomaticTrigger".to_string(),
+            Value::Bool(is_automatic_trigger),
+        );
+        if let Some(used) = used_custom_prompt {
+            props.insert("usedCustomPrompt".to_string(), Value::Bool(used));
+        }
         self.capture_event(TelemetryEventName::ContextCondensed, Some(props));
     }
 
@@ -171,6 +184,153 @@ impl TelemetryService {
     /// Get the number of registered clients.
     pub fn client_count(&self) -> usize {
         self.clients.len()
+    }
+
+    /// Capture a checkpoint created event.
+    /// Corresponds to TS: `captureCheckpointCreated(taskId)`
+    pub fn capture_checkpoint_created(&self, task_id: &str) {
+        let mut props = HashMap::new();
+        props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        self.capture_event(TelemetryEventName::CheckpointCreated, Some(props));
+    }
+
+    /// Capture a checkpoint diffed event.
+    /// Corresponds to TS: `captureCheckpointDiffed(taskId)`
+    pub fn capture_checkpoint_diffed(&self, task_id: &str) {
+        let mut props = HashMap::new();
+        props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        self.capture_event(TelemetryEventName::CheckpointDiffed, Some(props));
+    }
+
+    /// Capture a checkpoint restored event.
+    /// Corresponds to TS: `captureCheckpointRestored(taskId)`
+    pub fn capture_checkpoint_restored(&self, task_id: &str) {
+        let mut props = HashMap::new();
+        props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        self.capture_event(TelemetryEventName::CheckpointRestored, Some(props));
+    }
+
+    /// Capture a code action used event.
+    /// Corresponds to TS: `captureCodeActionUsed(actionType)`
+    pub fn capture_code_action_used(&self, action_type: &str) {
+        let mut props = HashMap::new();
+        props.insert(
+            "actionType".to_string(),
+            Value::String(action_type.to_string()),
+        );
+        self.capture_event(TelemetryEventName::CodeActionUsed, Some(props));
+    }
+
+    /// Capture a prompt enhanced event.
+    /// Corresponds to TS: `capturePromptEnhanced(taskId?)`
+    pub fn capture_prompt_enhanced(&self, task_id: Option<&str>) {
+        let mut props = HashMap::new();
+        if let Some(id) = task_id {
+            props.insert("taskId".to_string(), Value::String(id.to_string()));
+        }
+        self.capture_event(TelemetryEventName::PromptEnhanced, Some(props));
+    }
+
+    /// Capture a diff application error event.
+    /// Corresponds to TS: `captureDiffApplicationError(taskId, consecutiveMistakeCount)`
+    pub fn capture_diff_application_error(&self, task_id: &str, consecutive_mistake_count: u32) {
+        let mut props = HashMap::new();
+        props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        props.insert(
+            "consecutiveMistakeCount".to_string(),
+            Value::Number(consecutive_mistake_count.into()),
+        );
+        self.capture_event(TelemetryEventName::DiffApplicationError, Some(props));
+    }
+
+    /// Capture a shell integration error event.
+    /// Corresponds to TS: `captureShellIntegrationError(taskId)`
+    pub fn capture_shell_integration_error(&self, task_id: &str) {
+        let mut props = HashMap::new();
+        props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        self.capture_event(TelemetryEventName::ShellIntegrationError, Some(props));
+    }
+
+    /// Capture a consecutive mistake error event.
+    /// Corresponds to TS: `captureConsecutiveMistakeError(taskId)`
+    pub fn capture_consecutive_mistake_error(&self, task_id: &str) {
+        let mut props = HashMap::new();
+        props.insert("taskId".to_string(), Value::String(task_id.to_string()));
+        self.capture_event(TelemetryEventName::ConsecutiveMistakeError, Some(props));
+    }
+
+    /// Capture a tab shown event.
+    /// Corresponds to TS: `captureTabShown(tab)`
+    pub fn capture_tab_shown(&self, tab: &str) {
+        let mut props = HashMap::new();
+        props.insert("tab".to_string(), Value::String(tab.to_string()));
+        self.capture_event(TelemetryEventName::TabShown, Some(props));
+    }
+
+    /// Capture a mode setting changed event.
+    /// Corresponds to TS: `captureModeSettingChanged(settingName)`
+    pub fn capture_mode_setting_changed(&self, setting_name: &str) {
+        let mut props = HashMap::new();
+        props.insert(
+            "settingName".to_string(),
+            Value::String(setting_name.to_string()),
+        );
+        self.capture_event(TelemetryEventName::ModeSettingsChanged, Some(props));
+    }
+
+    /// Capture a custom mode created event.
+    /// Corresponds to TS: `captureCustomModeCreated(modeSlug, modeName)`
+    pub fn capture_custom_mode_created(&self, mode_slug: &str, mode_name: &str) {
+        let mut props = HashMap::new();
+        props.insert("modeSlug".to_string(), Value::String(mode_slug.to_string()));
+        props.insert("modeName".to_string(), Value::String(mode_name.to_string()));
+        self.capture_event(TelemetryEventName::CustomModeCreated, Some(props));
+    }
+
+    /// Capture a marketplace item installed event.
+    /// Corresponds to TS: `captureMarketplaceItemInstalled(itemId, itemType, itemName, target, properties?)`
+    pub fn capture_marketplace_item_installed(
+        &self,
+        item_id: &str,
+        item_type: &str,
+        item_name: &str,
+        target: &str,
+        extra_properties: Option<HashMap<String, Value>>,
+    ) {
+        let mut props = HashMap::new();
+        props.insert("itemId".to_string(), Value::String(item_id.to_string()));
+        props.insert("itemType".to_string(), Value::String(item_type.to_string()));
+        props.insert("itemName".to_string(), Value::String(item_name.to_string()));
+        props.insert("target".to_string(), Value::String(target.to_string()));
+        if let Some(extra) = extra_properties {
+            props.extend(extra);
+        }
+        self.capture_event(TelemetryEventName::MarketplaceItemInstalled, Some(props));
+    }
+
+    /// Capture a marketplace item removed event.
+    /// Corresponds to TS: `captureMarketplaceItemRemoved(itemId, itemType, itemName, target)`
+    pub fn capture_marketplace_item_removed(
+        &self,
+        item_id: &str,
+        item_type: &str,
+        item_name: &str,
+        target: &str,
+    ) {
+        let mut props = HashMap::new();
+        props.insert("itemId".to_string(), Value::String(item_id.to_string()));
+        props.insert("itemType".to_string(), Value::String(item_type.to_string()));
+        props.insert("itemName".to_string(), Value::String(item_name.to_string()));
+        props.insert("target".to_string(), Value::String(target.to_string()));
+        self.capture_event(TelemetryEventName::MarketplaceItemRemoved, Some(props));
+    }
+
+    /// Capture a title button clicked event.
+    /// Corresponds to TS: `captureTitleButtonClicked(button)`
+    pub fn capture_title_button_clicked(&self, button: &str) {
+        let mut props = HashMap::new();
+        props.insert("button".to_string(), Value::String(button.to_string()));
+        self.capture_event(TelemetryEventName::TitleButtonClicked, Some(props));
     }
 
     /// Capture telemetry settings changed event.

@@ -21,11 +21,9 @@ pub fn validate_write_to_file_params(params: &WriteToFileParams) -> Result<(), F
         ));
     }
 
-    if params.content.is_empty() {
-        return Err(FsToolError::Validation(
-            "content must not be empty".to_string(),
-        ));
-    }
+    // NOTE: TS source checks `newContent === undefined` (not provided),
+    // but allows empty string content for creating empty files.
+    // Since we have a String field, it's always present — no validation needed.
 
     Ok(())
 }
@@ -162,12 +160,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_empty_content() {
+    fn test_validate_empty_content_allowed() {
+        // TS allows empty content for creating empty files
         let params = WriteToFileParams {
             path: "test.txt".to_string(),
             content: "".to_string(),
         };
-        assert!(validate_write_to_file_params(&params).is_err());
+        assert!(validate_write_to_file_params(&params).is_ok());
     }
 
     #[test]

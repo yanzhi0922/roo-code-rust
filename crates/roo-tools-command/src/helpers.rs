@@ -120,13 +120,28 @@ pub fn format_persisted_output(
     let exit_status = format_exit_status(exit_code);
     let size_str = format_bytes(total_bytes);
 
-    format!(
-        "Command executed in '{}'. {}\n\n\
-         Output ({}) persisted. Artifact ID: {}\n\n\
-         Preview:\n{}\n\n\
-         Use read_command_output tool to view full output if needed.",
-        working_dir, exit_status, size_str, artifact_id, preview
-    )
+    // Matches TS formatPersistedOutput exactly:
+    // [
+    //   `Command executed in '${workingDir}'. ${exitStatus}`,
+    //   "",
+    //   `Output (${sizeStr}) persisted. Artifact ID: ${artifactId}`,
+    //   "",
+    //   "Preview:",
+    //   result.preview,
+    //   "",
+    //   "Use read_command_output tool to view full output if needed.",
+    // ].join("\n")
+    vec![
+        format!("Command executed in '{}'. {}", working_dir, exit_status),
+        String::new(),
+        format!("Output ({}) persisted. Artifact ID: {}", size_str, artifact_id),
+        String::new(),
+        "Preview:".to_string(),
+        preview.to_string(),
+        String::new(),
+        "Use read_command_output tool to view full output if needed.".to_string(),
+    ]
+    .join("\n")
 }
 
 /// Format exit status from exit code.

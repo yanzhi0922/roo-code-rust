@@ -54,7 +54,7 @@ impl SkillsManager {
     ///
     /// Source: `SkillsManager.getSkillKey()`
     pub fn get_skill_key(name: &str, source: SkillSource, mode: Option<&str>) -> String {
-        format!("{}:{}:{}", name, source, mode.unwrap_or(""))
+        format!("{}:{}:{}", source, mode.unwrap_or("generic"), name)
     }
 
     // -----------------------------------------------------------------------
@@ -200,11 +200,31 @@ impl SkillsManager {
         // Determine the skill name: frontmatter > fallback (directory name)
         let name = frontmatter
             .name
+            .clone()
             .or_else(|| fallback_name.map(|n| n.to_string()))
             .ok_or_else(|| SkillsError::ParseError {
                 path: path_str.clone(),
                 reason: "Skill name not found in frontmatter or directory name".to_string(),
             })?;
+
+        // Validate that frontmatter name matches the directory name
+        // Corresponds to TS: "name field must match the parent directory name"
+        if let Some(ref fm_name) = frontmatter.name {
+            let effective_name = fallback_name.unwrap_or("");
+            if fm_name != effective_name {
+                warn!(
+                    "Skill name \"{}\" doesn't match directory \"{}\"",
+                    fm_name, effective_name
+                );
+                return Err(SkillsError::ParseError {
+                    path: path_str.clone(),
+                    reason: format!(
+                        "Skill name \"{}\" doesn't match directory \"{}\"",
+                        fm_name, effective_name
+                    ),
+                });
+            }
+        }
 
         // Validate the name
         let validation = validate_skill_name(&name);
@@ -215,9 +235,26 @@ impl SkillsManager {
             )));
         }
 
-        let description = frontmatter
-            .description
-            .unwrap_or_else(|| "No description".to_string());
+        // Validate description is present (required field in TS)
+        let description = frontmatter.description.ok_or_else(|| {
+            SkillsError::ParseError {
+                path: path_str.clone(),
+                reason: "Skill is missing required 'description' field".to_string(),
+            }
+        })?;
+
+        // Validate description length (1-1024 chars, matching TS)
+        let trimmed_desc = description.trim();
+        if trimmed_desc.is_empty() || trimmed_desc.len() > 1024 {
+            warn!(
+                "Skill \"{}\" has an invalid description length: must be 1-1024 characters (got {})",
+                name,
+                trimmed_desc.len()
+            );
+            return Err(SkillsError::InvalidDescription {
+                length: trimmed_desc.len(),
+            });
+        }
 
         // Merge deprecated `mode` field into `mode_slugs`
         let mode_slugs = frontmatter.mode_slugs.or_else(|| {
@@ -319,11 +356,18 @@ impl SkillsManager {
         }
 
         // Same source: mode-specific > generic
-        let existing_has_mode = existing.mode.is_some();
-        let new_has_mode = new_skill.mode.is_some();
+        // Corresponds to TS: checking modeSlugs array presence, not deprecated mode field
+        let existing_has_modes = existing
+            .mode_slugs
+            .as_ref()
+            .map_or(false, |s| !s.is_empty());
+        let new_has_modes = new_skill
+            .mode_slugs
+            .as_ref()
+            .map_or(false, |s| !s.is_empty());
 
-        if new_has_mode != existing_has_mode {
-            return new_has_mode;
+        if new_has_modes != existing_has_modes {
+            return new_has_modes;
         }
 
         // Same priority — don't override
@@ -417,8 +461,9 @@ impl SkillsManager {
             )));
         }
 
-        // Validate description length
-        if description.len() > 1000 {
+        // Validate description length (1-1024 chars, matching TS)
+        let trimmed = description.trim();
+        if trimmed.is_empty() || trimmed.len() > 1024 {
             return Err(SkillsError::InvalidDescription {
                 length: description.len(),
             });
@@ -626,13 +671,13 @@ mod tests {
     #[test]
     fn test_get_skill_key_basic() {
         let key = SkillsManager::get_skill_key("my-skill", SkillSource::Global, None);
-        assert_eq!(key, "my-skill:global:");
+        assert_eq!(key, "global:generic:my-skill");
     }
 
     #[test]
     fn test_get_skill_key_with_mode() {
         let key = SkillsManager::get_skill_key("my-skill", SkillSource::Project, Some("code"));
-        assert_eq!(key, "my-skill:project:code");
+        assert_eq!(key, "project:code:my-skill");
     }
 
     // -----------------------------------------------------------------------
@@ -722,8 +767,8 @@ mod tests {
             description: "test".to_string(),
             path: "/specific".to_string(),
             source: SkillSource::Global,
-            mode: Some("code".to_string()),
-            mode_slugs: None,
+            mode: None,
+            mode_slugs: Some(vec!["code".to_string()]),
         };
         assert!(SkillsManager::should_override_skill(&generic, &specific));
         assert!(!SkillsManager::should_override_skill(&specific, &generic));
@@ -767,7 +812,7 @@ mod tests {
             mode_slugs: None,
         };
         mgr.skills
-            .insert("generic-skill:global:".to_string(), skill);
+            .insert("global:generic:generic-skill".to_string(), skill);
 
         let skills = mgr.get_skills_for_mode("code");
         assert_eq!(skills.len(), 1);
@@ -787,7 +832,7 @@ mod tests {
             mode_slugs: Some(vec!["code".to_string()]),
         };
         mgr.skills
-            .insert("code-skill:global:".to_string(), code_only);
+            .insert("global:generic:code-skill".to_string(), code_only);
 
         let skills = mgr.get_skills_for_mode("code");
         assert_eq!(skills.len(), 1);
@@ -818,9 +863,9 @@ mod tests {
         };
 
         mgr.skills
-            .insert("my-skill:global:".to_string(), global_skill);
+            .insert("global:generic:my-skill".to_string(), global_skill);
         mgr.skills
-            .insert("my-skill:project:".to_string(), project_skill);
+            .insert("project:generic:my-skill".to_string(), project_skill);
 
         let skills = mgr.get_skills_for_mode("code");
         assert_eq!(skills.len(), 1);
@@ -844,7 +889,7 @@ mod tests {
             mode: None,
             mode_slugs: None,
         };
-        mgr.skills.insert("test:global:".to_string(), skill);
+        mgr.skills.insert("global:generic:test".to_string(), skill);
 
         let found = mgr.get_skill("test", SkillSource::Global, None);
         assert!(found.is_some());
@@ -867,7 +912,7 @@ mod tests {
             mode_slugs: None,
         };
         mgr.skills
-            .insert("my-skill:project:code".to_string(), skill);
+            .insert("project:code:my-skill".to_string(), skill);
 
         let found = mgr.find_skill_by_name_and_source("my-skill", SkillSource::Project);
         assert!(found.is_some());

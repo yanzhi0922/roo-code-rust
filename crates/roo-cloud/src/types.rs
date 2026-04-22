@@ -5,6 +5,7 @@ use serde_json::Value;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthState {
     LoggedOut,
+    Initializing,
     AttemptingSession,
     InactiveSession,
     ActiveSession,

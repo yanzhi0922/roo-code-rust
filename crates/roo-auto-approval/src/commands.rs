@@ -86,23 +86,26 @@ pub fn find_longest_prefix_match<'a>(
     }
 
     let trimmed = command.trim().to_lowercase();
-    let mut longest_match: Option<&'a str> = None;
+    // Track (original prefix ref, lowercase length) so that comparisons
+    // are always between lowercase lengths — matching the TS behaviour
+    // where `longestMatch` is always a lowercase string.
+    let mut best: Option<(&'a str, usize)> = None;
 
     for prefix in prefixes {
         let lower = prefix.to_lowercase();
         if lower == "*" || trimmed.starts_with(&lower) {
-            match longest_match {
-                None => longest_match = Some(prefix.as_str()),
-                Some(current) => {
-                    if lower.len() > current.len() {
-                        longest_match = Some(prefix.as_str());
-                    }
+            let lower_len = lower.len();
+            match best {
+                None => best = Some((prefix.as_str(), lower_len)),
+                Some((_, prev_len)) if lower_len > prev_len => {
+                    best = Some((prefix.as_str(), lower_len));
                 }
+                _ => {}
             }
         }
     }
 
-    longest_match
+    best.map(|(s, _)| s)
 }
 
 // ---------------------------------------------------------------------------

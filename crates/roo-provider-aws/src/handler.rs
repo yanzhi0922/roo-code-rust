@@ -31,6 +31,7 @@ pub struct AwsBedrockHandler {
     model_id: String,
     model_info: ModelInfo,
     use_cross_region_inference: bool,
+    temperature: f64,
 }
 
 impl AwsBedrockHandler {
@@ -76,6 +77,7 @@ impl AwsBedrockHandler {
             model_id,
             model_info,
             use_cross_region_inference: config.use_cross_region_inference,
+            temperature: config.temperature.unwrap_or(crate::types::BEDROCK_DEFAULT_TEMPERATURE),
         })
     }
 
@@ -110,11 +112,17 @@ impl AwsBedrockHandler {
     }
 
     /// Build the Converse API request body.
+    ///
+    /// Faithfully mirrors the TS `createMessage` payload construction:
+    /// - Includes temperature in inferenceConfig
+    /// - Supports tool choice configuration
+    /// - Supports additionalModelRequestFields for thinking/reasoning
     fn build_converse_request(
         &self,
         system_prompt: &str,
         messages: &[ApiMessage],
         tools: Option<&Vec<Value>>,
+        tool_choice: Option<&Value>,
     ) -> Value {
         let filtered_messages = filter_non_anthropic_blocks(messages.to_vec());
 
@@ -235,10 +243,11 @@ impl AwsBedrockHandler {
             "system": system_messages,
             "inferenceConfig": {
                 "maxTokens": self.model_info.max_tokens.unwrap_or(8192),
+                "temperature": self.temperature,
             },
         });
 
-        // Add tools if provided
+        // Add tools if provided (Bedrock Converse toolSpec format)
         if let Some(tools) = tools {
             if !tools.is_empty() {
                 let tool_list: Vec<Value> = tools
@@ -263,7 +272,46 @@ impl AwsBedrockHandler {
 
                 if !tool_list.is_empty() {
                     body["tools"] = json!(tool_list);
+
+                    // Add tool choice configuration
+                    // Maps TS tool_choice values to Bedrock Converse toolChoice format
+                    if let Some(choice) = tool_choice {
+                        let tool_choice_value = match choice.as_str() {
+                            Some("auto") => json!({ "auto": {} }),
+                            Some("any") | Some("required") => json!({ "any": {} }),
+                            Some("none") => json!({ "auto": {} }), // Bedrock doesn't have "none", use auto
+                            _ => {
+                                // Check for specific function choice: { type: "function", function: { name: "..." } }
+                                if choice.get("type").and_then(|t| t.as_str()) == Some("function") {
+                                    if let Some(name) = choice.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                                        json!({ "tool": { "name": name } })
+                                    } else {
+                                        json!({ "auto": {} })
+                                    }
+                                } else {
+                                    json!({ "auto": {} })
+                                }
+                            }
+                        };
+                        body["toolConfig"] = json!({
+                            "tools": body["tools"],
+                            "toolChoice": tool_choice_value,
+                        });
+                    }
                 }
+            }
+        }
+
+        // Add additionalModelRequestFields for thinking/reasoning budget
+        // when the model supports it
+        if self.model_info.supports_reasoning_budget.unwrap_or(false) {
+            if let Some(budget) = self.model_info.max_thinking_tokens {
+                body["additionalModelRequestFields"] = json!({
+                    "thinking": {
+                        "type": "enabled",
+                        "budget_tokens": budget,
+                    }
+                });
             }
         }
 
@@ -280,7 +328,7 @@ impl Provider for AwsBedrockHandler {
         tools: Option<Vec<Value>>,
         _metadata: CreateMessageMetadata,
     ) -> Result<ApiStream> {
-        let body = self.build_converse_request(system_prompt, &messages, tools.as_ref());
+        let body = self.build_converse_request(system_prompt, &messages, tools.as_ref(), _metadata.tool_choice.as_ref());
         let body_bytes = serde_json::to_vec(&body).map_err(ProviderError::Json)?;
         let model_id = self.effective_model_id();
 
@@ -470,7 +518,7 @@ impl Provider for AwsBedrockHandler {
             is_summary: None,
             condense_id: None,
             reasoning_details: None,
-        }], None);
+        }], None, None);
 
         let body_bytes = serde_json::to_vec(&body).map_err(ProviderError::Json)?;
         let model_id = self.effective_model_id();
@@ -585,6 +633,7 @@ mod tests {
             use_cross_region_inference: false,
             endpoint_url: None,
             request_timeout: None,
+            temperature: None,
         };
         let handler = AwsBedrockHandler::new(config);
         assert!(handler.is_ok());
@@ -601,6 +650,7 @@ mod tests {
             use_cross_region_inference: false,
             endpoint_url: None,
             request_timeout: None,
+            temperature: None,
         };
         let handler = AwsBedrockHandler::new(config).unwrap();
         let (model_id, _) = handler.get_model();
@@ -618,6 +668,7 @@ mod tests {
             use_cross_region_inference: false,
             endpoint_url: None,
             request_timeout: None,
+            temperature: None,
         };
         let handler = AwsBedrockHandler::new(config).unwrap();
         let (model_id, _) = handler.get_model();
@@ -635,6 +686,7 @@ mod tests {
             use_cross_region_inference: false,
             endpoint_url: None,
             request_timeout: None,
+            temperature: None,
         };
         let handler = AwsBedrockHandler::new(config).unwrap();
         assert_eq!(handler.provider_name(), ProviderName::Bedrock);
@@ -675,6 +727,7 @@ mod tests {
             use_cross_region_inference: true,
             endpoint_url: None,
             request_timeout: None,
+            temperature: None,
         };
         let handler = AwsBedrockHandler::new(config).unwrap();
         let effective_id = handler.effective_model_id();
@@ -692,6 +745,7 @@ mod tests {
             use_cross_region_inference: false,
             endpoint_url: None,
             request_timeout: None,
+            temperature: None,
         };
         let handler = AwsBedrockHandler::new(config).unwrap();
         assert_eq!(handler.signer.session_token(), Some("session-token-123"));
@@ -708,6 +762,7 @@ mod tests {
             use_cross_region_inference: false,
             endpoint_url: Some("https://custom-bedrock.example.com".to_string()),
             request_timeout: None,
+            temperature: None,
         };
         let handler = AwsBedrockHandler::new(config).unwrap();
         assert_eq!(handler.base_url, "https://custom-bedrock.example.com");

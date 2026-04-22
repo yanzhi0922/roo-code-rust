@@ -272,7 +272,62 @@ impl CodeIndexManager {
         Ok(false)
     }
 
+    /// Start the file watcher for incremental updates.
+    /// Corresponds to TS: `CodeIndexOrchestrator.startWatcher()`
+    pub fn start_watcher(&mut self) -> Result<(), IndexError> {
+        if self.state == IndexingState::NotInitialized {
+            return Err(IndexError::NotInitialized);
+        }
+        // In this simplified implementation, watcher is a no-op
+        // A full implementation would use notify crate for file watching
+        Ok(())
+    }
+
+    /// Stop the file watcher.
+    /// Corresponds to TS: `CodeIndexOrchestrator.stopWatcher()`
+    pub fn stop_watcher(&mut self) {
+        // In this simplified implementation, watcher is a no-op
+    }
+
+    /// Handle settings changes that may require re-indexing.
+    /// Corresponds to TS: `CodeIndexManager.handleSettingsChange()`
+    pub fn handle_settings_change(&mut self, new_config: CodeIndexConfig) -> Result<bool, IndexError> {
+        let requires_restart = self.config != new_config;
+        self.config = new_config;
+
+        if requires_restart && self.state == IndexingState::Indexing {
+            self.stop_indexing();
+        }
+
+        Ok(requires_restart)
+    }
+
+    /// Recover from error state by clearing the error and resetting internal state.
+    /// Corresponds to TS: `CodeIndexManager.recoverFromError()`
+    pub fn recover_from_error(&mut self) {
+        if self.state == IndexingState::Error {
+            self.state = IndexingState::Idle;
+        }
+    }
+
+    /// Search the index for the given query (alias for `search`).
+    /// Corresponds to TS: `CodeIndexManager.searchIndex(query, directoryPrefix?)`
+    pub fn search_index(
+        &self,
+        query: &str,
+        directory_prefix: Option<&str>,
+    ) -> Vec<VectorStoreSearchResult> {
+        self.search_with_prefix(query, directory_prefix, 20)
+    }
+
+    /// Check whether the feature is enabled in the config.
+    /// Corresponds to TS: `CodeIndexManager.isFeatureEnabled`
+    pub fn is_feature_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
     /// Dispose of the index manager, releasing all resources.
+    /// Corresponds to TS: `CodeIndexManager.dispose()`
     pub fn dispose(&mut self) {
         self.state = IndexingState::ShuttingDown;
         self.indexed_files.clear();

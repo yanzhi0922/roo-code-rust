@@ -14,6 +14,21 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Unescape HTML entities in a command string.
+///
+/// Matches TS: `const canonicalCommand = unescapeHtmlEntities(command)`
+/// Some LLMs (non-Claude) may output HTML entities like `<` instead of `<`
+/// in their tool call parameters.
+pub fn unescape_command(command: &str) -> String {
+    command
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+}
+
 // ---------------------------------------------------------------------------
 // Validation & preparation (kept for backward-compat)
 // ---------------------------------------------------------------------------
@@ -291,6 +306,21 @@ mod tests {
         };
         let prepared = prepare_command_execution(&params, None).unwrap();
         assert_eq!(prepared.timeout_secs, DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_unescape_command() {
+        assert_eq!(unescape_command("echo &"), "echo &");
+        assert_eq!(unescape_command("echo <"), "echo <");
+        assert_eq!(unescape_command("echo >"), "echo >");
+        assert_eq!(unescape_command("echo &quot;"), "echo \"");
+        assert_eq!(unescape_command("echo '"), "echo '");
+        assert_eq!(unescape_command("echo '"), "echo '");
+        assert_eq!(unescape_command("echo hello"), "echo hello");
+        assert_eq!(
+            unescape_command("<div>hello&world</div>"),
+            "<div>hello&world</div>"
+        );
     }
 
     #[tokio::test]

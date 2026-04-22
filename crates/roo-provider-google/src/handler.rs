@@ -1,7 +1,9 @@
-﻿//! Google Gemini provider handler.
+//! Google Gemini provider handler.
 //!
 //! Uses the Gemini generateContent API with SSE streaming.
 //! Converts messages from Anthropic format to Gemini format.
+//!
+//! Faithfully ported from `.research/Roo-Code/src/api/providers/gemini.ts`.
 
 use std::pin::Pin;
 
@@ -35,8 +37,17 @@ pub struct GoogleHandler {
 impl GoogleHandler {
     /// Create a new Google Gemini handler from configuration.
     pub fn new(config: GoogleConfig) -> Result<Self> {
-        let model_id = config.model_id.unwrap_or_else(|| models::default_model_id());
-        let model_info = models::models()
+        let raw_model_id = config.model_id.unwrap_or_else(|| models::default_model_id());
+
+        // Strip :thinking suffix — it indicates a hybrid reasoning model
+        // but the actual Gemini API model ID does not include this suffix.
+        let model_id = if raw_model_id.ends_with(":thinking") {
+            raw_model_id[..raw_model_id.len() - ":thinking".len()].to_string()
+        } else {
+            raw_model_id
+        };
+
+        let mut model_info = models::models()
             .get(&model_id)
             .cloned()
             .unwrap_or_else(|| ModelInfo {
@@ -49,6 +60,30 @@ impl GoogleHandler {
                 description: Some("Google Gemini model (unknown variant)".to_string()),
                 ..Default::default()
             });
+
+        // Gemini models perform better with the edit tool instead of apply_diff.
+        // This matches the TS behavior in getModel().
+        let mut excluded = model_info.excluded_tools.clone().unwrap_or_default();
+        if !excluded.contains(&"apply_diff".to_string()) {
+            excluded.push("apply_diff".to_string());
+        }
+        let mut included = model_info.included_tools.clone().unwrap_or_default();
+        if !included.contains(&"edit".to_string()) {
+            included.push("edit".to_string());
+        }
+        model_info.excluded_tools = Some(excluded);
+        model_info.included_tools = Some(included);
+
+        // Determine temperature respecting model capabilities and defaults.
+        // If supportsTemperature is explicitly false, ignore user overrides
+        // and pin to the model's defaultTemperature (or omit if undefined).
+        // Otherwise, allow the user setting to override, falling back to model default,
+        // then to 1 for Gemini provider default.
+        let temperature = if model_info.supports_temperature != Some(false) {
+            config.temperature.or(model_info.default_temperature).unwrap_or(1.0)
+        } else {
+            model_info.default_temperature.unwrap_or(1.0)
+        };
 
         let mut client_builder = reqwest::Client::builder();
         if let Some(timeout) = config.request_timeout {
@@ -63,7 +98,7 @@ impl GoogleHandler {
             base_url: config.base_url,
             model_id,
             model_info,
-            temperature: config.temperature.unwrap_or(0.0),
+            temperature,
         })
     }
 
@@ -115,7 +150,10 @@ impl GoogleHandler {
             });
         }
 
-        // Add tools if provided (Gemini function declarations)
+        // Add tools if provided (Gemini function declarations).
+        // Google built-in tools (Grounding, URL Context) are mutually exclusive
+        // with function declarations in the Gemini API, so we always use
+        // function declarations when tools are provided.
         if let Some(tools) = tools {
             if !tools.is_empty() {
                 let function_declarations: Vec<Value> = tools
@@ -135,7 +173,7 @@ impl GoogleHandler {
                     .collect();
 
                 if !function_declarations.is_empty() {
-                    body["tools"] = json!([{ "function_declarations": function_declarations }]);
+                    body["tools"] = json!([{ "functionDeclarations": function_declarations }]);
                 }
             }
         }
@@ -144,11 +182,19 @@ impl GoogleHandler {
     }
 
     /// Parse the SSE stream from the Gemini API.
+    ///
+    /// Faithfully mirrors the TS `createMessage` stream processing:
+    /// - Checks `part.thought` (boolean) to distinguish thinking from content
+    /// - Captures `thoughtSignature` for Gemini 3 round-trips
+    /// - Emits tool calls as partial chunks for NativeToolCallParser
+    /// - Includes `reasoningTokens` (thoughtsTokenCount) in usage
+    /// - Applies tiered pricing when model info has tiers
     fn parse_sse_stream(
         stream: Pin<Box<dyn Stream<Item = Result<GeminiStreamResponse>> + Send>>,
         model_info: ModelInfo,
     ) -> ApiStream {
         let mut usage_emitted = false;
+        let mut tool_call_counter: u64 = 0;
 
         let processed = stream.flat_map(move |chunk_result| {
             let model_info = model_info.clone();
@@ -163,35 +209,59 @@ impl GoogleHandler {
                             if let Some(content) = &candidate.content {
                                 if let Some(parts) = &content.parts {
                                     for part in parts {
-                                        if let Some(ref text) = part.text {
-                                            if !text.is_empty() {
-                                                results.push(Ok(ApiStreamChunk::Text {
-                                                    text: text.clone(),
-                                                }));
+                                        // Capture thought signatures so they can be
+                                        // persisted into API history for round-tripping.
+                                        // Gemini 3 requires this during tool calling.
+                                        let _thought_signature = &part.thought_signature;
+
+                                        let is_thought = part.thought.as_ref()
+                                            .map(|t| t.is_thinking())
+                                            .unwrap_or(false);
+
+                                        if is_thought {
+                                            // This is a thinking/reasoning part.
+                                            // The text content is in part.text (not part.thought).
+                                            if let Some(ref text) = part.text {
+                                                if !text.is_empty() {
+                                                    results.push(Ok(ApiStreamChunk::Reasoning {
+                                                        text: text.clone(),
+                                                        signature: part.thought_signature.clone(),
+                                                    }));
+                                                }
                                             }
-                                        }
-                                        if let Some(ref fc) = part.function_call {
-                                            let id = format!("call_{}", simple_hash(&fc.name));
-                                            results.push(Ok(ApiStreamChunk::ToolCallStart {
-                                                id: id.clone(),
-                                                name: fc.name.clone(),
+                                        } else if let Some(ref fc) = part.function_call {
+                                            // Gemini sends complete function calls in a single chunk.
+                                            // Emit as partial chunks for consistent handling with
+                                            // NativeToolCallParser, matching TS behavior.
+                                            let call_id = format!("{}-{}", fc.name, tool_call_counter);
+                                            let args = serde_json::to_string(&fc.args)
+                                                .unwrap_or_default();
+
+                                            // Emit name first
+                                            results.push(Ok(ApiStreamChunk::ToolCallPartial {
+                                                index: tool_call_counter,
+                                                id: Some(call_id.clone()),
+                                                name: Some(fc.name.clone()),
+                                                arguments: None,
                                             }));
-                                            results.push(Ok(ApiStreamChunk::ToolCall {
-                                                id: id.clone(),
-                                                name: fc.name.clone(),
-                                                arguments: serde_json::to_string(&fc.args)
-                                                    .unwrap_or_default(),
+
+                                            // Then emit arguments
+                                            results.push(Ok(ApiStreamChunk::ToolCallPartial {
+                                                index: tool_call_counter,
+                                                id: Some(call_id.clone()),
+                                                name: None,
+                                                arguments: Some(args),
                                             }));
-                                            results.push(Ok(ApiStreamChunk::ToolCallEnd {
-                                                id,
-                                            }));
-                                        }
-                                        if let Some(ref thought) = part.thought {
-                                            if !thought.is_empty() {
-                                                results.push(Ok(ApiStreamChunk::Reasoning {
-                                                    text: thought.clone(),
-                                                    signature: None,
-                                                }));
+
+                                            tool_call_counter += 1;
+                                        } else {
+                                            // This is regular content (non-thought text).
+                                            if let Some(ref text) = part.text {
+                                                if !text.is_empty() {
+                                                    results.push(Ok(ApiStreamChunk::Text {
+                                                        text: text.clone(),
+                                                    }));
+                                                }
                                             }
                                         }
                                     }
@@ -205,11 +275,12 @@ impl GoogleHandler {
                                         .iter()
                                         .filter_map(|chunk| {
                                             chunk.web.as_ref().map(|web| GroundingSource {
-                                                title: web.title.clone(),
+                                                title: web.title.clone().or_else(|| web.uri.clone()),
                                                 url: web.uri.clone(),
                                                 snippet: None,
                                             })
                                         })
+                                        .filter(|s| s.url.is_some())
                                         .collect();
                                     if !sources.is_empty() {
                                         results.push(Ok(ApiStreamChunk::Grounding { sources }));
@@ -219,22 +290,54 @@ impl GoogleHandler {
                         }
                     }
 
-                    // Handle usage
+                    // Handle usage — matches TS normalizeUsage with tiered pricing
                     if let Some(usage) = &response.usage_metadata {
                         if !emitted {
                             let input_tokens = usage.prompt_token_count.unwrap_or(0);
                             let output_tokens = usage.candidates_token_count.unwrap_or(0);
                             let cache_read_tokens = usage.cached_content_token_count.unwrap_or(0);
+                            let reasoning_tokens = usage.thoughts_token_count;
 
-                            let input_cost = model_info.input_price.unwrap_or(0.0)
-                                * input_tokens as f64
-                                / 1_000_000.0;
-                            let output_cost = model_info.output_price.unwrap_or(0.0)
-                                * output_tokens as f64
-                                / 1_000_000.0;
-                            let cache_read_cost =
-                                model_info.cache_reads_price.unwrap_or(0.0) * cache_read_tokens as f64
-                                    / 1_000_000.0;
+                            // Resolve pricing, considering tiered pricing if available.
+                            let (input_price, output_price, cache_reads_price) =
+                                if let Some(ref tiers) = model_info.tiers {
+                                    let tier = tiers.iter().find(|t| {
+                                        input_tokens <= t.context_window as u64
+                                    });
+                                    if let Some(tier) = tier {
+                                        (
+                                            tier.input_price.or(model_info.input_price).unwrap_or(0.0),
+                                            tier.output_price.or(model_info.output_price).unwrap_or(0.0),
+                                            tier.cache_reads_price.or(model_info.cache_reads_price).unwrap_or(0.0),
+                                        )
+                                    } else {
+                                        (
+                                            model_info.input_price.unwrap_or(0.0),
+                                            model_info.output_price.unwrap_or(0.0),
+                                            model_info.cache_reads_price.unwrap_or(0.0),
+                                        )
+                                    }
+                                } else {
+                                    (
+                                        model_info.input_price.unwrap_or(0.0),
+                                        model_info.output_price.unwrap_or(0.0),
+                                        model_info.cache_reads_price.unwrap_or(0.0),
+                                    )
+                                };
+
+                            // Subtract cached tokens from total input for uncached cost.
+                            let uncached_input_tokens = input_tokens.saturating_sub(cache_read_tokens);
+                            // Bill both completion and reasoning tokens as output.
+                            let billed_output_tokens = output_tokens
+                                + reasoning_tokens.unwrap_or(0);
+
+                            let input_cost = input_price * uncached_input_tokens as f64 / 1_000_000.0;
+                            let output_cost = output_price * billed_output_tokens as f64 / 1_000_000.0;
+                            let cache_read_cost = if cache_read_tokens > 0 {
+                                cache_reads_price * cache_read_tokens as f64 / 1_000_000.0
+                            } else {
+                                0.0
+                            };
 
                             results.push(Ok(ApiStreamChunk::Usage {
                                 input_tokens,
@@ -245,7 +348,7 @@ impl GoogleHandler {
                                 } else {
                                     None
                                 },
-                                reasoning_tokens: None,
+                                reasoning_tokens,
                                 total_cost: Some(input_cost + output_cost + cache_read_cost),
                             }));
                             emitted = true;
@@ -265,14 +368,6 @@ impl GoogleHandler {
     }
 }
 
-/// Simple hash function for generating tool call IDs.
-fn simple_hash(s: &str) -> u64 {
-    let mut hash: u64 = 5381;
-    for byte in s.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
-    }
-    hash
-}
 
 #[async_trait]
 impl Provider for GoogleHandler {
@@ -610,7 +705,7 @@ impl VertexHandler {
                     .collect();
 
                 if !function_declarations.is_empty() {
-                    body["tools"] = json!([{ "function_declarations": function_declarations }]);
+                    body["tools"] = json!([{ "functionDeclarations": function_declarations }]);
                 }
             }
         }
@@ -899,12 +994,6 @@ mod tests {
         assert!(info.max_tokens.is_some());
     }
 
-    #[test]
-    fn test_simple_hash_deterministic() {
-        let h1 = simple_hash("test_function");
-        let h2 = simple_hash("test_function");
-        assert_eq!(h1, h2);
-    }
 
     #[test]
     fn test_handler_with_timeout() {

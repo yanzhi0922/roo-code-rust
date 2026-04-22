@@ -2,6 +2,10 @@
 
 use roo_types::provider_settings::ProviderSettings;
 
+/// Default temperature for Bedrock models.
+/// Matches BEDROCK_DEFAULT_TEMPERATURE from the TS source.
+pub const BEDROCK_DEFAULT_TEMPERATURE: f64 = 0.0;
+
 /// Configuration for the AWS Bedrock provider.
 #[derive(Debug, Clone)]
 pub struct AwsBedrockConfig {
@@ -21,6 +25,8 @@ pub struct AwsBedrockConfig {
     pub endpoint_url: Option<String>,
     /// Request timeout in milliseconds.
     pub request_timeout: Option<u64>,
+    /// Temperature for generation.
+    pub temperature: Option<f64>,
 }
 
 impl AwsBedrockConfig {
@@ -54,6 +60,7 @@ impl AwsBedrockConfig {
             use_cross_region_inference: settings.aws_use_cross_region_inference.unwrap_or(false),
             endpoint_url: settings.aws_bedrock_endpoint.clone(),
             request_timeout: settings.request_timeout,
+            temperature: settings.model_temperature.flatten(),
         })
     }
 }
