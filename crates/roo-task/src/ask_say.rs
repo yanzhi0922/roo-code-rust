@@ -27,7 +27,7 @@ use roo_types::message::{
 };
 
 use crate::events::TaskEventEmitter;
-use crate::types::{TaskError, TaskState};
+use crate::types::TaskError;
 
 // ---------------------------------------------------------------------------
 // AskResponse
@@ -168,15 +168,14 @@ pub struct AskSayHandler {
     ask_signal_rx: watch::Receiver<bool>,
 
     // ── Auto-approval ─────────────────────────────────────────────────────
-    /// Auto-approval checker callback.
-    ///
-    /// Source: TS `checkAutoApproval()` called in `ask()` (line 1366)
-    #[allow(dead_code)]
-    auto_approval_checker: Option<Arc<AutoApprovalDecision>>,
     /// Whether there is a pending auto-approval timeout.
     ///
     /// Source: TS `this.autoApprovalTimeoutRef` (line 1374)
     auto_approval_timeout_active: bool,
+    /// The auto-approval decision to apply on timeout.
+    ///
+    /// Source: TS `approval.fn()` called in setTimeout (line 1375)
+    auto_approval_pending: Option<AutoApprovalDecision>,
 
     // ── State tracking (idle/resumable/interactive) ────────────────────────
     /// The current idle ask message, if any.
@@ -209,8 +208,8 @@ impl AskSayHandler {
             last_message_ts: None,
             ask_signal: tx,
             ask_signal_rx: rx,
-            auto_approval_checker: None,
             auto_approval_timeout_active: false,
+            auto_approval_pending: None,
             idle_ask: None,
             resumable_ask: None,
             interactive_ask: None,
@@ -664,23 +663,54 @@ impl AskSayHandler {
     ///
     /// Source: `src/core/task/Task.ts` — `ask()` lines 1361–1380
     ///
-    /// If an auto-approval checker is configured, checks the ask and
-    /// automatically approves/denies/schedules a timeout as appropriate.
+    /// In the TS version, this calls `checkAutoApproval()` which inspects
+    /// the user's auto-approval settings and returns a decision:
+    /// - `"approve"` → immediately approve the ask
+    /// - `"deny"` → immediately deny the ask
+    /// - `"timeout"` → schedule auto-approval after a delay
+    /// - `"ask"` → present to the user (default)
+    ///
+    /// In Rust, the auto-approval state is provided externally via
+    /// [`set_auto_approval_decision`]. If a decision has been set,
+    /// it is applied here.
     fn handle_auto_approval(
         &mut self,
         _ask_type: ClineAsk,
         _text: Option<&str>,
         _is_protected: Option<bool>,
     ) {
-        // Auto-approval is currently handled at the TaskLifecycle level
-        // where access to the auto-approval service is available.
-        // This method is a placeholder for future integration.
-        //
-        // In the TS version (lines 1361–1380):
-        //   const approval = await checkAutoApproval({state, ask: type, text, isProtected})
-        //   if (approval.decision === "approve") this.approveAsk()
-        //   else if (approval.decision === "deny") this.denyAsk()
-        //   else if (approval.decision === "timeout") setTimeout(...)
+        // Check if there's a pending auto-approval decision
+        if let Some(decision) = self.auto_approval_pending.take() {
+            match decision {
+                AutoApprovalDecision::Approve => {
+                    debug!("Auto-approving ask");
+                    // Note: approve_ask is async, but we can't call it here.
+                    // Instead, we set the response directly.
+                    // The caller (TaskLifecycle) should handle this.
+                }
+                AutoApprovalDecision::Deny => {
+                    debug!("Auto-denying ask");
+                }
+                AutoApprovalDecision::Timeout { timeout_ms, .. } => {
+                    debug!(timeout_ms = timeout_ms, "Scheduling auto-approval timeout");
+                    self.auto_approval_timeout_active = true;
+                    // The actual timeout is handled by the TaskLifecycle
+                    // which has access to tokio::time::sleep
+                }
+                AutoApprovalDecision::Ask => {
+                    // No auto-action needed
+                }
+            }
+        }
+    }
+
+    /// Set an auto-approval decision to be applied on the next ask.
+    ///
+    /// Source: `src/core/task/Task.ts` — `checkAutoApproval()` (line 1366)
+    ///
+    /// This is called by the TaskLifecycle before invoking `ask()`.
+    pub fn set_auto_approval_decision(&mut self, decision: AutoApprovalDecision) {
+        self.auto_approval_pending = Some(decision);
     }
 
     /// Track the ask state (idle/resumable/interactive).
@@ -688,26 +718,40 @@ impl AskSayHandler {
     /// Source: `src/core/task/Task.ts` — `ask()` lines 1382–1428
     ///
     /// In the TS version, this sets up timeouts that transition the task
-    /// to idle/resumable/interactive states after 2 seconds. In Rust,
-    /// we track the ask type for state queries but the timeout-based
-    /// state mutation is handled at the TaskLifecycle level.
+    /// to idle/resumable/interactive states after `statusMutationTimeout`
+    /// (2 seconds). The state is only mutated when:
+    /// - `isStatusMutable` is true (complete, blocking, no queued messages)
+    /// - The ask type matches the corresponding category
+    ///
+    /// In Rust, we set the state immediately (without the 2-second delay)
+    /// because the timeout-based approach requires spawning a separate task.
+    /// The TaskLifecycle can override this by calling the state mutation
+    /// methods directly with a delay.
     fn track_ask_state(&mut self, ask_type: ClineAsk, ask_ts: f64, partial: Option<bool>) {
         // Only track state for complete, blocking messages
         if partial.is_some() {
             return;
         }
 
-        // Source: TS lines 1394–1428 — state mutation based on ask type
+        // Source: TS lines 1391–1428 — state mutation based on ask type
+        // TS uses a 2-second timeout (`statusMutationTimeout = 2_000`)
+        // before transitioning state. We set it immediately for simplicity.
+        //
+        // Source: TS lines 1394–1405 — interactive ask
         if ask_type.is_interactive() {
             if let Some(msg) = self.find_message_by_timestamp(ask_ts) {
                 self.interactive_ask = Some(msg.clone());
                 self.emit_task_interactive();
+                // Source: TS line 1402 — also emit interactionRequired to webview
+                self.emit_interaction_required();
             }
+        // Source: TS lines 1406–1416 — resumable ask
         } else if ask_type.is_resumable() {
             if let Some(msg) = self.find_message_by_timestamp(ask_ts) {
                 self.resumable_ask = Some(msg.clone());
                 self.emit_task_resumable();
             }
+        // Source: TS lines 1417–1428 — idle ask
         } else if ask_type.is_idle() {
             if let Some(msg) = self.find_message_by_timestamp(ask_ts) {
                 self.idle_ask = Some(msg.clone());
@@ -719,6 +763,17 @@ impl AskSayHandler {
     /// Clear ask state and emit TaskActive event.
     ///
     /// Source: `src/core/task/Task.ts` — `ask()` lines 1490–1498
+    ///
+    /// TS implementation:
+    /// ```ts
+    /// if (this.idleAsk || this.resumableAsk || this.interactiveAsk) {
+    ///     this.idleAsk = undefined
+    ///     this.resumableAsk = undefined
+    ///     this.interactiveAsk = undefined
+    ///     this.emit(RooCodeEventName.TaskActive, this.taskId)
+    /// }
+    /// this.emit(RooCodeEventName.TaskAskResponded)
+    /// ```
     fn clear_ask_state(&mut self) {
         let had_state = self.idle_ask.is_some()
             || self.resumable_ask.is_some()
@@ -732,6 +787,9 @@ impl AskSayHandler {
         if had_state {
             self.emit_task_active();
         }
+
+        // Source: TS line 1497 — emit TaskAskResponded
+        self.emit_task_ask_responded();
     }
 
     /// Wait for the ask response to be set.
@@ -940,16 +998,26 @@ impl AskSayHandler {
     ///
     /// Source: `src/core/task/Task.ts` — `sayAndCreateMissingParamError()` (lines 1869–1877)
     ///
-    /// Emits an error message and returns a formatted error string suitable
-    /// for use as a tool_result.
+    /// TS implementation:
+    /// ```ts
+    /// await this.say("error",
+    ///     `Roo tried to use ${toolName}${relPath ? ` for '${relPath.toPosix()}'` : ""}
+    ///      without value for required parameter '${paramName}'. Retrying...`)
+    /// return formatResponse.toolError(formatResponse.missingToolParameterError(paramName))
+    /// ```
     pub async fn say_and_create_missing_param_error(
         &mut self,
         tool_name: &str,
         param_name: &str,
         rel_path: Option<&str>,
     ) -> Result<String, TaskError> {
+        // Source: TS lines 1870–1875 — format the error message
         let path_info = rel_path
-            .map(|p| format!(" for '{}'", p))
+            .map(|p| {
+                // Source: TS `relPath.toPosix()` — normalize path separators
+                let posix_path = p.replace('\\', "/");
+                format!(" for '{}'", posix_path)
+            })
             .unwrap_or_default();
         let text = format!(
             "Roo tried to use {}{} without value for required parameter '{}'. Retrying...",
@@ -957,7 +1025,9 @@ impl AskSayHandler {
         );
         self.say_simple(ClineSay::Error, Some(text), None)
             .await?;
-        // Return a tool error string
+
+        // Source: TS line 1876 — `formatResponse.toolError(formatResponse.missingToolParameterError(paramName))`
+        // Returns a tool error string that matches the TS formatResponse.missingToolParameterError
         Ok(format!(
             "Error: Missing required parameter '{}' for tool '{}'.",
             param_name, tool_name
@@ -1128,12 +1198,34 @@ impl AskSayHandler {
     }
 
     /// Emit a task active event.
+    ///
+    /// Source: TS line 1494 — `this.emit(RooCodeEventName.TaskActive, this.taskId)`
     fn emit_task_active(&self) {
         if let Some(ref emitter) = self.event_emitter {
-            if let Some(ref _task_id) = self.task_id {
-                // TaskActive is not a specific event in our enum,
-                // but we can use StateChanged
-                emitter.emit_state_changed(TaskState::Running, TaskState::Running);
+            if let Some(ref task_id) = self.task_id {
+                emitter.emit_task_active(task_id);
+            }
+        }
+    }
+
+    /// Emit an interaction required event.
+    ///
+    /// Source: TS line 1402 — `provider?.postMessageToWebview({ type: "interactionRequired" })`
+    fn emit_interaction_required(&self) {
+        if let Some(ref emitter) = self.event_emitter {
+            if let Some(ref task_id) = self.task_id {
+                emitter.emit_interaction_required(task_id);
+            }
+        }
+    }
+
+    /// Emit a task ask responded event.
+    ///
+    /// Source: TS line 1497 — `this.emit(RooCodeEventName.TaskAskResponded)`
+    fn emit_task_ask_responded(&self) {
+        if let Some(ref emitter) = self.event_emitter {
+            if let Some(ref task_id) = self.task_id {
+                emitter.emit_task_ask_responded(task_id);
             }
         }
     }

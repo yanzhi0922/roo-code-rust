@@ -194,6 +194,19 @@ pub struct TaskConfig {
     /// context condensation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_condensing_prompt: Option<String>,
+    /// Instance unique identifier.
+    ///
+    /// Source: `src/core/task/Task.ts` line 169 — `readonly instanceId: string`
+    /// Generated as `crypto.randomUUID().slice(0, 8)` in TS.
+    /// In Rust, we use the first 8 chars of a UUIDv4.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance_id: String,
+    /// Whether to automatically start the task upon creation.
+    ///
+    /// Source: `src/core/task/Task.ts` — `startTask = true` constructor option
+    /// When true, the task is started immediately after construction.
+    /// If true but no task/images/historyItem is provided, validation will fail.
+    pub start_task: bool,
 }
 
 impl TaskConfig {
@@ -218,7 +231,19 @@ impl TaskConfig {
             history_item_id: None,
             storage_path: None,
             custom_condensing_prompt: None,
+            // TS L169: instanceId = crypto.randomUUID().slice(0, 8)
+            instance_id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
+            // TS constructor: startTask = true (default)
+            start_task: true,
         }
+    }
+
+    /// Create a new task config with auto-generated task ID using uuidv7.
+    ///
+    /// Source: `src/core/task/Task.ts` line 460 — `this.taskId = taskId ?? uuidv7()`
+    pub fn new_auto_id(cwd: impl Into<String>) -> Self {
+        let task_id = uuid::Uuid::now_v7().to_string();
+        Self::new(task_id, cwd)
     }
 
     /// Set the mode for this task.
@@ -308,6 +333,22 @@ impl TaskConfig {
     /// Set the base storage path for task persistence.
     pub fn with_storage_path(mut self, path: impl Into<String>) -> Self {
         self.storage_path = Some(path.into());
+        self
+    }
+
+    /// Set whether to automatically start the task.
+    ///
+    /// Source: `src/core/task/Task.ts` — `startTask` constructor option
+    pub fn with_start_task(mut self, start: bool) -> Self {
+        self.start_task = start;
+        self
+    }
+
+    /// Set the instance ID.
+    ///
+    /// Source: `src/core/task/Task.ts` line 169 — `instanceId`
+    pub fn with_instance_id(mut self, id: impl Into<String>) -> Self {
+        self.instance_id = id.into();
         self
     }
 }

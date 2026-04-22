@@ -30,6 +30,9 @@ roo-message-queue = { path = "../roo-message-queue" }
 roo-condense = { path = "../roo-condense" }
 roo-mentions = { path = "../roo-mentions" }
 roo-editor = { path = "../roo-editor" }
+roo-ignore = { path = "../roo-ignore" }
+roo-protect = { path = "../roo-protect" }
+roo-custom-tools = { path = "../roo-custom-tools" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

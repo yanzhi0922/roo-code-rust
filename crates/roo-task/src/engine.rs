@@ -17,6 +17,8 @@ use crate::types::{
     AssistantMessageContent, DiffStrategy, StreamingState, TaskConfig, TaskError, TaskResult,
     TaskState, MAX_EXPONENTIAL_BACKOFF_SECONDS,
 };
+use roo_types::experiment::Experiments;
+use roo_types::todo::TodoItem;
 
 // ---------------------------------------------------------------------------
 // CachedStreamingModel
@@ -208,6 +210,65 @@ pub struct TaskEngine {
     ///
     /// Source: `src/core/task/Task.ts` line 394 — `streamingToolCallIndices`
     streaming_tool_call_indices: HashMap<String, usize>,
+
+    // =================================================================
+    // New fields — matching TS Task class properties (R22-B1 additions)
+    // =================================================================
+
+    /// API configuration (provider settings).
+    ///
+    /// Source: `src/core/task/Task.ts` line 284 — `apiConfiguration: ProviderSettings`
+    api_configuration: Option<roo_types::provider_settings::ProviderSettings>,
+
+    /// API handler instance (provider for making LLM calls).
+    ///
+    /// Source: `src/core/task/Task.ts` line 285 — `api: ApiHandler`
+    /// Note: In the Rust decomposition, the primary provider lives in AgentLoop.
+    /// This field allows the engine to optionally hold its own handler reference.
+    api_handler: Option<Box<dyn roo_provider::handler::Provider>>,
+
+    /// Todo list for the task.
+    ///
+    /// Source: `src/core/task/Task.ts` line 172 — `todoList?: TodoItem[]`
+    todo_list: Option<Vec<TodoItem>>,
+
+    /// Provider reference (weak reference to the ClineProvider).
+    ///
+    /// Source: `src/core/task/Task.ts` line 266 — `providerRef: WeakRef<ClineProvider>`
+    /// TODO: Replace with actual provider weak reference when ClineProvider is ported.
+    /// Using a placeholder `()` type for now.
+    provider_ref: Option<()>,
+
+    /// Global storage path for task persistence.
+    ///
+    /// Source: `src/core/task/Task.ts` line 267 — `globalStoragePath: string`
+    global_storage_path: String,
+
+    /// Auto-approval handler for tool execution.
+    ///
+    /// Source: `src/core/task/Task.ts` line 287 — `autoApprovalHandler: AutoApprovalHandler`
+    auto_approval_handler: Option<roo_auto_approval::approval::AutoApprovalHandler>,
+
+    /// Experiment flags.
+    ///
+    /// Source: `src/core/task/Task.ts` — `experiments` constructor option
+    experiments: Experiments,
+
+    /// Initial todo items provided at task creation.
+    ///
+    /// Source: `src/core/task/Task.ts` — `initialTodos` constructor option
+    initial_todos: Vec<TodoItem>,
+
+    /// Initial status for the task's history item.
+    ///
+    /// Source: `src/core/task/Task.ts` line 159 — `initialStatus?: "active" | "delegated" | "completed"`
+    initial_status: Option<String>,
+
+    /// Callback invoked when the task is created.
+    ///
+    /// Source: `src/core/task/Task.ts` line 155 — `onCreated?: (task: Task) => void`
+    /// Called at the end of the constructor: `onCreated?.(this)`
+    on_created_callback: Option<Box<dyn FnOnce(&TaskEngine) + Send + Sync>>,
 }
 
 impl TaskEngine {
@@ -218,6 +279,7 @@ impl TaskEngine {
         let max_iterations = config.max_iterations;
         let task_id = config.task_id.clone();
         let consecutive_mistake_limit = config.consecutive_mistake_limit;
+        let global_storage_path = config.storage_path.clone().unwrap_or_default();
 
         Ok(Self {
             config,
@@ -245,6 +307,28 @@ impl TaskEngine {
             user_message_content: Vec::new(),
             user_message_content_ready: false,
             streaming_tool_call_indices: HashMap::new(),
+
+            // --- New fields (R22-B1) ---
+            // TS L284: apiConfiguration
+            api_configuration: None,
+            // TS L285: api (ApiHandler)
+            api_handler: None,
+            // TS L172: todoList
+            todo_list: None,
+            // TS L266: providerRef — placeholder
+            provider_ref: None,
+            // TS L267: globalStoragePath
+            global_storage_path,
+            // TS L287: autoApprovalHandler
+            auto_approval_handler: None,
+            // TS constructor: experiments
+            experiments: Experiments::default(),
+            // TS constructor: initialTodos
+            initial_todos: Vec::new(),
+            // TS L159: initialStatus
+            initial_status: None,
+            // TS L155: onCreated callback
+            on_created_callback: None,
         })
     }
 
@@ -651,6 +735,133 @@ impl TaskEngine {
     /// Clear the streaming tool call indices.
     pub fn clear_streaming_tool_call_indices(&mut self) {
         self.streaming_tool_call_indices.clear();
+    }
+
+    // -----------------------------------------------------------------------
+    // New fields accessors (R22-B1 additions)
+    // Source: `src/core/task/Task.ts` — corresponding TS properties
+    // -----------------------------------------------------------------------
+
+    /// Get a reference to the API configuration.
+    ///
+    /// Source: `src/core/task/Task.ts` line 284 — `apiConfiguration`
+    pub fn api_configuration(&self) -> Option<&roo_types::provider_settings::ProviderSettings> {
+        self.api_configuration.as_ref()
+    }
+
+    /// Set the API configuration.
+    pub fn set_api_configuration(&mut self, config: roo_types::provider_settings::ProviderSettings) {
+        self.api_configuration = Some(config);
+    }
+
+    /// Get a reference to the API handler, if any.
+    ///
+    /// Source: `src/core/task/Task.ts` line 285 — `api: ApiHandler`
+    pub fn api_handler(&self) -> Option<&dyn roo_provider::handler::Provider> {
+        self.api_handler.as_deref()
+    }
+
+    /// Set the API handler.
+    pub fn set_api_handler(&mut self, handler: Box<dyn roo_provider::handler::Provider>) {
+        self.api_handler = Some(handler);
+    }
+
+    /// Get a reference to the todo list.
+    ///
+    /// Source: `src/core/task/Task.ts` line 172 — `todoList?: TodoItem[]`
+    pub fn todo_list(&self) -> Option<&[TodoItem]> {
+        self.todo_list.as_deref()
+    }
+
+    /// Get a mutable reference to the todo list.
+    pub fn todo_list_mut(&mut self) -> &mut Option<Vec<TodoItem>> {
+        &mut self.todo_list
+    }
+
+    /// Set the todo list.
+    pub fn set_todo_list(&mut self, todos: Vec<TodoItem>) {
+        self.todo_list = Some(todos);
+    }
+
+    /// Get the global storage path.
+    ///
+    /// Source: `src/core/task/Task.ts` line 267 — `globalStoragePath`
+    pub fn global_storage_path(&self) -> &str {
+        &self.global_storage_path
+    }
+
+    /// Set the global storage path.
+    pub fn set_global_storage_path(&mut self, path: String) {
+        self.global_storage_path = path;
+    }
+
+    /// Get a reference to the auto-approval handler, if any.
+    ///
+    /// Source: `src/core/task/Task.ts` line 287 — `autoApprovalHandler`
+    pub fn auto_approval_handler(&self) -> Option<&roo_auto_approval::approval::AutoApprovalHandler> {
+        self.auto_approval_handler.as_ref()
+    }
+
+    /// Get a mutable reference to the auto-approval handler, if any.
+    pub fn auto_approval_handler_mut(&mut self) -> Option<&mut roo_auto_approval::approval::AutoApprovalHandler> {
+        self.auto_approval_handler.as_mut()
+    }
+
+    /// Set the auto-approval handler.
+    pub fn set_auto_approval_handler(&mut self, handler: roo_auto_approval::approval::AutoApprovalHandler) {
+        self.auto_approval_handler = Some(handler);
+    }
+
+    /// Get a reference to the experiments configuration.
+    ///
+    /// Source: `src/core/task/Task.ts` — `experiments` constructor option
+    pub fn experiments(&self) -> &Experiments {
+        &self.experiments
+    }
+
+    /// Set the experiments configuration.
+    pub fn set_experiments(&mut self, experiments: Experiments) {
+        self.experiments = experiments;
+    }
+
+    /// Get a reference to the initial todos.
+    ///
+    /// Source: `src/core/task/Task.ts` — `initialTodos` constructor option
+    pub fn initial_todos(&self) -> &[TodoItem] {
+        &self.initial_todos
+    }
+
+    /// Set the initial todos.
+    pub fn set_initial_todos(&mut self, todos: Vec<TodoItem>) {
+        self.initial_todos = todos;
+    }
+
+    /// Get the initial status.
+    ///
+    /// Source: `src/core/task/Task.ts` line 159 — `initialStatus`
+    pub fn initial_status(&self) -> Option<&str> {
+        self.initial_status.as_deref()
+    }
+
+    /// Set the initial status.
+    pub fn set_initial_status(&mut self, status: Option<String>) {
+        self.initial_status = status;
+    }
+
+    /// Set the on_created callback.
+    ///
+    /// Source: `src/core/task/Task.ts` line 155 — `onCreated?: (task: Task) => void`
+    pub fn set_on_created_callback(&mut self, callback: Box<dyn FnOnce(&TaskEngine) + Send + Sync>) {
+        self.on_created_callback = Some(callback);
+    }
+
+    /// Invoke the on_created callback, if set.
+    ///
+    /// Source: `src/core/task/Task.ts` line 566 — `onCreated?.(this)`
+    pub fn invoke_on_created(mut self) {
+        if let Some(callback) = self.on_created_callback.take() {
+            callback(&self);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1123,7 +1334,8 @@ mod tests {
         TaskEngine::new(
             TaskConfig::new("test-task", "/tmp/work")
                 .with_mode("code")
-                .with_max_iterations(100),
+                .with_max_iterations(100)
+                .with_start_task(false),
         )
         .unwrap()
     }
@@ -1274,7 +1486,8 @@ mod tests {
         let mut engine = TaskEngine::new(
             TaskConfig::new("limited-task", "/tmp/work")
                 .with_mode("code")
-                .with_max_iterations(2),
+                .with_max_iterations(2)
+                .with_start_task(false),
         )
         .unwrap();
         engine.start().unwrap();
@@ -1574,7 +1787,8 @@ mod tests {
         let mut engine = TaskEngine::new(
             TaskConfig::new("test", "/tmp")
                 .with_mode("code")
-                .with_consecutive_mistake_limit(2),
+                .with_consecutive_mistake_limit(2)
+                .with_start_task(false),
         )
         .unwrap();
 
@@ -1685,7 +1899,8 @@ mod tests {
             TaskConfig::new("persist-test", "/tmp/work")
                 .with_mode("code")
                 .with_max_iterations(100)
-                .with_storage_path(&storage_path),
+                .with_storage_path(&storage_path)
+                .with_start_task(false),
         )
         .unwrap();
 
@@ -1714,7 +1929,8 @@ mod tests {
             TaskConfig::new("persist-test", "/tmp/work")
                 .with_mode("code")
                 .with_max_iterations(100)
-                .with_storage_path(&storage_path),
+                .with_storage_path(&storage_path)
+                .with_start_task(false),
         )
         .unwrap();
 
@@ -1731,7 +1947,8 @@ mod tests {
             TaskConfig::new("cline-test", "/tmp/work")
                 .with_mode("code")
                 .with_max_iterations(100)
-                .with_storage_path(&storage_path),
+                .with_storage_path(&storage_path)
+                .with_start_task(false),
         )
         .unwrap();
 
@@ -1771,7 +1988,8 @@ mod tests {
             TaskConfig::new("meta-test", "/tmp/work")
                 .with_mode("code")
                 .with_max_iterations(100)
-                .with_storage_path(&storage_path),
+                .with_storage_path(&storage_path)
+                .with_start_task(false),
         )
         .unwrap();
 

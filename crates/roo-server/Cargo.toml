@@ -22,6 +22,7 @@ roo-terminal = { path = "../roo-terminal" }
 roo-telemetry = { path = "../roo-telemetry" }
 roo-provider = { path = "../roo-provider" }
 roo-message-queue = { path = "../roo-message-queue" }
+roo-skills = { path = "../roo-skills" }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

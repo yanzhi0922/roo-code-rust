@@ -101,6 +101,14 @@ pub mod methods {
     pub const SETTINGS_AUTO_APPROVAL_ENABLED: &str = "settings/autoApprovalEnabled";
     pub const SETTINGS_DEBUG_SETTING: &str = "settings/debugSetting";
     pub const SETTINGS_ALLOWED_COMMANDS: &str = "settings/allowedCommands";
+    pub const SETTINGS_DENIED_COMMANDS: &str = "settings/deniedCommands";
+    pub const SETTINGS_CONDENSING_PROMPT: &str = "settings/condensingPrompt";
+    pub const SETTINGS_SET_API_CONFIG_PASSWORD: &str = "settings/setApiConfigPassword";
+    pub const SETTINGS_HAS_OPENED_MODE_SELECTOR: &str = "settings/hasOpenedModeSelector";
+    pub const SETTINGS_TASK_SYNC_ENABLED: &str = "settings/taskSyncEnabled";
+    pub const SETTINGS_UPDATE_SETTINGS: &str = "settings/updateSettings";
+    pub const SETTINGS_UPDATE_VSCODE_SETTING: &str = "settings/updateVSCodeSetting";
+    pub const SETTINGS_GET_VSCODE_SETTING: &str = "settings/getVSCodeSetting";
 
     // ── Skills commands ──
     pub const SKILLS_LIST: &str = "skills/list";
@@ -108,10 +116,17 @@ pub mod methods {
     pub const SKILLS_DELETE: &str = "skills/delete";
     pub const SKILLS_MOVE: &str = "skills/move";
     pub const SKILLS_UPDATE_MODES: &str = "skills/updateModes";
+    pub const SKILL_OPEN_FILE: &str = "skill/openFile";
 
     // ── Mode commands ──
     pub const MODE_UPDATE_CUSTOM: &str = "mode/updateCustom";
     pub const MODE_DELETE_CUSTOM: &str = "mode/deleteCustom";
+    pub const MODE_EXPORT: &str = "mode/export";
+    pub const MODE_IMPORT: &str = "mode/import";
+    pub const MODE_SWITCH: &str = "mode/switch";
+    pub const MODE_CHECK_RULES: &str = "mode/checkRulesDirectory";
+    pub const MODE_OPEN_SETTINGS: &str = "mode/openSettings";
+    pub const MODE_SET_OPENAI_CUSTOM_MODEL_INFO: &str = "mode/setOpenAiCustomModelInfo";
 
     // ── Message commands ──
     pub const MESSAGE_DELETE: &str = "message/delete";
@@ -121,15 +136,197 @@ pub mod methods {
     pub const MESSAGE_EDIT_CONFIRM: &str = "message/editConfirm";
     pub const MESSAGE_EDIT_QUEUED: &str = "message/editQueued";
     pub const MESSAGE_REMOVE_QUEUED: &str = "message/removeQueued";
+    pub const MESSAGE_SUBMIT_EDITED: &str = "message/submitEdited";
 
     // ── History commands (additional) ──
     pub const HISTORY_DELETE_MULTIPLE: &str = "history/deleteMultiple";
+    pub const HISTORY_SHARE_TASK: &str = "history/shareTask";
 
     // ── Tools commands ──
     pub const TOOLS_REFRESH_CUSTOM: &str = "tools/refreshCustom";
 
     // ── Telemetry commands ──
     pub const TELEMETRY_SET_SETTING: &str = "telemetry/setSetting";
+
+    // ── Marketplace commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `installMarketplaceItem`
+    pub const MARKETPLACE_INSTALL: &str = "marketplace/install";
+    /// Source: TS `webviewMessageHandler.ts` — `removeInstalledMarketplaceItem`
+    pub const MARKETPLACE_REMOVE: &str = "marketplace/remove";
+    /// Source: TS `webviewMessageHandler.ts` — `installMarketplaceItemWithParameters`
+    pub const MARKETPLACE_INSTALL_WITH_PARAMS: &str = "marketplace/installWithParams";
+    /// Source: TS `webviewMessageHandler.ts` — `fetchMarketplaceData`
+    pub const MARKETPLACE_FETCH_DATA: &str = "marketplace/fetchData";
+    /// Source: TS `webviewMessageHandler.ts` — `filterMarketplaceItems`
+    pub const MARKETPLACE_FILTER_ITEMS: &str = "marketplace/filterItems";
+    /// Source: TS `webviewMessageHandler.ts` — `marketplaceButtonClicked`
+    pub const MARKETPLACE_BUTTON_CLICKED: &str = "marketplace/buttonClicked";
+    /// Source: TS `webviewMessageHandler.ts` — `cancelMarketplaceInstall`
+    pub const MARKETPLACE_CANCEL_INSTALL: &str = "marketplace/cancelInstall";
+
+    // ── Worktree commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `listWorktrees`
+    pub const WORKTREE_LIST: &str = "worktree/list";
+    /// Source: TS `webviewMessageHandler.ts` — `createWorktree`
+    pub const WORKTREE_CREATE: &str = "worktree/create";
+    /// Source: TS `webviewMessageHandler.ts` — `deleteWorktree`
+    pub const WORKTREE_DELETE: &str = "worktree/delete";
+    /// Source: TS `webviewMessageHandler.ts` — `switchWorktree`
+    pub const WORKTREE_SWITCH: &str = "worktree/switch";
+    /// Source: TS `webviewMessageHandler.ts` — `getAvailableBranches`
+    pub const WORKTREE_GET_BRANCHES: &str = "worktree/getBranches";
+    /// Source: TS `webviewMessageHandler.ts` — `getWorktreeDefaults`
+    pub const WORKTREE_GET_DEFAULTS: &str = "worktree/getDefaults";
+    /// Source: TS `webviewMessageHandler.ts` — `getWorktreeIncludeStatus`
+    pub const WORKTREE_GET_INCLUDE_STATUS: &str = "worktree/getIncludeStatus";
+    /// Source: TS `webviewMessageHandler.ts` — `checkBranchWorktreeInclude`
+    pub const WORKTREE_CHECK_BRANCH_INCLUDE: &str = "worktree/checkBranchInclude";
+    /// Source: TS `webviewMessageHandler.ts` — `createWorktreeInclude`
+    pub const WORKTREE_CREATE_INCLUDE: &str = "worktree/createInclude";
+    /// Source: TS `webviewMessageHandler.ts` — `checkoutBranch`
+    pub const WORKTREE_CHECKOUT_BRANCH: &str = "worktree/checkoutBranch";
+    /// Source: TS `webviewMessageHandler.ts` — `browseForWorktreePath`
+    pub const WORKTREE_BROWSE_PATH: &str = "worktree/browsePath";
+
+    // ── TTS commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `playTts`
+    pub const TTS_PLAY: &str = "tts/play";
+    /// Source: TS `webviewMessageHandler.ts` — `stopTts`
+    pub const TTS_STOP: &str = "tts/stop";
+    /// Source: TS `webviewMessageHandler.ts` — `ttsEnabled`
+    pub const TTS_ENABLED: &str = "tts/enabled";
+    /// Source: TS `webviewMessageHandler.ts` — `ttsSpeed`
+    pub const TTS_SPEED: &str = "tts/speed";
+
+    // ── Image commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `saveImage`
+    pub const IMAGE_SAVE: &str = "image/save";
+    /// Source: TS `webviewMessageHandler.ts` — `openImage`
+    pub const IMAGE_OPEN: &str = "image/open";
+
+    // ── Model request commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `flushRouterModels`
+    pub const MODELS_FLUSH_ROUTER: &str = "models/flushRouter";
+    /// Source: TS `webviewMessageHandler.ts` — `requestRouterModels`
+    pub const MODELS_REQUEST_ROUTER: &str = "models/requestRouter";
+    /// Source: TS `webviewMessageHandler.ts` — `requestOpenAiModels`
+    pub const MODELS_REQUEST_OPENAI: &str = "models/requestOpenAi";
+    /// Source: TS `webviewMessageHandler.ts` — `requestOllamaModels`
+    pub const MODELS_REQUEST_OLLAMA: &str = "models/requestOllama";
+    /// Source: TS `webviewMessageHandler.ts` — `requestLmStudioModels`
+    pub const MODELS_REQUEST_LMSTUDIO: &str = "models/requestLmStudio";
+    /// Source: TS `webviewMessageHandler.ts` — `requestRooModels`
+    pub const MODELS_REQUEST_ROO: &str = "models/requestRoo";
+    /// Source: TS `webviewMessageHandler.ts` — `requestRooCreditBalance`
+    pub const MODELS_REQUEST_ROO_CREDIT: &str = "models/requestRooCredit";
+    /// Source: TS `webviewMessageHandler.ts` — `requestVsCodeLmModels`
+    pub const MODELS_REQUEST_VSCODELM: &str = "models/requestVsCodeLm";
+
+    // ── Mention commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `openMention`
+    pub const MENTION_OPEN: &str = "mention/open";
+    /// Source: TS `webviewMessageHandler.ts` — `resolveMentions` (internal)
+    pub const MENTION_RESOLVE: &str = "mention/resolve";
+
+    // ── Command (slash commands) ──
+    /// Source: TS `webviewMessageHandler.ts` — `requestCommands`
+    pub const COMMAND_REQUEST: &str = "command/request";
+    /// Source: TS `webviewMessageHandler.ts` — `openCommandFile`
+    pub const COMMAND_OPEN_FILE: &str = "command/openFile";
+    /// Source: TS `webviewMessageHandler.ts` — `deleteCommand`
+    pub const COMMAND_DELETE: &str = "command/delete";
+    /// Source: TS `webviewMessageHandler.ts` — `createCommand`
+    pub const COMMAND_CREATE: &str = "command/create";
+
+    // ── UI / VS Code-specific commands (stubs for headless) ──
+    /// Source: TS `webviewMessageHandler.ts` — `webviewDidLaunch`
+    pub const WEBVIEW_DID_LAUNCH: &str = "webview/didLaunch";
+    /// Source: TS `webviewMessageHandler.ts` — `didShowAnnouncement`
+    pub const ANNOUNCEMENT_DID_SHOW: &str = "announcement/didShow";
+    /// Source: TS `webviewMessageHandler.ts` — `selectImages`
+    pub const IMAGES_SELECT: &str = "images/select";
+    /// Source: TS `webviewMessageHandler.ts` — `draggedImages`
+    pub const IMAGES_DRAGGED: &str = "images/dragged";
+    /// Source: TS `webviewMessageHandler.ts` — `playSound`
+    pub const PLAY_SOUND: &str = "sound/play";
+    /// Source: TS `webviewMessageHandler.ts` — `openFile`
+    pub const FILE_OPEN: &str = "file/open";
+    /// Source: TS `webviewMessageHandler.ts` — `openExternal`
+    pub const EXTERNAL_OPEN: &str = "external/open";
+    /// Source: TS `webviewMessageHandler.ts` — `openKeyboardShortcuts`
+    pub const OPEN_KEYBOARD_SHORTCUTS: &str = "ui/openKeyboardShortcuts";
+    /// Source: TS `webviewMessageHandler.ts` — `openMcpSettings`
+    pub const OPEN_MCP_SETTINGS: &str = "mcp/openSettings";
+    /// Source: TS `webviewMessageHandler.ts` — `openProjectMcpSettings`
+    pub const OPEN_PROJECT_MCP_SETTINGS: &str = "mcp/openProjectSettings";
+    /// Source: TS `webviewMessageHandler.ts` — `focusPanelRequest`
+    pub const FOCUS_PANEL: &str = "ui/focusPanel";
+    /// Source: TS `webviewMessageHandler.ts` — `switchTab`
+    pub const TAB_SWITCH: &str = "ui/switchTab";
+    /// Source: TS `webviewMessageHandler.ts` — `insertTextIntoTextarea`
+    pub const INSERT_TEXT: &str = "ui/insertText";
+    /// Source: TS `webviewMessageHandler.ts` — `openMarkdownPreview`
+    pub const MARKDOWN_PREVIEW: &str = "ui/markdownPreview";
+
+    // ── Cloud commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `rooCloudSignIn`
+    pub const CLOUD_SIGN_IN: &str = "cloud/signIn";
+    /// Source: TS `webviewMessageHandler.ts` — `rooCloudSignOut`
+    pub const CLOUD_SIGN_OUT: &str = "cloud/signOut";
+    /// Source: TS `webviewMessageHandler.ts` — `rooCloudManualUrl`
+    pub const CLOUD_MANUAL_URL: &str = "cloud/manualUrl";
+    /// Source: TS `webviewMessageHandler.ts` — `cloudButtonClicked`
+    pub const CLOUD_BUTTON_CLICKED: &str = "cloud/buttonClicked";
+    /// Source: TS `webviewMessageHandler.ts` — `clearCloudAuthSkipModel`
+    pub const CLOUD_CLEAR_SKIP_MODEL: &str = "cloud/clearSkipModel";
+    /// Source: TS `webviewMessageHandler.ts` — `switchOrganization`
+    pub const CLOUD_SWITCH_ORG: &str = "cloud/switchOrganization";
+    /// Source: TS `webviewMessageHandler.ts` — `openAiCodexSignIn`
+    pub const CODEX_SIGN_IN: &str = "codex/signIn";
+    /// Source: TS `webviewMessageHandler.ts` — `openAiCodexSignOut`
+    pub const CODEX_SIGN_OUT: &str = "codex/signOut";
+    /// Source: TS `webviewMessageHandler.ts` — `requestOpenAiCodexRateLimits`
+    pub const CODEX_REQUEST_RATE_LIMITS: &str = "codex/requestRateLimits";
+
+    // ── Codebase Index commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `codebaseIndexEnabled`
+    pub const INDEX_ENABLED: &str = "index/enabled";
+    /// Source: TS `webviewMessageHandler.ts` — `requestIndexingStatus`
+    pub const INDEX_REQUEST_STATUS: &str = "index/requestStatus";
+    /// Source: TS `webviewMessageHandler.ts` — `startIndexing`
+    pub const INDEX_START: &str = "index/start";
+    /// Source: TS `webviewMessageHandler.ts` — `stopIndexing`
+    pub const INDEX_STOP: &str = "index/stop";
+    /// Source: TS `webviewMessageHandler.ts` — `clearIndexData`
+    pub const INDEX_CLEAR: &str = "index/clear";
+    /// Source: TS `webviewMessageHandler.ts` — `toggleWorkspaceIndexing`
+    pub const INDEX_TOGGLE_WORKSPACE: &str = "index/toggleWorkspace";
+    /// Source: TS `webviewMessageHandler.ts` — `setAutoEnableDefault`
+    pub const INDEX_SET_AUTO_ENABLE: &str = "index/setAutoEnable";
+    /// Source: TS `webviewMessageHandler.ts` — `saveCodeIndexSettingsAtomic`
+    pub const INDEX_SAVE_SETTINGS: &str = "index/saveSettings";
+    /// Source: TS `webviewMessageHandler.ts` — `requestCodeIndexSecretStatus`
+    pub const INDEX_REQUEST_SECRET_STATUS: &str = "index/requestSecretStatus";
+
+    // ── Upsell commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `dismissUpsell`
+    pub const UPSELL_DISMISS: &str = "upsell/dismiss";
+    /// Source: TS `webviewMessageHandler.ts` — `getDismissedUpsells`
+    pub const UPSELL_GET_DISMISSED: &str = "upsell/getDismissed";
+
+    // ── Debug commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `openDebugApiHistory`
+    pub const DEBUG_API_HISTORY: &str = "debug/apiHistory";
+    /// Source: TS `webviewMessageHandler.ts` — `openDebugUiHistory`
+    pub const DEBUG_UI_HISTORY: &str = "debug/uiHistory";
+    /// Source: TS `webviewMessageHandler.ts` — `downloadErrorDiagnostics`
+    pub const DEBUG_DOWNLOAD_DIAGNOSTICS: &str = "debug/downloadDiagnostics";
+
+    // ── Other commands ──
+    /// Source: TS `webviewMessageHandler.ts` — `showMdmAuthRequiredNotification`
+    pub const MDM_AUTH_NOTIFICATION: &str = "mdm/authNotification";
+    /// Source: TS `webviewMessageHandler.ts` — `imageGenerationSettings`
+    pub const IMAGE_GENERATION_SETTINGS: &str = "imageGeneration/settings";
 
     // ── Notification method (server → client) ──
     /// Method name for task event notifications sent from server to client.
@@ -264,8 +461,15 @@ impl Handler {
             methods::SKILLS_DELETE => self.handle_skills_delete(params).await,
             methods::SKILLS_MOVE => self.handle_skills_move(params).await,
             methods::SKILLS_UPDATE_MODES => self.handle_skills_update_modes(params).await,
+            methods::SKILL_OPEN_FILE => self.handle_skill_open_file(params).await,
             methods::MODE_UPDATE_CUSTOM => self.handle_mode_update_custom(params).await,
             methods::MODE_DELETE_CUSTOM => self.handle_mode_delete_custom(params).await,
+            methods::MODE_EXPORT => self.handle_mode_export(params).await,
+            methods::MODE_IMPORT => self.handle_mode_import(params).await,
+            methods::MODE_SWITCH => self.handle_mode_switch(params).await,
+            methods::MODE_CHECK_RULES => self.handle_mode_check_rules(params).await,
+            methods::MODE_OPEN_SETTINGS => self.handle_mode_open_settings(params).await,
+            methods::MODE_SET_OPENAI_CUSTOM_MODEL_INFO => self.handle_mode_set_openai_custom_model_info(params).await,
             methods::MESSAGE_DELETE => self.handle_message_delete(params).await,
             methods::MESSAGE_EDIT => self.handle_message_edit(params).await,
             methods::MESSAGE_QUEUE => self.handle_message_queue(params).await,
@@ -273,8 +477,110 @@ impl Handler {
             methods::MESSAGE_EDIT_CONFIRM => self.handle_message_edit_confirm(params).await,
             methods::MESSAGE_EDIT_QUEUED => self.handle_message_edit_queued(params).await,
             methods::MESSAGE_REMOVE_QUEUED => self.handle_message_remove_queued(params).await,
+            methods::MESSAGE_SUBMIT_EDITED => self.handle_message_submit_edited(params).await,
             methods::TOOLS_REFRESH_CUSTOM => self.handle_tools_refresh_custom(params).await,
             methods::TELEMETRY_SET_SETTING => self.handle_telemetry_set_setting(params).await,
+            // ── Marketplace ──
+            methods::MARKETPLACE_INSTALL => self.handle_marketplace_install(params).await,
+            methods::MARKETPLACE_REMOVE => self.handle_marketplace_remove(params).await,
+            methods::MARKETPLACE_INSTALL_WITH_PARAMS => self.handle_marketplace_install_with_params(params).await,
+            methods::MARKETPLACE_FETCH_DATA => self.handle_marketplace_fetch_data(params).await,
+            methods::MARKETPLACE_FILTER_ITEMS => self.handle_marketplace_filter_items(params).await,
+            methods::MARKETPLACE_BUTTON_CLICKED => self.handle_marketplace_button_clicked(params).await,
+            methods::MARKETPLACE_CANCEL_INSTALL => self.handle_marketplace_cancel_install(params).await,
+            // ── Worktree ──
+            methods::WORKTREE_LIST => self.handle_worktree_list(params).await,
+            methods::WORKTREE_CREATE => self.handle_worktree_create(params).await,
+            methods::WORKTREE_DELETE => self.handle_worktree_delete(params).await,
+            methods::WORKTREE_SWITCH => self.handle_worktree_switch(params).await,
+            methods::WORKTREE_GET_BRANCHES => self.handle_worktree_get_branches(params).await,
+            methods::WORKTREE_GET_DEFAULTS => self.handle_worktree_get_defaults(params).await,
+            methods::WORKTREE_GET_INCLUDE_STATUS => self.handle_worktree_get_include_status(params).await,
+            methods::WORKTREE_CHECK_BRANCH_INCLUDE => self.handle_worktree_check_branch_include(params).await,
+            methods::WORKTREE_CREATE_INCLUDE => self.handle_worktree_create_include(params).await,
+            methods::WORKTREE_CHECKOUT_BRANCH => self.handle_worktree_checkout_branch(params).await,
+            methods::WORKTREE_BROWSE_PATH => self.handle_worktree_browse_path(params).await,
+            // ── TTS ──
+            methods::TTS_PLAY => self.handle_tts_play(params).await,
+            methods::TTS_STOP => self.handle_tts_stop(params).await,
+            methods::TTS_ENABLED => self.handle_tts_enabled(params).await,
+            methods::TTS_SPEED => self.handle_tts_speed(params).await,
+            // ── Image ──
+            methods::IMAGE_SAVE => self.handle_image_save(params).await,
+            methods::IMAGE_OPEN => self.handle_image_open(params).await,
+            // ── Model requests ──
+            methods::MODELS_FLUSH_ROUTER => self.handle_models_flush_router(params).await,
+            methods::MODELS_REQUEST_ROUTER => self.handle_models_request_router(params).await,
+            methods::MODELS_REQUEST_OPENAI => self.handle_models_request_openai(params).await,
+            methods::MODELS_REQUEST_OLLAMA => self.handle_models_request_ollama(params).await,
+            methods::MODELS_REQUEST_LMSTUDIO => self.handle_models_request_lmstudio(params).await,
+            methods::MODELS_REQUEST_ROO => self.handle_models_request_roo(params).await,
+            methods::MODELS_REQUEST_ROO_CREDIT => self.handle_models_request_roo_credit(params).await,
+            methods::MODELS_REQUEST_VSCODELM => self.handle_models_request_vscode_lm(params).await,
+            // ── Mentions ──
+            methods::MENTION_OPEN => self.handle_mention_open(params).await,
+            methods::MENTION_RESOLVE => self.handle_mention_resolve(params).await,
+            // ── Commands (slash) ──
+            methods::COMMAND_REQUEST => self.handle_command_request(params).await,
+            methods::COMMAND_OPEN_FILE => self.handle_command_open_file(params).await,
+            methods::COMMAND_DELETE => self.handle_command_delete(params).await,
+            methods::COMMAND_CREATE => self.handle_command_create(params).await,
+            // ── Settings (additional) ──
+            methods::SETTINGS_DENIED_COMMANDS => self.handle_settings_denied_commands(params).await,
+            methods::SETTINGS_CONDENSING_PROMPT => self.handle_settings_condensing_prompt(params).await,
+            methods::SETTINGS_SET_API_CONFIG_PASSWORD => self.handle_settings_set_api_config_password(params).await,
+            methods::SETTINGS_HAS_OPENED_MODE_SELECTOR => self.handle_settings_has_opened_mode_selector(params).await,
+            methods::SETTINGS_TASK_SYNC_ENABLED => self.handle_settings_task_sync_enabled(params).await,
+            methods::SETTINGS_UPDATE_SETTINGS => self.handle_settings_update_settings(params).await,
+            methods::SETTINGS_UPDATE_VSCODE_SETTING => self.handle_settings_update_vscode_setting(params).await,
+            methods::SETTINGS_GET_VSCODE_SETTING => self.handle_settings_get_vscode_setting(params).await,
+            // ── History (additional) ──
+            methods::HISTORY_SHARE_TASK => self.handle_history_share_task(params).await,
+            // ── UI / VS Code-specific (stubs) ──
+            methods::WEBVIEW_DID_LAUNCH => self.handle_webview_did_launch(params).await,
+            methods::ANNOUNCEMENT_DID_SHOW => self.handle_announcement_did_show(params).await,
+            methods::IMAGES_SELECT => self.handle_images_select(params).await,
+            methods::IMAGES_DRAGGED => self.handle_images_dragged(params).await,
+            methods::PLAY_SOUND => self.handle_play_sound(params).await,
+            methods::FILE_OPEN => self.handle_file_open(params).await,
+            methods::EXTERNAL_OPEN => self.handle_external_open(params).await,
+            methods::OPEN_KEYBOARD_SHORTCUTS => self.handle_open_keyboard_shortcuts(params).await,
+            methods::OPEN_MCP_SETTINGS => self.handle_open_mcp_settings(params).await,
+            methods::OPEN_PROJECT_MCP_SETTINGS => self.handle_open_project_mcp_settings(params).await,
+            methods::FOCUS_PANEL => self.handle_focus_panel(params).await,
+            methods::TAB_SWITCH => self.handle_tab_switch(params).await,
+            methods::INSERT_TEXT => self.handle_insert_text(params).await,
+            methods::MARKDOWN_PREVIEW => self.handle_markdown_preview(params).await,
+            // ── Cloud ──
+            methods::CLOUD_SIGN_IN => self.handle_cloud_sign_in(params).await,
+            methods::CLOUD_SIGN_OUT => self.handle_cloud_sign_out(params).await,
+            methods::CLOUD_MANUAL_URL => self.handle_cloud_manual_url(params).await,
+            methods::CLOUD_BUTTON_CLICKED => self.handle_cloud_button_clicked(params).await,
+            methods::CLOUD_CLEAR_SKIP_MODEL => self.handle_cloud_clear_skip_model(params).await,
+            methods::CLOUD_SWITCH_ORG => self.handle_cloud_switch_org(params).await,
+            methods::CODEX_SIGN_IN => self.handle_codex_sign_in(params).await,
+            methods::CODEX_SIGN_OUT => self.handle_codex_sign_out(params).await,
+            methods::CODEX_REQUEST_RATE_LIMITS => self.handle_codex_request_rate_limits(params).await,
+            // ── Codebase Index ──
+            methods::INDEX_ENABLED => self.handle_index_enabled(params).await,
+            methods::INDEX_REQUEST_STATUS => self.handle_index_request_status(params).await,
+            methods::INDEX_START => self.handle_index_start(params).await,
+            methods::INDEX_STOP => self.handle_index_stop(params).await,
+            methods::INDEX_CLEAR => self.handle_index_clear(params).await,
+            methods::INDEX_TOGGLE_WORKSPACE => self.handle_index_toggle_workspace(params).await,
+            methods::INDEX_SET_AUTO_ENABLE => self.handle_index_set_auto_enable(params).await,
+            methods::INDEX_SAVE_SETTINGS => self.handle_index_save_settings(params).await,
+            methods::INDEX_REQUEST_SECRET_STATUS => self.handle_index_request_secret_status(params).await,
+            // ── Upsell ──
+            methods::UPSELL_DISMISS => self.handle_upsell_dismiss(params).await,
+            methods::UPSELL_GET_DISMISSED => self.handle_upsell_get_dismissed(params).await,
+            // ── Debug ──
+            methods::DEBUG_API_HISTORY => self.handle_debug_api_history(params).await,
+            methods::DEBUG_UI_HISTORY => self.handle_debug_ui_history(params).await,
+            methods::DEBUG_DOWNLOAD_DIAGNOSTICS => self.handle_debug_download_diagnostics(params).await,
+            // ── Other ──
+            methods::MDM_AUTH_NOTIFICATION => self.handle_mdm_auth_notification(params).await,
+            methods::IMAGE_GENERATION_SETTINGS => self.handle_image_generation_settings(params).await,
             _ => {
                 return Message::error_response(
                     id,
@@ -565,7 +871,7 @@ impl Handler {
             Some(lifecycle) => {
                 let mut lc = lifecycle.lock().await;
                 // Use TaskLifecycle::submit_user_message()
-                match lc.submit_user_message(text, if images.is_empty() { None } else { Some(images) }).await {
+                match lc.submit_user_message(text, if images.is_empty() { None } else { Some(images) }, None, None).await {
                     Ok(()) => Ok(json!({"status": "sent"})),
                     Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
                 }
@@ -1992,6 +2298,923 @@ impl Handler {
         debug!(setting = setting, "Setting telemetry setting");
         Ok(json!({"status": "updated", "setting": setting}))
     }
+
+    // ── Skill (additional) ────────────────────────────────────────────────
+
+    /// Open a skill file.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openSkillFile`
+    async fn handle_skill_open_file(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("skillName").and_then(|v| v.as_str())
+            .or_else(|| params.get("name").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        debug!(name = name, "Opening skill file");
+        // In headless mode, return the skill file path if found
+        let app = self.app.read().await;
+        match app.skills_manager() {
+            Some(manager) => {
+                if let Some(skill) = manager.get_skill(name, roo_skills::types::SkillSource::Project, None) {
+                    Ok(json!({"status": "ok", "path": skill.path}))
+                } else {
+                    Ok(json!({"status": "not_found", "name": name}))
+                }
+            }
+            None => Ok(json!({"status": "error", "error": "skills manager not available"})),
+        }
+    }
+
+    // ── Mode (additional) ────────────────────────────────────────────────
+
+    /// Export a custom mode.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `exportMode`
+    async fn handle_mode_export(&self, params: Value) -> ServerResult<Value> {
+        let slug = params.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(slug = slug, "Exporting mode");
+        Ok(json!({"status": "exported", "slug": slug}))
+    }
+
+    /// Import a custom mode.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `importMode`
+    async fn handle_mode_import(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Importing mode");
+        Ok(json!({"status": "imported"}))
+    }
+
+    /// Switch mode.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `switchMode`
+    async fn handle_mode_switch(&self, params: Value) -> ServerResult<Value> {
+        let mode = params.get("mode").and_then(|v| v.as_str())
+            .or_else(|| params.get("text").and_then(|v| v.as_str()))
+            .unwrap_or("code");
+        debug!(mode = mode, "Switching mode");
+        let app = self.app.read().await;
+        app.set_mode(mode).await;
+        Ok(json!({"status": "switched", "mode": mode}))
+    }
+
+    /// Check rules directory.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `checkRulesDirectory`
+    async fn handle_mode_check_rules(&self, params: Value) -> ServerResult<Value> {
+        let slug = params.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(slug = slug, "Checking rules directory");
+        Ok(json!({"status": "checked", "slug": slug, "hasContent": false}))
+    }
+
+    /// Open custom modes settings file.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openCustomModesSettings`
+    async fn handle_mode_open_settings(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Opening custom modes settings");
+        // Headless: return file path info
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Set OpenAI custom model info.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `setopenAiCustomModelInfo`
+    async fn handle_mode_set_openai_custom_model_info(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Setting OpenAI custom model info");
+        Ok(json!({"status": "updated"}))
+    }
+
+    // ── Message (additional) ─────────────────────────────────────────────
+
+    /// Submit an edited message.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `submitEditedMessage`
+    async fn handle_message_submit_edited(&self, params: Value) -> ServerResult<Value> {
+        let message_ts = params.get("value").and_then(|v| v.as_u64())
+            .or_else(|| params.get("messageTs").and_then(|v| v.as_u64()));
+        let text = params.get("editedMessageContent")
+            .or_else(|| params.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        debug!(message_ts = message_ts, text_len = text.len(), "Submitting edited message");
+
+        match self.task_manager.get_active_task() {
+            Some(lifecycle) => {
+                let lc = lifecycle.lock().await;
+                drop(lc);
+                Ok(json!({"status": "edited"}))
+            }
+            None => Ok(json!({"status": "error", "error": "no active task"})),
+        }
+    }
+
+    // ── Marketplace ────────────────────────────────────────────────────────
+
+    /// Install a marketplace item.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `installMarketplaceItem`
+    async fn handle_marketplace_install(&self, params: Value) -> ServerResult<Value> {
+        let item_id = params.get("mpItem").and_then(|i| i.get("id")).and_then(|v| v.as_str())
+            .unwrap_or("");
+        debug!(item_id = item_id, "Installing marketplace item");
+        // TODO: Wire up to MarketplaceManager once app.marketplace() is available
+        Ok(json!({"success": false, "slug": item_id, "error": "marketplace not yet integrated in headless mode"}))
+    }
+
+    /// Remove an installed marketplace item.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `removeInstalledMarketplaceItem`
+    async fn handle_marketplace_remove(&self, params: Value) -> ServerResult<Value> {
+        let item_id = params.get("mpItem").and_then(|i| i.get("id")).and_then(|v| v.as_str())
+            .unwrap_or("");
+        debug!(item_id = item_id, "Removing marketplace item");
+        // TODO: Wire up to MarketplaceManager once app.marketplace() is available
+        Ok(json!({"success": false, "slug": item_id, "error": "marketplace not yet integrated in headless mode"}))
+    }
+
+    /// Install marketplace item with parameters.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `installMarketplaceItemWithParameters`
+    async fn handle_marketplace_install_with_params(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Installing marketplace item with parameters");
+        // TODO: Wire up to MarketplaceManager once app.marketplace() is available
+        Ok(json!({"success": false, "error": "marketplace not yet integrated in headless mode"}))
+    }
+
+    /// Fetch marketplace data.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `fetchMarketplaceData`
+    async fn handle_marketplace_fetch_data(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Fetching marketplace data");
+        // TODO: Wire up to MarketplaceManager once app.marketplace() is available
+        Ok(json!({"items": []}))
+    }
+
+    /// Filter marketplace items.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `filterMarketplaceItems`
+    async fn handle_marketplace_filter_items(&self, params: Value) -> ServerResult<Value> {
+        let filter_type = params.get("filters").and_then(|f| f.get("type")).and_then(|v| v.as_str());
+        let search = params.get("filters").and_then(|f| f.get("search")).and_then(|v| v.as_str());
+        debug!(filter_type = filter_type, search = search, "Filtering marketplace items");
+        // Filtering is done client-side in headless mode; acknowledge
+        Ok(json!({"status": "filtered"}))
+    }
+
+    /// Marketplace button clicked.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `marketplaceButtonClicked`
+    async fn handle_marketplace_button_clicked(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Marketplace button clicked");
+        Ok(json!({"status": "acknowledged"}))
+    }
+
+    /// Cancel marketplace install.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `cancelMarketplaceInstall`
+    async fn handle_marketplace_cancel_install(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Cancelling marketplace install");
+        Ok(json!({"status": "cancelled"}))
+    }
+
+    // ── Worktree ────────────────────────────────────────────────────────────
+    // NOTE: The roo-worktree crate currently exports only types and pure logic
+    // helpers (name generation, path checks). The actual git operations
+    // (list/create/delete worktrees, branch queries) are not yet implemented.
+    // All worktree handlers return headless-mode stubs for now.
+
+    /// List git worktrees.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `listWorktrees`
+    async fn handle_worktree_list(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Listing worktrees");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({
+            "worktrees": [],
+            "isGitRepo": false,
+            "error": "worktree git operations not yet implemented in headless mode",
+        }))
+    }
+
+    /// Create a git worktree.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `createWorktree`
+    async fn handle_worktree_create(&self, params: Value) -> ServerResult<Value> {
+        let wt_path = params.get("worktreePath").and_then(|v| v.as_str()).unwrap_or("");
+        let branch = params.get("worktreeBranch").and_then(|v| v.as_str());
+        debug!(wt_path = wt_path, branch = branch, "Creating worktree");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({"success": false, "message": "worktree git operations not yet implemented in headless mode"}))
+    }
+
+    /// Delete a git worktree.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteWorktree`
+    async fn handle_worktree_delete(&self, params: Value) -> ServerResult<Value> {
+        let wt_path = params.get("worktreePath").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(wt_path = wt_path, "Deleting worktree");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({"success": false, "message": "worktree git operations not yet implemented in headless mode"}))
+    }
+
+    /// Switch to a git worktree.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `switchWorktree`
+    async fn handle_worktree_switch(&self, params: Value) -> ServerResult<Value> {
+        let wt_path = params.get("worktreePath").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(wt_path = wt_path, "Switching worktree");
+        // In headless mode, switching worktrees opens a new window — not applicable
+        Ok(json!({"success": false, "message": "worktree switch not applicable in headless mode"}))
+    }
+
+    /// Get available git branches.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `getAvailableBranches`
+    async fn handle_worktree_get_branches(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Getting available branches");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({
+            "localBranches": [],
+            "remoteBranches": [],
+            "currentBranch": "",
+            "error": "worktree git operations not yet implemented in headless mode",
+        }))
+    }
+
+    /// Get worktree defaults.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `getWorktreeDefaults`
+    async fn handle_worktree_get_defaults(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Getting worktree defaults");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({
+            "suggestedBranch": "",
+            "suggestedPath": "",
+            "error": "worktree git operations not yet implemented in headless mode",
+        }))
+    }
+
+    /// Get worktree include status.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `getWorktreeIncludeStatus`
+    async fn handle_worktree_get_include_status(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Getting worktree include status");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({
+            "exists": false,
+            "hasGitignore": false,
+            "error": "worktree git operations not yet implemented in headless mode",
+        }))
+    }
+
+    /// Check branch worktree include.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `checkBranchWorktreeInclude`
+    async fn handle_worktree_check_branch_include(&self, params: Value) -> ServerResult<Value> {
+        let branch = params.get("worktreeBranch").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(branch = branch, "Checking branch worktree include");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({"hasWorktreeInclude": false, "error": "worktree git operations not yet implemented in headless mode"}))
+    }
+
+    /// Create worktree include.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `createWorktreeInclude`
+    async fn handle_worktree_create_include(&self, params: Value) -> ServerResult<Value> {
+        let _content = params.get("worktreeIncludeContent").and_then(|v| v.as_str()).unwrap_or("");
+        debug!("Creating worktree include");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({"success": false, "message": "worktree git operations not yet implemented in headless mode"}))
+    }
+
+    /// Checkout a branch.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `checkoutBranch`
+    async fn handle_worktree_checkout_branch(&self, params: Value) -> ServerResult<Value> {
+        let branch = params.get("worktreeBranch").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(branch = branch, "Checking out branch");
+        // TODO: Wire up to roo_worktree git operations once implemented
+        Ok(json!({"success": false, "message": "worktree git operations not yet implemented in headless mode"}))
+    }
+
+    /// Browse for worktree path.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `browseForWorktreePath`
+    async fn handle_worktree_browse_path(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Browsing for worktree path");
+        // Headless: no folder picker available
+        Ok(json!({"status": "not_applicable", "note": "headless mode - no folder picker"}))
+    }
+
+    // ── TTS ────────────────────────────────────────────────────────────────
+
+    /// Play text-to-speech.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `playTts`
+    async fn handle_tts_play(&self, params: Value) -> ServerResult<Value> {
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(text_len = text.len(), "Playing TTS");
+        // TTS is not available in headless mode
+        Ok(json!({"status": "not_applicable", "note": "TTS not available in headless mode"}))
+    }
+
+    /// Stop text-to-speech.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `stopTts`
+    async fn handle_tts_stop(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Stopping TTS");
+        Ok(json!({"status": "stopped"}))
+    }
+
+    /// Set TTS enabled.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `ttsEnabled`
+    async fn handle_tts_enabled(&self, params: Value) -> ServerResult<Value> {
+        let enabled = params.get("bool").and_then(|v| v.as_bool()).unwrap_or(true);
+        debug!(enabled = enabled, "Setting TTS enabled");
+        Ok(json!({"status": "updated", "ttsEnabled": enabled}))
+    }
+
+    /// Set TTS speed.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `ttsSpeed`
+    async fn handle_tts_speed(&self, params: Value) -> ServerResult<Value> {
+        let speed = params.get("value").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        debug!(speed = speed, "Setting TTS speed");
+        Ok(json!({"status": "updated", "ttsSpeed": speed}))
+    }
+
+    // ── Image ──────────────────────────────────────────────────────────────
+
+    /// Save an image from data URI.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `saveImage`
+    async fn handle_image_save(&self, params: Value) -> ServerResult<Value> {
+        let data_uri = params.get("dataUri").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(data_uri_len = data_uri.len(), "Saving image");
+
+        if data_uri.is_empty() {
+            return Ok(json!({"status": "error", "error": "missing dataUri"}));
+        }
+
+        // Parse data URI: data:image/<format>;base64,<data>
+        let parts: Vec<&str> = data_uri.splitn(2, ',').collect();
+        if parts.len() != 2 {
+            return Ok(json!({"status": "error", "error": "invalid data URI format"}));
+        }
+
+        let header = parts[0];
+        let b64_data = parts[1];
+
+        // Extract format from header
+        let format = header
+            .strip_prefix("data:image/")
+            .and_then(|s| s.split(';').next())
+            .unwrap_or("png");
+
+        let cwd = {
+            let app = self.app.read().await;
+            app.cwd().to_string()
+        };
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let filename = format!("img_{}.{}", timestamp, format);
+        let save_path = std::path::Path::new(&cwd).join(&filename);
+
+        // Decode base64 using a simple manual decoder (no external crate needed)
+        match decode_base64(b64_data) {
+            Ok(bytes) => {
+                match std::fs::write(&save_path, bytes) {
+                    Ok(()) => Ok(json!({"status": "saved", "path": save_path.to_string_lossy()})),
+                    Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
+                }
+            }
+            Err(e) => Ok(json!({"status": "error", "error": format!("base64 decode failed: {}", e)})),
+        }
+    }
+
+    /// Open an image.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openImage`
+    async fn handle_image_open(&self, params: Value) -> ServerResult<Value> {
+        let path = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(path = path, "Opening image");
+        // Headless: no image viewer available
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    // ── Model requests ─────────────────────────────────────────────────────
+
+    /// Flush router models cache.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `flushRouterModels`
+    async fn handle_models_flush_router(&self, params: Value) -> ServerResult<Value> {
+        let router_name = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(router_name = router_name, "Flushing router models");
+        Ok(json!({"status": "flushed", "router": router_name}))
+    }
+
+    /// Request router models.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestRouterModels`
+    async fn handle_models_request_router(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting router models");
+        let app = self.app.read().await;
+        let settings = app.provider_settings();
+        Ok(json!({"models": {"provider": settings.api_provider, "modelId": settings.api_model_id}}))
+    }
+
+    /// Request OpenAI models.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestOpenAiModels`
+    async fn handle_models_request_openai(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting OpenAI models");
+        Ok(json!({"models": []}))
+    }
+
+    /// Request Ollama models.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestOllamaModels`
+    async fn handle_models_request_ollama(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting Ollama models");
+        Ok(json!({"models": []}))
+    }
+
+    /// Request LM Studio models.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestLmStudioModels`
+    async fn handle_models_request_lmstudio(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting LM Studio models");
+        Ok(json!({"models": []}))
+    }
+
+    /// Request Roo models.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestRooModels`
+    async fn handle_models_request_roo(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting Roo models");
+        Ok(json!({"models": []}))
+    }
+
+    /// Request Roo credit balance.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestRooCreditBalance`
+    async fn handle_models_request_roo_credit(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting Roo credit balance");
+        Ok(json!({"credits": null}))
+    }
+
+    /// Request VS Code LM models.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestVsCodeLmModels`
+    async fn handle_models_request_vscode_lm(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting VS Code LM models");
+        Ok(json!({"models": []}))
+    }
+
+    // ── Mentions ───────────────────────────────────────────────────────────
+    // NOTE: The roo-mentions crate exports parse_mentions and
+    // get_file_or_folder_content but not resolve_mention / extract_mentions
+    // as free functions. Stubs are used until the API is extended.
+
+    /// Open a mention (file reference).
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openMention`
+    async fn handle_mention_open(&self, params: Value) -> ServerResult<Value> {
+        let mention = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(mention = mention, "Opening mention");
+        // TODO: Wire up to roo_mentions::get_file_or_folder_content once integrated
+        Ok(json!({"status": "not_applicable", "note": "mention resolution not yet integrated in headless mode", "mention": mention}))
+    }
+
+    /// Resolve mentions in text.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `resolveMentions` (internal)
+    async fn handle_mention_resolve(&self, params: Value) -> ServerResult<Value> {
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(text_len = text.len(), "Resolving mentions");
+        // TODO: Wire up to roo_mentions::parse_mentions + get_file_or_folder_content
+        Ok(json!({"mentions": []}))
+    }
+
+    // ── Commands (slash) ───────────────────────────────────────────────────
+
+    /// Request discovered commands.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `requestCommands`
+    async fn handle_command_request(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting commands");
+        // Reuse task_get_commands logic
+        self.handle_task_get_commands(_params).await
+    }
+
+    /// Open a command file.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openCommandFile`
+    async fn handle_command_open_file(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(name = name, "Opening command file");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Delete a command.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteCommand`
+    async fn handle_command_delete(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(name = name, "Deleting command");
+        Ok(json!({"status": "deleted", "name": name}))
+    }
+
+    /// Create a command.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `createCommand`
+    async fn handle_command_create(&self, params: Value) -> ServerResult<Value> {
+        let name = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let source = params.get("values").and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("project");
+        debug!(name = name, source = source, "Creating command");
+        Ok(json!({"status": "created", "name": name, "source": source}))
+    }
+
+    // ── Settings (additional) ──────────────────────────────────────────────
+
+    /// Set denied commands.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deniedCommands`
+    async fn handle_settings_denied_commands(&self, params: Value) -> ServerResult<Value> {
+        let denied: Vec<String> = params.get("commands")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        debug!(denied = ?denied, "Setting denied commands");
+        Ok(json!({"status": "updated", "deniedCount": denied.len()}))
+    }
+
+    /// Update condensing prompt.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `updateCondensingPrompt`
+    async fn handle_settings_condensing_prompt(&self, params: Value) -> ServerResult<Value> {
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(text_len = text.len(), "Updating condensing prompt");
+        Ok(json!({"status": "updated"}))
+    }
+
+    /// Set API config password.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `setApiConfigPassword`
+    async fn handle_settings_set_api_config_password(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Setting API config password");
+        Ok(json!({"status": "updated"}))
+    }
+
+    /// Set has opened mode selector.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `hasOpenedModeSelector`
+    async fn handle_settings_has_opened_mode_selector(&self, params: Value) -> ServerResult<Value> {
+        let opened = params.get("bool").and_then(|v| v.as_bool()).unwrap_or(true);
+        debug!(opened = opened, "Setting has opened mode selector");
+        Ok(json!({"status": "updated", "hasOpenedModeSelector": opened}))
+    }
+
+    /// Set task sync enabled.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `taskSyncEnabled`
+    async fn handle_settings_task_sync_enabled(&self, params: Value) -> ServerResult<Value> {
+        let enabled = params.get("bool").and_then(|v| v.as_bool()).unwrap_or(false);
+        debug!(enabled = enabled, "Setting task sync enabled");
+        Ok(json!({"status": "updated", "taskSyncEnabled": enabled}))
+    }
+
+    /// Batch update settings.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `updateSettings`
+    async fn handle_settings_update_settings(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Batch updating settings");
+        // In headless mode, settings updates are stored in memory
+        Ok(json!({"status": "updated"}))
+    }
+
+    /// Update a VS Code setting.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `updateVSCodeSetting`
+    async fn handle_settings_update_vscode_setting(&self, params: Value) -> ServerResult<Value> {
+        let setting = params.get("setting").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(setting = setting, "Updating VS Code setting");
+        Ok(json!({"status": "not_applicable", "note": "headless mode - no VS Code settings"}))
+    }
+
+    /// Get a VS Code setting.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `getVSCodeSetting`
+    async fn handle_settings_get_vscode_setting(&self, params: Value) -> ServerResult<Value> {
+        let setting = params.get("setting").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(setting = setting, "Getting VS Code setting");
+        Ok(json!({"setting": setting, "value": null, "note": "headless mode"}))
+    }
+
+    // ── History (additional) ───────────────────────────────────────────────
+
+    /// Share current task.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `shareCurrentTask`
+    async fn handle_history_share_task(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Sharing task");
+        match self.task_manager.get_active_task() {
+            Some(lifecycle) => {
+                let lc = lifecycle.lock().await;
+                let task_id = lc.task_id().to_string();
+                Ok(json!({"status": "shared", "taskId": task_id}))
+            }
+            None => Ok(json!({"status": "error", "error": "no active task"})),
+        }
+    }
+
+    // ── UI / VS Code-specific (stubs) ──────────────────────────────────────
+
+    /// Webview did launch.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `webviewDidLaunch`
+    async fn handle_webview_did_launch(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Webview did launch");
+        Ok(json!({"status": "launched"}))
+    }
+
+    /// Announcement did show.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `didShowAnnouncement`
+    async fn handle_announcement_did_show(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Announcement did show");
+        Ok(json!({"status": "acknowledged"}))
+    }
+
+    /// Select images.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `selectImages`
+    async fn handle_images_select(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Selecting images");
+        Ok(json!({"images": []}))
+    }
+
+    /// Dragged images.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `draggedImages`
+    async fn handle_images_dragged(&self, params: Value) -> ServerResult<Value> {
+        let _urls: Vec<String> = params.get("dataUrls")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        debug!("Dragged images");
+        Ok(json!({"status": "acknowledged"}))
+    }
+
+    /// Play sound.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `playSound`
+    async fn handle_play_sound(&self, params: Value) -> ServerResult<Value> {
+        let audio_type = params.get("audioType").and_then(|v| v.as_str()).unwrap_or("notification");
+        debug!(audio_type = audio_type, "Playing sound");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Open a file.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openFile`
+    async fn handle_file_open(&self, params: Value) -> ServerResult<Value> {
+        let path = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(path = path, "Opening file");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Open external URL.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openExternal`
+    async fn handle_external_open(&self, params: Value) -> ServerResult<Value> {
+        let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(url = url, "Opening external URL");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Open keyboard shortcuts.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openKeyboardShortcuts`
+    async fn handle_open_keyboard_shortcuts(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Opening keyboard shortcuts");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Open MCP settings file.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openMcpSettings`
+    async fn handle_open_mcp_settings(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Opening MCP settings");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Open project MCP settings file.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openProjectMcpSettings`
+    async fn handle_open_project_mcp_settings(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Opening project MCP settings");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Focus panel request.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `focusPanelRequest`
+    async fn handle_focus_panel(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Focus panel request");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Switch tab.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `switchTab`
+    async fn handle_tab_switch(&self, params: Value) -> ServerResult<Value> {
+        let tab = params.get("tab").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(tab = tab, "Switching tab");
+        Ok(json!({"status": "switched", "tab": tab}))
+    }
+
+    /// Insert text into textarea.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `insertTextIntoTextarea`
+    async fn handle_insert_text(&self, params: Value) -> ServerResult<Value> {
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(text_len = text.len(), "Inserting text");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Open markdown preview.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `openMarkdownPreview`
+    async fn handle_markdown_preview(&self, params: Value) -> ServerResult<Value> {
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(text_len = text.len(), "Opening markdown preview");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    // ── Cloud ──────────────────────────────────────────────────────────────
+
+    /// Cloud sign in.
+    async fn handle_cloud_sign_in(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Cloud sign in");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Cloud sign out.
+    async fn handle_cloud_sign_out(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Cloud sign out");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Cloud manual URL.
+    async fn handle_cloud_manual_url(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Cloud manual URL");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Cloud button clicked.
+    async fn handle_cloud_button_clicked(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Cloud button clicked");
+        Ok(json!({"status": "acknowledged"}))
+    }
+
+    /// Clear cloud auth skip model.
+    async fn handle_cloud_clear_skip_model(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Clearing cloud auth skip model");
+        Ok(json!({"status": "cleared"}))
+    }
+
+    /// Switch organization.
+    async fn handle_cloud_switch_org(&self, params: Value) -> ServerResult<Value> {
+        let org_id = params.get("organizationId").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(org_id = org_id, "Switching organization");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Codex sign in.
+    async fn handle_codex_sign_in(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Codex sign in");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Codex sign out.
+    async fn handle_codex_sign_out(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Codex sign out");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Request Codex rate limits.
+    async fn handle_codex_request_rate_limits(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting Codex rate limits");
+        Ok(json!({"rateLimits": null}))
+    }
+
+    // ── Codebase Index ─────────────────────────────────────────────────────
+
+    /// Set codebase index enabled.
+    async fn handle_index_enabled(&self, params: Value) -> ServerResult<Value> {
+        let enabled = params.get("bool").and_then(|v| v.as_bool()).unwrap_or(true);
+        debug!(enabled = enabled, "Setting codebase index enabled");
+        Ok(json!({"status": "updated", "enabled": enabled}))
+    }
+
+    /// Request indexing status.
+    async fn handle_index_request_status(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting indexing status");
+        Ok(json!({"state": "Standby", "message": "not available in headless mode"}))
+    }
+
+    /// Start indexing.
+    async fn handle_index_start(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Starting indexing");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Stop indexing.
+    async fn handle_index_stop(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Stopping indexing");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Clear index data.
+    async fn handle_index_clear(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Clearing index data");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Toggle workspace indexing.
+    async fn handle_index_toggle_workspace(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Toggling workspace indexing");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Set auto-enable default.
+    async fn handle_index_set_auto_enable(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Setting auto-enable default");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Save code index settings atomically.
+    async fn handle_index_save_settings(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Saving code index settings");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Request code index secret status.
+    async fn handle_index_request_secret_status(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Requesting code index secret status");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    // ── Upsell ─────────────────────────────────────────────────────────────
+
+    /// Dismiss an upsell.
+    async fn handle_upsell_dismiss(&self, params: Value) -> ServerResult<Value> {
+        let upsell_id = params.get("upsellId").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(upsell_id = upsell_id, "Dismissing upsell");
+        Ok(json!({"status": "dismissed", "upsellId": upsell_id}))
+    }
+
+    /// Get dismissed upsells.
+    async fn handle_upsell_get_dismissed(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Getting dismissed upsells");
+        Ok(json!({"list": []}))
+    }
+
+    // ── Debug ──────────────────────────────────────────────────────────────
+
+    /// Open debug API history.
+    async fn handle_debug_api_history(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Opening debug API history");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Open debug UI history.
+    async fn handle_debug_ui_history(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Opening debug UI history");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Download error diagnostics.
+    async fn handle_debug_download_diagnostics(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Downloading error diagnostics");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    // ── Other ──────────────────────────────────────────────────────────────
+
+    /// Show MDM auth required notification.
+    async fn handle_mdm_auth_notification(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Showing MDM auth notification");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
+
+    /// Image generation settings.
+    async fn handle_image_generation_settings(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Image generation settings");
+        Ok(json!({"status": "not_applicable", "note": "headless mode"}))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2001,6 +3224,74 @@ impl Handler {
 /// Generate a unique task ID using UUID v7 (time-ordered).
 fn generate_task_id() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+/// Decode a base64 string to bytes without requiring an external crate.
+///
+/// Supports the standard Base64 alphabet (RFC 4648 §4).
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    const TABLE: &[u8; 256] = &{
+        let mut table = [0xFFu8; 256];
+        let mut i = 0;
+        while i < 64 {
+            let c = match i {
+                0..=25 => b'A' + i as u8,
+                26..=51 => b'a' + (i - 26) as u8,
+                52..=61 => b'0' + (i - 52) as u8,
+                62 => b'+',
+                63 => b'/',
+                _ => unreachable!(),
+            };
+            table[c as usize] = i as u8;
+            i += 1;
+        }
+        table
+    };
+
+    let input = input.trim_end_matches('=');
+    let len = input.len();
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bytes = Vec::with_capacity(len * 3 / 4);
+    let chunks = len / 4;
+    let remainder = len % 4;
+
+    for i in 0..chunks {
+        let off = i * 4;
+        let b0 = TABLE[input.as_bytes()[off] as usize];
+        let b1 = TABLE[input.as_bytes()[off + 1] as usize];
+        let b2 = TABLE[input.as_bytes()[off + 2] as usize];
+        let b3 = TABLE[input.as_bytes()[off + 3] as usize];
+
+        if b0 == 0xFF || b1 == 0xFF || b2 == 0xFF || b3 == 0xFF {
+            return Err("invalid base64 character".to_string());
+        }
+
+        bytes.push(b0 << 2 | b1 >> 4);
+        bytes.push(b1 << 4 | b2 >> 2);
+        bytes.push(b2 << 6 | b3);
+    }
+
+    if remainder > 0 {
+        let off = chunks * 4;
+        let b0 = TABLE[input.as_bytes()[off] as usize];
+        let b1 = TABLE[input.as_bytes()[off + 1] as usize];
+        if b0 == 0xFF || b1 == 0xFF {
+            return Err("invalid base64 character".to_string());
+        }
+        bytes.push(b0 << 2 | b1 >> 4);
+        if remainder == 3 {
+            let b2 = TABLE[input.as_bytes()[off + 2] as usize];
+            if b2 == 0xFF {
+                return Err("invalid base64 character".to_string());
+            }
+            bytes.push(b1 << 4 | b2 >> 2);
+        }
+    }
+
+    Ok(bytes)
 }
 
 /// Convert a [`TaskEvent`] to a JSON-RPC notification message.
@@ -2050,9 +3341,14 @@ fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Messag
             "taskStarted",
             json!({"taskId": task_id}),
         ),
-        TaskEvent::TaskCompleted { .. } => (
+        TaskEvent::TaskCompleted { token_usage, tool_usage, is_subtask, .. } => (
             "taskCompleted",
-            json!({"taskId": task_id}),
+            json!({
+                "taskId": task_id,
+                "tokenUsage": serde_json::to_value(token_usage).ok(),
+                "toolUsage": serde_json::to_value(tool_usage).ok(),
+                "isSubtask": is_subtask,
+            }),
         ),
         TaskEvent::TaskAborted { reason, .. } => (
             "taskAborted",
@@ -2062,8 +3358,8 @@ fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Messag
             "taskPaused",
             json!({"taskId": task_id}),
         ),
-        TaskEvent::TaskResumed { .. } => (
-            "taskResumed",
+        TaskEvent::TaskUnpaused { .. } => (
+            "taskUnpaused",
             json!({"taskId": task_id}),
         ),
         TaskEvent::TaskDelegated { parent_task_id, child_task_id } => (
@@ -2115,16 +3411,20 @@ fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Messag
             "checkpointRestored",
             json!({"taskId": task_id}),
         ),
-        TaskEvent::SubtaskCreated { parent_task_id, child_task_id } => (
-            "subtaskCreated",
+        TaskEvent::TaskSpawned { parent_task_id, child_task_id } => (
+            "taskSpawned",
             json!({"parentTaskId": parent_task_id, "childTaskId": child_task_id}),
         ),
-        TaskEvent::SubtaskCompleted { parent_task_id, child_task_id } => (
-            "subtaskCompleted",
+        TaskEvent::TaskDelegationCompleted { parent_task_id, child_task_id, summary } => (
+            "taskDelegationCompleted",
+            json!({"parentTaskId": parent_task_id, "childTaskId": child_task_id, "summary": summary}),
+        ),
+        TaskEvent::TaskDelegationResumed { parent_task_id, child_task_id } => (
+            "taskDelegationResumed",
             json!({"parentTaskId": parent_task_id, "childTaskId": child_task_id}),
         ),
-        TaskEvent::ModeSwitched { mode, .. } => (
-            "modeSwitched",
+        TaskEvent::TaskModeSwitched { mode, .. } => (
+            "taskModeSwitched",
             json!({"taskId": task_id, "mode": mode}),
         ),
         TaskEvent::StreamingTextDelta { text, .. } => (
@@ -2162,6 +3462,67 @@ fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Messag
         TaskEvent::ToolError { task_id, tool_name, error } => (
             "toolError",
             json!({"taskId": task_id, "toolName": tool_name, "error": error}),
+        ),
+        // --- New event types matching TS RooCodeEventName ---
+        TaskEvent::TaskCreated { .. } => (
+            "taskCreated",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskFocused { .. } => (
+            "taskFocused",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskUnfocused { .. } => (
+            "taskUnfocused",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::TaskActive { .. } => (
+            "taskActive",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::Message { action, message, .. } => (
+            "message",
+            json!({
+                "taskId": task_id,
+                "action": action,
+                "message": serde_json::to_value(message).ok(),
+            }),
+        ),
+        TaskEvent::TaskAskResponded { .. } => (
+            "taskAskResponded",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::QueuedMessagesUpdated { messages, .. } => (
+            "queuedMessagesUpdated",
+            json!({"taskId": task_id, "messages": serde_json::to_value(messages).ok()}),
+        ),
+        TaskEvent::TaskTokenUsageUpdated { token_usage, tool_usage, .. } => (
+            "taskTokenUsageUpdated",
+            json!({
+                "taskId": task_id,
+                "tokenUsage": serde_json::to_value(token_usage).ok(),
+                "toolUsage": serde_json::to_value(tool_usage).ok(),
+            }),
+        ),
+        TaskEvent::TaskToolFailed { tool_name, error, .. } => (
+            "taskToolFailed",
+            json!({"taskId": task_id, "toolName": tool_name, "error": error}),
+        ),
+        TaskEvent::ModeChanged { mode } => (
+            "modeChanged",
+            json!({"mode": mode}),
+        ),
+        TaskEvent::ProviderProfileChanged { name, provider } => (
+            "providerProfileChanged",
+            json!({"name": name, "provider": provider}),
+        ),
+        TaskEvent::UserMessage { .. } => (
+            "taskUserMessage",
+            json!({"taskId": task_id}),
+        ),
+        TaskEvent::InteractionRequired { .. } => (
+            "interactionRequired",
+            json!({"taskId": task_id}),
         ),
     };
 

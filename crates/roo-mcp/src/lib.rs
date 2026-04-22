@@ -31,7 +31,10 @@ pub use manager::McpServerManager;
 
 pub use client::McpClient;
 pub use config::{validate_server_config, ValidatedServerConfig};
-pub use hub::McpConnectionExt;
+pub use hub::{
+    get_default_environment, inject_variables, json_deep_equal, merge_environment,
+    McpConnectionExt,
+};
 pub use name_utils::{
     build_mcp_tool_name, is_mcp_tool, normalize_for_comparison, normalize_mcp_tool_name,
     parse_mcp_tool_name, sanitize_mcp_name, tool_names_match, MCP_TOOL_PREFIX,

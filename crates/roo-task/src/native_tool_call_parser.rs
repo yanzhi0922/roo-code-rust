@@ -65,6 +65,7 @@ const VALID_TOOL_NAMES: &[&str] = &[
     "run_slash_command",
     "skill",
     "generate_image",
+    "custom_tool",
 ];
 
 // ---------------------------------------------------------------------------

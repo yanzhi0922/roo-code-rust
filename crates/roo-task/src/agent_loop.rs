@@ -25,7 +25,7 @@
 //!   first chunk and handles context-window / rate-limit / generic errors
 //!   before continuing with the rest of the stream.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,13 +40,53 @@ use roo_auto_approval::types::AutoApprovalState;
 use roo_checkpoint::service::ShadowCheckpointService;
 use roo_checkpoint::types::SaveCheckpointOptions;
 use roo_tools::repetition::ToolRepetitionDetector;
+use roo_types::tool::{ToolName, ToolUsageEntry};
 
 use crate::engine::TaskEngine;
 use crate::message_builder::MessageBuilder;
+use crate::native_tool_call_parser::NativeToolCallParser;
 use crate::present_assistant_message::PresentAssistantMessage;
 use crate::stream_parser::{ParsedStreamContent, ParsedToolCall, StreamParser};
 use crate::tool_dispatcher::{ToolContext, ToolDispatcher, ToolExecutionResult};
-use crate::types::{StreamEvent, TaskError, TaskResult, TaskState};
+use crate::types::{DiffStrategy, StreamEvent, TaskError, TaskResult, TaskState};
+
+// ===========================================================================
+// Global static: lastGlobalApiRequestTime
+// Source: `src/core/task/Task.ts` line 286
+//   `private static lastGlobalApiRequestTime?: number`
+// ===========================================================================
+
+/// Global static tracking the last API request time across all task instances.
+/// Used for provider rate limiting.
+///
+/// Source: `src/core/task/Task.ts` line 286 — `static lastGlobalApiRequestTime`
+static LAST_GLOBAL_API_REQUEST_TIME: std::sync::Mutex<Option<Instant>> =
+    std::sync::Mutex::new(None);
+
+/// Token usage emit interval in milliseconds (2 seconds).
+///
+/// Source: `src/core/task/Task.ts` line 408 — `TOKEN_USAGE_EMIT_INTERVAL_MS = 2000`
+const TOKEN_USAGE_EMIT_INTERVAL_MS: u64 = 2000;
+
+// ===========================================================================
+// Placeholder types for controllers not yet fully integrated
+// TODO: Replace with actual types when dependencies are wired up
+// ===========================================================================
+
+// TODO: Replace with roo_ignore::controller::RooIgnoreController
+// Source: `src/core/task/Task.ts` line 298 — `rooIgnoreController?: RooIgnoreController`
+#[derive(Debug, Clone, Default)]
+struct RooIgnoreControllerPlaceholder;
+
+// TODO: Replace with roo_protect::controller::RooProtectedController
+// Source: `src/core/task/Task.ts` line 299 — `rooProtectedController?: RooProtectedController`
+#[derive(Debug, Clone, Default)]
+struct RooProtectedControllerPlaceholder;
+
+// TODO: Replace with roo_context_tracking::FileContextTracker<InMemoryMetadataStore>
+// Source: `src/core/task/Task.ts` line 300 — `fileContextTracker: FileContextTracker`
+#[derive(Debug, Clone, Default)]
+struct FileContextTrackerPlaceholder;
 
 // ===========================================================================
 // merge_consecutive_api_messages — TS line 4198
@@ -508,6 +548,102 @@ pub struct AgentLoop {
     /// Set at start of each API request to avoid excessive getModel() calls
     /// during tool execution.
     cached_streaming_model: Option<(String, roo_types::model::ModelInfo)>,
+
+    // =================================================================
+    // New fields — matching TS Task class properties
+    // =================================================================
+
+    /// Set of message timestamps that have been synced to cloud.
+    ///
+    /// Source: `src/core/task/Task.ts` line 412
+    ///   `private cloudSyncedMessageTimestamps: Set<number> = new Set()`
+    cloud_synced_message_timestamps: HashSet<u64>,
+
+    /// Diff strategy for file editing.
+    ///
+    /// Source: `src/core/task/Task.ts` line 305 — `diffStrategy?: DiffStrategy`
+    /// Constructor line 535: `this.diffStrategy = new MultiSearchReplaceDiffStrategy()`
+    diff_strategy: DiffStrategy,
+
+    /// .rooignore controller for filtering file access.
+    ///
+    /// Source: `src/core/task/Task.ts` line 298
+    ///   `rooIgnoreController?: RooIgnoreController`
+    /// TODO: Replace placeholder with `roo_ignore::controller::RooIgnoreController`
+    roo_ignore_controller: Option<RooIgnoreControllerPlaceholder>,
+
+    /// .rooprotect controller for protecting files from modification.
+    ///
+    /// Source: `src/core/task/Task.ts` line 299
+    ///   `rooProtectedController?: RooProtectedController`
+    /// TODO: Replace placeholder with `roo_protect::controller::RooProtectedController`
+    roo_protected_controller: Option<RooProtectedControllerPlaceholder>,
+
+    /// File context tracker for tracking file reads/edits.
+    ///
+    /// Source: `src/core/task/Task.ts` line 300
+    ///   `fileContextTracker: FileContextTracker`
+    /// TODO: Replace placeholder with `roo_context_tracking::FileContextTracker<InMemoryMetadataStore>`
+    file_context_tracker: Option<FileContextTrackerPlaceholder>,
+
+    /// Whether the checkpoint service is currently initializing.
+    ///
+    /// Source: `src/core/task/Task.ts` line 332
+    ///   `checkpointServiceInitializing = false`
+    checkpoint_service_initializing: bool,
+
+    /// Assistant message parser instance.
+    ///
+    /// Source: `src/core/task/Task.ts` line 390
+    ///   `assistantMessageParser?: undefined`
+    /// In TS this is set to `undefined` (no parser needed for native tool calls).
+    /// In Rust we store an Option<NativeToolCallParser> for when streaming
+    /// tool call parsing is required.
+    assistant_message_parser: Option<NativeToolCallParser>,
+
+    /// Tool usage snapshot for throttling token/tool usage emits.
+    ///
+    /// Source: `src/core/task/Task.ts` line 405
+    ///   `private toolUsageSnapshot?: ToolUsage`
+    tool_usage_snapshot: HashMap<ToolName, ToolUsageEntry>,
+
+    /// Whether a tool was rejected in the current streaming session.
+    /// When true, subsequent tools in the same turn are skipped (cascade).
+    ///
+    /// Source: `src/core/task/Task.ts` line 384
+    ///   `didRejectTool = false`
+    did_reject_tool: bool,
+
+    /// Whether a tool has already been used in the current streaming session.
+    ///
+    /// Source: `src/core/task/Task.ts` line 385
+    ///   `didAlreadyUseTool = false`
+    did_already_use_tool: bool,
+
+    /// Whether the task has been started.
+    ///
+    /// Source: `src/core/task/Task.ts` line 388
+    ///   `private _started = false`
+    started: bool,
+
+    /// Whether the present-assistant-message handler is currently locked.
+    ///
+    /// Source: `src/core/task/Task.ts` line 344
+    ///   `presentAssistantMessageLocked = false`
+    locked: bool,
+
+    /// Whether there are pending updates for the present-assistant-message handler.
+    ///
+    /// Source: `src/core/task/Task.ts` line 345
+    ///   `presentAssistantMessageHasPendingUpdates = false`
+    pending: bool,
+
+    /// Timestamp of the last token usage emit, for throttling.
+    ///
+    /// Source: `src/core/task/Task.ts` line 408-409
+    ///   `TOKEN_USAGE_EMIT_INTERVAL_MS = 2000`
+    ///   `debouncedEmitTokenUsage` (debounce-based throttle)
+    last_token_usage_emit: Option<Instant>,
 }
 
 impl AgentLoop {
@@ -543,6 +679,50 @@ impl AgentLoop {
             user_message_content_ready: false,
             // TS L398: cachedStreamingModel
             cached_streaming_model: Some(model_info),
+
+            // --- New fields matching TS Task class properties ---
+
+            // TS L412: cloudSyncedMessageTimestamps: Set<number> = new Set()
+            cloud_synced_message_timestamps: HashSet::new(),
+
+            // TS L305/L535: diffStrategy = new MultiSearchReplaceDiffStrategy()
+            diff_strategy: DiffStrategy::MultiSearchReplace,
+
+            // TS L298: rooIgnoreController — initialized later via with_roo_ignore_controller()
+            roo_ignore_controller: None,
+
+            // TS L299: rooProtectedController — initialized later via with_roo_protected_controller()
+            roo_protected_controller: None,
+
+            // TS L300: fileContextTracker — initialized later via with_file_context_tracker()
+            file_context_tracker: None,
+
+            // TS L332: checkpointServiceInitializing = false
+            checkpoint_service_initializing: false,
+
+            // TS L390: assistantMessageParser = undefined
+            assistant_message_parser: None,
+
+            // TS L405: toolUsageSnapshot = undefined (empty map)
+            tool_usage_snapshot: HashMap::new(),
+
+            // TS L384: didRejectTool = false
+            did_reject_tool: false,
+
+            // TS L385: didAlreadyUseTool = false
+            did_already_use_tool: false,
+
+            // TS L388: _started = false
+            started: false,
+
+            // TS L344: presentAssistantMessageLocked = false
+            locked: false,
+
+            // TS L345: presentAssistantMessageHasPendingUpdates = false
+            pending: false,
+
+            // Token usage throttling — tracks last emit time
+            last_token_usage_emit: None,
         }
     }
 
@@ -602,6 +782,237 @@ impl AgentLoop {
     /// Get a mutable reference to the DiffView provider, if configured.
     pub fn diff_view_provider_mut(&mut self) -> Option<&mut roo_editor::diff_view::DiffViewProvider> {
         self.diff_view_provider.as_mut()
+    }
+
+    // ===================================================================
+    // New accessor methods for fields matching TS Task class properties
+    // ===================================================================
+
+    /// Get a reference to the cloud-synced message timestamps set.
+    ///
+    /// Source: `src/core/task/Task.ts` line 412 — `cloudSyncedMessageTimestamps`
+    pub fn cloud_synced_message_timestamps(&self) -> &HashSet<u64> {
+        &self.cloud_synced_message_timestamps
+    }
+
+    /// Get a mutable reference to the cloud-synced message timestamps set.
+    pub fn cloud_synced_message_timestamps_mut(&mut self) -> &mut HashSet<u64> {
+        &mut self.cloud_synced_message_timestamps
+    }
+
+    /// Mark a message timestamp as synced to cloud.
+    pub fn mark_message_synced(&mut self, timestamp: u64) {
+        self.cloud_synced_message_timestamps.insert(timestamp);
+    }
+
+    /// Check if a message timestamp has been synced to cloud.
+    pub fn is_message_synced(&self, timestamp: u64) -> bool {
+        self.cloud_synced_message_timestamps.contains(&timestamp)
+    }
+
+    /// Get the diff strategy.
+    ///
+    /// Source: `src/core/task/Task.ts` line 305 — `diffStrategy`
+    pub fn diff_strategy_value(&self) -> DiffStrategy {
+        self.diff_strategy
+    }
+
+    /// Set the diff strategy.
+    pub fn set_diff_strategy(&mut self, strategy: DiffStrategy) {
+        self.diff_strategy = strategy;
+    }
+
+    /// Check whether the checkpoint service is initializing.
+    ///
+    /// Source: `src/core/task/Task.ts` line 332 — `checkpointServiceInitializing`
+    pub fn is_checkpoint_service_initializing(&self) -> bool {
+        self.checkpoint_service_initializing
+    }
+
+    /// Set the checkpoint service initializing flag.
+    pub fn set_checkpoint_service_initializing(&mut self, initializing: bool) {
+        self.checkpoint_service_initializing = initializing;
+    }
+
+    /// Get a reference to the assistant message parser, if any.
+    ///
+    /// Source: `src/core/task/Task.ts` line 390 — `assistantMessageParser`
+    pub fn assistant_message_parser(&self) -> Option<&NativeToolCallParser> {
+        self.assistant_message_parser.as_ref()
+    }
+
+    /// Get a mutable reference to the assistant message parser, if any.
+    pub fn assistant_message_parser_mut(&mut self) -> Option<&mut NativeToolCallParser> {
+        self.assistant_message_parser.as_mut()
+    }
+
+    /// Get a reference to the tool usage snapshot.
+    ///
+    /// Source: `src/core/task/Task.ts` line 405 — `toolUsageSnapshot`
+    pub fn tool_usage_snapshot(&self) -> &HashMap<ToolName, ToolUsageEntry> {
+        &self.tool_usage_snapshot
+    }
+
+    /// Get a mutable reference to the tool usage snapshot.
+    pub fn tool_usage_snapshot_mut(&mut self) -> &mut HashMap<ToolName, ToolUsageEntry> {
+        &mut self.tool_usage_snapshot
+    }
+
+    /// Check whether a tool was rejected in the current turn.
+    ///
+    /// Source: `src/core/task/Task.ts` line 384 — `didRejectTool`
+    pub fn did_reject_tool(&self) -> bool {
+        self.did_reject_tool
+    }
+
+    /// Set the did_reject_tool flag.
+    pub fn set_did_reject_tool(&mut self, value: bool) {
+        self.did_reject_tool = value;
+    }
+
+    /// Check whether a tool has already been used in the current turn.
+    ///
+    /// Source: `src/core/task/Task.ts` line 385 — `didAlreadyUseTool`
+    pub fn did_already_use_tool(&self) -> bool {
+        self.did_already_use_tool
+    }
+
+    /// Set the did_already_use_tool flag.
+    pub fn set_did_already_use_tool(&mut self, value: bool) {
+        self.did_already_use_tool = value;
+    }
+
+    /// Check whether the task has been started.
+    ///
+    /// Source: `src/core/task/Task.ts` line 388 — `_started`
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// Set the started flag.
+    pub fn set_started(&mut self, value: bool) {
+        self.started = value;
+    }
+
+    /// Check whether the present-assistant-message handler is locked.
+    ///
+    /// Source: `src/core/task/Task.ts` line 344 — `presentAssistantMessageLocked`
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Set the locked flag.
+    pub fn set_locked(&mut self, value: bool) {
+        self.locked = value;
+    }
+
+    /// Check whether there are pending updates for the assistant message handler.
+    ///
+    /// Source: `src/core/task/Task.ts` line 345 — `presentAssistantMessageHasPendingUpdates`
+    pub fn has_pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Set the pending flag.
+    pub fn set_pending(&mut self, value: bool) {
+        self.pending = value;
+    }
+
+    // ===================================================================
+    // debounced_emit_token_usage() — TS debouncedEmitTokenUsage
+    // Source: `src/core/task/Task.ts` lines 407-564
+    // ===================================================================
+
+    /// Emit token usage update with 2-second throttling.
+    ///
+    /// Source: `src/core/task/Task.ts` lines 549-564 — `debouncedEmitTokenUsage`
+    ///
+    /// In TS this uses lodash.debounce with `{ leading: true, trailing: true,
+    /// maxWait: 2000 }`. In Rust we implement a manual throttle that emits
+    /// immediately on the first call and then at most once per interval.
+    ///
+    /// # Arguments
+    /// * `token_usage` - Current token usage
+    /// * `tool_usage` - Current tool usage map
+    pub fn debounced_emit_token_usage(
+        &mut self,
+        token_usage: &roo_types::message::TokenUsage,
+        tool_usage: &roo_types::tool::ToolUsage,
+    ) {
+        let now = Instant::now();
+
+        // Check if enough time has passed since last emit (throttle)
+        let should_emit = match self.last_token_usage_emit {
+            None => true, // Leading: emit immediately on first call
+            Some(last) => now.duration_since(last).as_millis() as u64 >= TOKEN_USAGE_EMIT_INTERVAL_MS,
+        };
+
+        if !should_emit {
+            return;
+        }
+
+        // Check if token usage or tool usage has changed compared to snapshot
+        let token_changed = true; // Simplified: always report changed for token usage
+        let tool_changed = self.has_tool_usage_changed(tool_usage);
+
+        if token_changed || tool_changed {
+            // Emit the event via the engine's event emitter
+            self.engine.emitter().emit_token_usage_updated(token_usage.clone());
+
+            // Update snapshots
+            self.last_token_usage_emit = Some(now);
+            self.tool_usage_snapshot = tool_usage.clone();
+        }
+    }
+
+    /// Check if tool usage has changed compared to the last snapshot.
+    ///
+    /// Source: `src/shared/getApiMetrics.ts` — `hasToolUsageChanged`
+    fn has_tool_usage_changed(&self, current: &roo_types::tool::ToolUsage) -> bool {
+        if current.len() != self.tool_usage_snapshot.len() {
+            return true;
+        }
+        for (key, entry) in current {
+            match self.tool_usage_snapshot.get(key) {
+                Some(snapshot_entry) => {
+                    if snapshot_entry.attempts != entry.attempts
+                        || snapshot_entry.failures != entry.failures
+                    {
+                        return true;
+                    }
+                }
+                None => return true,
+            }
+        }
+        false
+    }
+
+    // ===================================================================
+    // Global API request time management
+    // Source: `src/core/task/Task.ts` line 286 — static lastGlobalApiRequestTime
+    // ===================================================================
+
+    /// Update the global last API request time to now.
+    ///
+    /// Source: `src/core/task/Task.ts` line 286 — `static lastGlobalApiRequestTime`
+    pub fn update_global_api_request_time() {
+        if let Ok(mut guard) = LAST_GLOBAL_API_REQUEST_TIME.lock() {
+            *guard = Some(Instant::now());
+        }
+    }
+
+    /// Get the global last API request time.
+    pub fn get_global_api_request_time() -> Option<Instant> {
+        LAST_GLOBAL_API_REQUEST_TIME.lock().ok().and_then(|g| *g)
+    }
+
+    /// Reset the global API request timestamp (for testing).
+    ///
+    /// Source: `src/core/task/Task.ts` lines 293-295 — `static resetGlobalApiRequestTime()`
+    pub fn reset_global_api_request_time() {
+        if let Ok(mut guard) = LAST_GLOBAL_API_REQUEST_TIME.lock() {
+            *guard = None;
+        }
     }
 
     // ===================================================================
@@ -892,6 +1303,7 @@ impl AgentLoop {
                 &[],
                 None,
                 None,
+                &[], // mcp_servers (populated at engine level)
             );
             let system_prompt = self.get_system_prompt();
 
@@ -4322,7 +4734,8 @@ mod tests {
 
         let config = TaskConfig::new("test-task", dir.path().to_str().unwrap())
             .with_mode("code")
-            .with_max_iterations(10);
+            .with_max_iterations(10)
+            .with_start_task(false);
         let engine = TaskEngine::new(config).unwrap();
         let provider = MockProvider::new("test");
         let builder = MessageBuilder::new("test");
@@ -4648,6 +5061,7 @@ mod tests {
             &[],
             None,
             None,
+            &[],
         );
         let code_names: Vec<&str> = code_tools.iter()
             .filter_map(|t| t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
@@ -4660,6 +5074,7 @@ mod tests {
             &[],
             None,
             None,
+            &[],
         );
         let arch_names: Vec<&str> = arch_tools.iter()
             .filter_map(|t| t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
@@ -4677,6 +5092,7 @@ mod tests {
             &[],
             Some(&disabled),
             None,
+            &[],
         );
         let names: Vec<&str> = tools.iter()
             .filter_map(|t| t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
@@ -4688,12 +5104,13 @@ mod tests {
     fn test_build_tool_definitions_with_restrictions() {
         let builder = MessageBuilder::new("test");
 
-        let result = builder.build_tool_definitions_with_restrictictions(
+        let result = builder.build_tool_definitions_with_restrictions(
             Some("code"),
             &[],
             None,
             None,
-            true, // include_all_tools_with_restrictictions
+            true, // include_all_tools_with_restrictions
+            &[],  // mcp_servers
         );
 
         // Should have tools

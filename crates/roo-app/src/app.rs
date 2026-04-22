@@ -393,7 +393,8 @@ mod tests {
         app.initialize().await.unwrap();
 
         let task_config = roo_task::TaskConfig::new("test-task-1", "/tmp/test")
-            .with_mode("code");
+            .with_mode("code")
+            .with_start_task(false);
         let lifecycle = app.create_task_lifecycle(task_config).unwrap();
         assert_eq!(lifecycle.task_id(), "test-task-1");
         // Services should be wired in

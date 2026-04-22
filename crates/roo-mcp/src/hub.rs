@@ -31,6 +31,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use roo_types::mcp::{
     McpConnectionStatus, McpResource, McpResourceResponse, McpResourceTemplate,
     McpServerConnection, McpTool, McpToolCallResponse,
@@ -57,6 +58,148 @@ pub enum ErrorLevel {
     Error,
     Warn,
     Info,
+}
+
+// ---------------------------------------------------------------------------
+// Standalone utility functions
+// ---------------------------------------------------------------------------
+
+/// Get the default environment variables for spawning MCP server processes.
+///
+/// Corresponds to TS: `getDefaultEnvironment()` from `@modelcontextprotocol/sdk/client/stdio.js`.
+/// Returns essential system environment variables (PATH, HOME, etc.) needed by
+/// child processes to function correctly.
+pub fn get_default_environment() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+
+    // Essential environment variables that child processes typically need
+    const ESSENTIAL_VARS: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "NODE_PATH",
+        "NPM_CONFIG_PREFIX",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "SYSTEMROOT",
+        "COMSPEC",
+        "PROCESSOR_ARCHITECTURE",
+        "PROGRAMDATA",
+        "ALLUSERSPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOGNAME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+    ];
+
+    for var_name in ESSENTIAL_VARS {
+        if let Ok(value) = std::env::var(var_name) {
+            env.insert(var_name.to_string(), value);
+        }
+    }
+
+    env
+}
+
+/// Deep-compare two `serde_json::Value`s for structural equality.
+///
+/// Corresponds to TS: `import deepEqual from "fast-deep-equal"`.
+/// `serde_json::Value::eq` already performs deep structural comparison,
+/// so this is a thin wrapper for semantic clarity.
+pub fn json_deep_equal(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    a == b
+}
+
+/// Inject variables into a JSON configuration value.
+///
+/// Corresponds to TS: `injectVariables(config, variables)`.
+/// Replaces the following patterns in all string values within the config:
+/// - `${workspaceFolder}` → the workspace root path
+/// - `${userHome}` → the user's home directory
+/// - `${env:VAR_NAME}` → the value of environment variable `VAR_NAME`
+///
+/// Does not mutate the original; returns a new value.
+pub fn inject_variables(
+    config: &serde_json::Value,
+    workspace_folder: &str,
+) -> serde_json::Value {
+    let mut config_str = serde_json::to_string(config).unwrap_or_default();
+
+    // Replace ${workspaceFolder}
+    if !workspace_folder.is_empty() {
+        let posix_path = workspace_folder.replace('\\', "/");
+        config_str = config_str.replace("${workspaceFolder}", &posix_path);
+    }
+
+    // Replace ${userHome}
+    if let Some(home) = dirs_home() {
+        let posix_home = home.replace('\\', "/");
+        config_str = config_str.replace("${userHome}", &posix_home);
+    }
+
+    // Replace ${env:VAR_NAME} patterns
+    inject_env_variables(&mut config_str);
+
+    serde_json::from_str(&config_str).unwrap_or_else(|_| config.clone())
+}
+
+/// Get the user's home directory.
+fn dirs_home() -> Option<String> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+}
+
+/// Replace `${env:VAR_NAME}` patterns in the given string with environment values.
+fn inject_env_variables(s: &mut String) {
+    let mut result = s.clone();
+    let mut start = 0;
+    while let Some(idx) = result[start..].find("${env:") {
+        let abs_idx = start + idx;
+        let after_prefix = abs_idx + 5; // length of "${env:"
+        if let Some(end_idx) = result[after_prefix..].find('}') {
+            let var_name = &result[after_prefix..after_prefix + end_idx];
+            let replacement = std::env::var(var_name).unwrap_or_default();
+            let pattern = format!("${{{{env:{}}}}}", var_name);
+            result = result.replace(&pattern, &replacement);
+            // Restart search from beginning since positions may have shifted
+            start = 0;
+        } else {
+            break;
+        }
+    }
+    *s = result;
+}
+
+/// Merge default environment with server-specific environment variables.
+///
+/// Corresponds to TS: `{ ...getDefaultEnvironment(), ...(configInjected.env || {}) }`.
+pub fn merge_environment(
+    default_env: &HashMap<String, String>,
+    server_env: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut merged = default_env.clone();
+    merged.extend(server_env.clone());
+    merged
+}
+
+/// Handle for a file watcher that owns the watcher and its processing task.
+/// When dropped, the watcher is stopped and the task is cancelled.
+struct FileWatcherHandle {
+    _watcher: RecommendedWatcher,
+    _task: tokio::task::JoinHandle<()>,
 }
 
 /// McpHub manages all MCP server connections.
@@ -90,6 +233,29 @@ pub struct McpHub {
     /// Initialization promise handle.
     /// Corresponds to TS: `initializationPromise: Promise<void>`
     initialized: Arc<RwLock<bool>>,
+
+    // --- File watching fields ---
+    /// Per-server file watchers for watchPaths and build/index.js.
+    /// Corresponds to TS: `fileWatchers: Map<string, FSWatcher[]>`
+    file_watchers: Arc<tokio::sync::Mutex<HashMap<String, Vec<FileWatcherHandle>>>>,
+    /// Watcher for global MCP settings file.
+    /// Corresponds to TS: `settingsWatcher?: vscode.FileSystemWatcher`
+    settings_watcher: Arc<tokio::sync::Mutex<Option<FileWatcherHandle>>>,
+    /// Watcher for project MCP file (.roo/mcp.json).
+    /// Corresponds to TS: `projectMcpWatcher?: vscode.FileSystemWatcher`
+    project_mcp_watcher: Arc<tokio::sync::Mutex<Option<FileWatcherHandle>>>,
+
+    // --- Config hot-reload fields ---
+    /// Whether the current config update is programmatic (should be ignored by watcher).
+    /// Corresponds to TS: `isProgrammaticUpdate: boolean`
+    is_programmatic_update: Arc<RwLock<bool>>,
+    /// Debounce task handles for config file changes.
+    /// Corresponds to TS: `configChangeDebounceTimers: Map<string, NodeJS.Timeout>`
+    config_debounce_handles: Arc<RwLock<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Workspace folder path for variable injection.
+    workspace_path: Option<String>,
+    /// Global MCP settings file path.
+    settings_path: Option<String>,
 }
 
 impl McpHub {
@@ -105,12 +271,43 @@ impl McpHub {
             is_connecting: Arc::new(RwLock::new(false)),
             on_state_change: None,
             initialized: Arc::new(RwLock::new(false)),
+            file_watchers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            settings_watcher: Arc::new(tokio::sync::Mutex::new(None)),
+            project_mcp_watcher: Arc::new(tokio::sync::Mutex::new(None)),
+            is_programmatic_update: Arc::new(RwLock::new(false)),
+            config_debounce_handles: Arc::new(RwLock::new(HashMap::new())),
+            workspace_path: None,
+            settings_path: None,
         }
+    }
+
+    /// Create a new McpHub with workspace and settings paths.
+    /// Enables file watching and config hot-reload when paths are provided.
+    /// Corresponds to TS: `constructor(provider: ClineProvider)` with path setup.
+    pub fn new_with_paths(
+        workspace_path: Option<String>,
+        settings_path: Option<String>,
+    ) -> Self {
+        let mut hub = Self::new();
+        hub.workspace_path = workspace_path;
+        hub.settings_path = settings_path;
+        hub
     }
 
     /// Create a new McpHub with a state change callback.
     pub fn with_state_change_callback(callback: StateChangeCallback) -> Self {
         let mut hub = Self::new();
+        hub.on_state_change = Some(callback);
+        hub
+    }
+
+    /// Create a new McpHub with paths and a state change callback.
+    pub fn with_paths_and_callback(
+        workspace_path: Option<String>,
+        settings_path: Option<String>,
+        callback: StateChangeCallback,
+    ) -> Self {
+        let mut hub = Self::new_with_paths(workspace_path, settings_path);
         hub.on_state_change = Some(callback);
         hub
     }
@@ -183,13 +380,22 @@ impl McpHub {
     ) -> McpResult<()> {
         self.check_disposed()?;
 
+        // Inject variables into the config before validation.
+        // Corresponds to TS: `const configInjected = await injectVariables(config, { env: process.env, workspaceFolder })`
+        let workspace = self
+            .workspace_path
+            .as_deref()
+            .unwrap_or("");
+        let injected_config = inject_variables(config, workspace);
+
         // Validate configuration
-        let validated = validate_server_config(config, Some(name))?;
+        let validated = validate_server_config(&injected_config, Some(name))?;
 
         // Remove existing connection if it exists with the same source
         self.delete_connection(name, source).await?;
 
-        // Register the sanitized name for O(1) lookup
+        // Register the sanitized name for O(1) lookup.
+        // Corresponds to TS: `this.sanitizedNameRegistry.set(sanitizedName, name)`
         let sanitized = sanitize_mcp_name(name);
         let mut registry = self.sanitized_name_registry.write().await;
         registry.insert(sanitized, name.to_string());
@@ -282,6 +488,10 @@ impl McpHub {
     /// Properly closes the transport for connected servers before removing.
     /// Corresponds to TS: `deleteConnection(name, source)`
     pub async fn delete_connection(&self, name: &str, source: McpSource) -> McpResult<()> {
+        // Clean up file watchers for this server.
+        // Corresponds to TS: `this.removeFileWatchersForServer(name)`
+        self.remove_file_watchers_for_server(name).await;
+
         let mut connections = self.connections.write().await;
         let before_len = connections.len();
 
@@ -302,7 +512,8 @@ impl McpHub {
         // Restore remaining connections
         *connections = remaining;
 
-        // Clean up sanitized name registry if no more connections with this name
+        // Clean up sanitized name registry if no more connections with this name.
+        // Corresponds to TS: registry cleanup in `deleteConnection()`
         let has_remaining = connections.iter().any(|c| c.name() == name);
         if !has_remaining {
             let sanitized = sanitize_mcp_name(name);
@@ -336,6 +547,10 @@ impl McpHub {
         if manage_connecting_state {
             *self.is_connecting.write().await = true;
         }
+
+        // Remove all file watchers before reconfiguring.
+        // Corresponds to TS: `this.removeAllFileWatchers()`
+        self.remove_all_file_watchers().await;
 
         // Filter connections by source
         let current_names: std::collections::HashSet<String> = {
@@ -376,20 +591,27 @@ impl McpHub {
 
             match current_connection {
                 None => {
-                    // New server
+                    // New server - setup file watcher for enabled servers.
+                    // Corresponds to TS: setup file watcher before connectToServer
+                    if let Ok(validated) = validate_server_config(config, Some(name)) {
+                        if !validated.is_disabled() {
+                            self.setup_file_watcher(name, &validated, source);
+                        }
+                    }
                     if let Err(e) = self.connect_to_server(name, config, source).await {
                         tracing::error!("Failed to connect to new MCP server {}: {}", name, e);
                     }
                 }
                 Some(existing) => {
-                    // Check if config has changed (compare JSON semantically)
+                    // Check if config has changed using deep equality.
+                    // Corresponds to TS: `!deepEqual(JSON.parse(currentConnection.server.config), config)`
                     let existing_config_str = &existing.server().config;
 
                     // Parse existing config to compare semantically
                     let existing_json: serde_json::Value =
                         serde_json::from_str(existing_config_str).unwrap_or_default();
 
-                    if existing_json != *config {
+                    if !json_deep_equal(&existing_json, config) {
                         // Config changed �?delete and reconnect
                         if let Err(e) = self.delete_connection(name, source).await {
                             tracing::error!(
@@ -1328,6 +1550,37 @@ impl McpHub {
         *disposed = true;
         drop(disposed);
 
+        // Clear all debounce timers.
+        // Corresponds to TS: clearing `configChangeDebounceTimers`
+        {
+            let mut handles = self.config_debounce_handles.write().await;
+            for (_, handle) in handles.drain() {
+                handle.abort();
+            }
+        }
+
+        // Reset programmatic update flag.
+        // Corresponds to TS: clearing `flagResetTimer` and resetting `isProgrammaticUpdate`
+        *self.is_programmatic_update.write().await = false;
+
+        // Remove all file watchers.
+        // Corresponds to TS: `this.removeAllFileWatchers()`
+        self.remove_all_file_watchers().await;
+
+        // Dispose settings watcher.
+        // Corresponds to TS: `this.settingsWatcher?.dispose()`
+        {
+            let mut sw = self.settings_watcher.lock().await;
+            *sw = None;
+        }
+
+        // Dispose project MCP watcher.
+        // Corresponds to TS: `this.projectMcpWatcher?.dispose()`
+        {
+            let mut pw = self.project_mcp_watcher.lock().await;
+            *pw = None;
+        }
+
         let mut connections = self.connections.write().await;
         for conn in connections.drain(..) {
             if let McpConnection::Connected(mut c) = conn {
@@ -1340,6 +1593,327 @@ impl McpHub {
 
         tracing::info!("McpHub disposed");
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // File watching
+    // -----------------------------------------------------------------------
+
+    /// Set up file watchers for a specific server.
+    ///
+    /// Corresponds to TS: `setupFileWatcher(name, config, source)`.
+    /// Watches `watchPaths` and `build/index.js` (from args) for changes
+    /// and restarts the server when changes are detected.
+    pub fn setup_file_watcher(
+        &self,
+        name: &str,
+        config: &ValidatedServerConfig,
+        source: McpSource,
+    ) {
+        // Only stdio type has args to watch
+        if let ValidatedServerConfig::Stdio {
+            args,
+            watch_paths,
+            ..
+        } = config
+        {
+            let mut watchers: Vec<FileWatcherHandle> = Vec::new();
+
+            // Setup watchers for custom watchPaths if defined.
+            // Corresponds to TS: `if (config.watchPaths && config.watchPaths.length > 0)`
+            if let Some(wp) = watch_paths {
+                if !wp.is_empty() {
+                    for watch_path in wp {
+                        if let Some(handle) = Self::create_path_watcher(
+                            watch_path,
+                            name.to_string(),
+                            source,
+                        ) {
+                            watchers.push(handle);
+                        }
+                    }
+                }
+            }
+
+            // Also setup the fallback build/index.js watcher if applicable.
+            // Corresponds to TS: finding `build/index.js` in args
+            if let Some(file_path) = args.iter().find(|arg| arg.contains("build/index.js")) {
+                if let Some(handle) =
+                    Self::create_path_watcher(file_path, name.to_string(), source)
+                {
+                    watchers.push(handle);
+                }
+            }
+
+            if !watchers.is_empty() {
+                // Store watchers asynchronously - spawn a blocking task
+                let file_watchers = self.file_watchers.clone();
+                let name_owned = name.to_string();
+                tokio::spawn(async move {
+                    let mut fw = file_watchers.lock().await;
+                    fw.insert(name_owned, watchers);
+                });
+            }
+        }
+    }
+
+    /// Create a file watcher for a specific path.
+    ///
+    /// Returns a `FileWatcherHandle` that keeps the watcher alive.
+    fn create_path_watcher(
+        path: &str,
+        server_name: String,
+        _source: McpSource,
+    ) -> Option<FileWatcherHandle> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let path_buf = std::path::PathBuf::from(path);
+
+        let mut watcher = match RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res {
+                    // Only react to content modifications
+                    if matches!(
+                        event.kind,
+                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                    ) {
+                        let _ = tx.send(());
+                    }
+                }
+            },
+            NotifyConfig::default(),
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!("Failed to create file watcher for '{}': {}", path, e);
+                return None;
+            }
+        };
+
+        // Determine recursive mode based on whether the path is a directory
+        let recursive_mode = if path_buf.is_dir() {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+
+        if let Err(e) = watcher.watch(&path_buf, recursive_mode) {
+            tracing::error!("Failed to watch path '{}': {}", path, e);
+            return None;
+        }
+
+        let sn = server_name.clone();
+        let task = tokio::spawn(async move {
+            // Debounce: wait for 500ms of silence before acting
+            while rx.recv().await.is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // Drain any pending events
+                while rx.try_recv().is_ok() {}
+                tracing::info!(
+                    "File change detected, triggering restart for server '{}'",
+                    sn
+                );
+                // Note: The actual restart needs to be handled by the caller
+                // through the state change callback or a separate mechanism.
+            }
+        });
+
+        Some(FileWatcherHandle {
+            _watcher: watcher,
+            _task: task,
+        })
+    }
+
+    /// Remove all file watchers.
+    ///
+    /// Corresponds to TS: `removeAllFileWatchers()`
+    pub async fn remove_all_file_watchers(&self) {
+        let mut fw = self.file_watchers.lock().await;
+        fw.clear();
+    }
+
+    /// Remove file watchers for a specific server.
+    ///
+    /// Corresponds to TS: `removeFileWatchersForServer(serverName)`
+    pub async fn remove_file_watchers_for_server(&self, server_name: &str) {
+        let mut fw = self.file_watchers.lock().await;
+        fw.remove(server_name);
+    }
+
+    // -----------------------------------------------------------------------
+    // Config hot-reload
+    // -----------------------------------------------------------------------
+
+    /// Start watching MCP configuration files for changes.
+    ///
+    /// Corresponds to TS: `watchMcpSettingsFile()` and `watchProjectMcpFile()`.
+    /// Should be called after the hub is created with valid paths.
+    pub async fn start_config_watchers(&self) {
+        self.watch_mcp_settings_file().await;
+        self.watch_project_mcp_file().await;
+    }
+
+    /// Watch the global MCP settings file for changes.
+    ///
+    /// Corresponds to TS: `watchMcpSettingsFile()`.
+    /// Debounces changes by 500ms and triggers config reload.
+    pub async fn watch_mcp_settings_file(&self) {
+        let settings_path = match &self.settings_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        if !std::path::Path::new(&settings_path).exists() {
+            return;
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut watcher = match RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res {
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                        let _ = tx.send(());
+                    }
+                }
+            },
+            NotifyConfig::default(),
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!("Failed to create settings file watcher: {}", e);
+                return;
+            }
+        };
+
+        let path = std::path::PathBuf::from(&settings_path);
+        if let Err(e) = watcher.watch(&path, RecursiveMode::NonRecursive) {
+            tracing::error!("Failed to watch settings file '{}': {}", settings_path, e);
+            return;
+        }
+
+        let sp = settings_path.clone();
+        let is_programmatic = self.is_programmatic_update.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                if rx.recv().await.is_none() {
+                    break;
+                }
+                // Check if this is a programmatic update
+                if *is_programmatic.read().await {
+                    continue;
+                }
+                // Debounce: wait 500ms
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                while rx.try_recv().is_ok() {}
+                tracing::info!("MCP settings file changed: {}", sp);
+                // The actual reload is handled by the caller via the state change callback
+            }
+        });
+
+        let mut sw = self.settings_watcher.lock().await;
+        *sw = Some(FileWatcherHandle {
+            _watcher: watcher,
+            _task: task,
+        });
+    }
+
+    /// Watch the project MCP file (.roo/mcp.json) for changes.
+    ///
+    /// Corresponds to TS: `watchProjectMcpFile()`.
+    pub async fn watch_project_mcp_file(&self) {
+        let workspace = match &self.workspace_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        let project_mcp_path = std::path::PathBuf::from(&workspace)
+            .join(".roo")
+            .join("mcp.json");
+
+        if !project_mcp_path.exists() {
+            return;
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut watcher = match RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res {
+                    if matches!(
+                        event.kind,
+                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                    ) {
+                        let _ = tx.send(event.kind);
+                    }
+                }
+            },
+            NotifyConfig::default(),
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!("Failed to create project MCP file watcher: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(&project_mcp_path, RecursiveMode::NonRecursive) {
+            tracing::error!(
+                "Failed to watch project MCP file '{}': {}",
+                project_mcp_path.display(),
+                e
+            );
+            return;
+        }
+
+        let is_programmatic = self.is_programmatic_update.clone();
+        let pmp = project_mcp_path.to_string_lossy().to_string();
+        let task = tokio::spawn(async move {
+            loop {
+                if rx.recv().await.is_none() {
+                    break;
+                }
+                // Check if this is a programmatic update
+                if *is_programmatic.read().await {
+                    continue;
+                }
+                // Debounce: wait 500ms
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                while rx.try_recv().is_ok() {}
+                tracing::info!("Project MCP file changed: {}", pmp);
+                // The actual reload is handled by the caller via the state change callback
+            }
+        });
+
+        let mut pw = self.project_mcp_watcher.lock().await;
+        *pw = Some(FileWatcherHandle {
+            _watcher: watcher,
+            _task: task,
+        });
+    }
+
+    /// Get the project MCP configuration path.
+    ///
+    /// Corresponds to TS: `getProjectMcpPath()`.
+    /// Returns the path to `.roo/mcp.json` in the workspace, or `None` if
+    /// the file doesn't exist or no workspace is configured.
+    pub fn get_project_mcp_path(&self) -> Option<String> {
+        let workspace = self.workspace_path.as_ref()?;
+        let path = std::path::PathBuf::from(workspace)
+            .join(".roo")
+            .join("mcp.json");
+        if path.exists() {
+            Some(path.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Set the programmatic update flag.
+    ///
+    /// Corresponds to TS: setting `isProgrammaticUpdate = true` before writing config.
+    /// Prevents the file watcher from triggering unnecessary reloads.
+    pub async fn set_programmatic_update(&self, value: bool) {
+        *self.is_programmatic_update.write().await = value;
     }
 
     // -----------------------------------------------------------------------

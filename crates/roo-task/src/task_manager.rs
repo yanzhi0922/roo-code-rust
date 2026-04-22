@@ -113,7 +113,7 @@ mod tests {
     use crate::engine::TaskEngine;
 
     fn make_lifecycle(task_id: &str) -> TaskLifecycle {
-        let config = TaskConfig::new(task_id, "/tmp/test");
+        let config = TaskConfig::new(task_id, "/tmp/test").with_start_task(false);
         let engine = TaskEngine::new(config).unwrap();
         TaskLifecycle::new(engine)
     }

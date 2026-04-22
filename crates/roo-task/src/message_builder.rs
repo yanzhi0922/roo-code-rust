@@ -1,14 +1,16 @@
-﻿//! API message builder for constructing conversation history and tool definitions.
+//! API message builder for constructing conversation history and tool definitions.
 //!
 //! Builds the messages array and tool definitions sent to the Provider API.
 //!
-//! Source: `src/core/task/Task.ts` 鈥?message building logic in
+//! Source: `src/core/task/Task.ts` — message building logic in
 //! `recursivelyMakeClineRequests` and `presentAssistantMessage`.
 
 use serde_json::{json, Value};
 use tracing::debug;
 
 use roo_types::api::{ApiMessage, ContentBlock, ImageSource, MessageRole, ToolResultContent};
+use roo_types::mcp::McpServerConnection;
+use roo_types::model::ModelInfo;
 
 use crate::stream_parser::ParsedStreamContent;
 use crate::tool_dispatcher::ToolExecutionResult;
@@ -29,6 +31,36 @@ pub struct BuildToolsResult {
 }
 
 // ---------------------------------------------------------------------------
+// CleanConversationItem
+// ---------------------------------------------------------------------------
+
+/// A cleaned conversation history item.
+///
+/// Source: `src/core/task/Task.ts` — `buildCleanConversationHistory` return type.
+/// Can be either a standard API message param or a standalone reasoning item.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum CleanConversationItem {
+    /// A standard message with role and content.
+    Message {
+        role: String,
+        content: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_details: Option<serde_json::Value>,
+    },
+    /// A standalone reasoning item (OpenAI Native format).
+    Reasoning {
+        #[serde(rename = "type")]
+        item_type: String, // always "reasoning"
+        encrypted_content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<serde_json::Value>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // MessageBuilder
 // ---------------------------------------------------------------------------
 
@@ -39,7 +71,7 @@ pub struct BuildToolsResult {
 /// 2. Build tool definitions in the format expected by the Provider
 /// 3. Create user, assistant, and tool-result messages
 ///
-/// Source: `src/core/task/Task.ts` 鈥?`recursivelyMakeClineRequests` (message
+/// Source: `src/core/task/Task.ts` — `recursivelyMakeClineRequests` (message
 /// building parts), plus `addToApiConversationHistory` calls scattered
 /// throughout the Task class.
 pub struct MessageBuilder {
@@ -86,7 +118,7 @@ impl MessageBuilder {
     /// Source: `src/core/task/Task.ts` — tool definition building in
     /// `recursivelyMakeClineRequests`
     pub fn build_tool_definitions(&self) -> Vec<Value> {
-        self.build_tool_definitions_with_options(None, &[], None, None)
+        self.build_tool_definitions_with_options(None, &[], None, None, &[])
     }
 
     /// Build tool definitions with mode-based restrictions.
@@ -99,12 +131,14 @@ impl MessageBuilder {
     /// 3. Removes tools that are in the `disabled_tools` list
     /// 4. Optionally computes `allowed_function_names` for providers like Gemini
     ///    that support function call restrictions via `allowedFunctionNames`
+    /// 5. Merges MCP tools from connected servers
     pub fn build_tool_definitions_with_options(
         &self,
         mode: Option<&str>,
         custom_modes: &[roo_types::mode::ModeConfig],
         disabled_tools: Option<&[String]>,
         experiments: Option<&std::collections::HashMap<String, bool>>,
+        mcp_servers: &[McpServerConnection],
     ) -> Vec<Value> {
         let options = roo_tools::definition::NativeToolsOptions {
             supports_images: self.supports_images,
@@ -130,7 +164,8 @@ impl MessageBuilder {
             &filter_settings,
         );
 
-        filtered_tools
+        // Convert native tools to JSON
+        let mut tools_json: Vec<Value> = filtered_tools
             .into_iter()
             .map(|tool| {
                 json!({
@@ -142,7 +177,13 @@ impl MessageBuilder {
                     }
                 })
             })
-            .collect()
+            .collect();
+
+        // Merge MCP tools
+        let mcp_tools = get_mcp_server_tools(mcp_servers);
+        tools_json.extend(mcp_tools);
+
+        tools_json
     }
 
     /// Build tool definitions with restrictions, returning both tools and allowed function names.
@@ -151,13 +192,14 @@ impl MessageBuilder {
     ///
     /// When `include_all_tools_with_restrictions` is true, returns ALL tools but also
     /// provides the list of allowed tool names for use with `allowedFunctionNames`.
-    pub fn build_tool_definitions_with_restrictictions(
+    pub fn build_tool_definitions_with_restrictions(
         &self,
         mode: Option<&str>,
         custom_modes: &[roo_types::mode::ModeConfig],
         disabled_tools: Option<&[String]>,
         experiments: Option<&std::collections::HashMap<String, bool>>,
         include_all_tools_with_restrictions: bool,
+        mcp_servers: &[McpServerConnection],
     ) -> BuildToolsResult {
         let options = roo_tools::definition::NativeToolsOptions {
             supports_images: self.supports_images,
@@ -182,13 +224,25 @@ impl MessageBuilder {
             &filter_settings,
         );
 
+        // Get MCP tools
+        let mcp_tools = get_mcp_server_tools(mcp_servers);
+
         if include_all_tools_with_restrictions {
-            let allowed_function_names: Vec<String> = filtered_tools
+            // Combine filtered native + MCP for allowed names
+            let mut allowed_function_names: Vec<String> = filtered_tools
                 .iter()
                 .map(|t| roo_tools::groups::resolve_tool_alias(&t.name).to_string())
                 .collect();
+            // Add MCP tool names to allowed list
+            allowed_function_names.extend(
+                mcp_servers
+                    .iter()
+                    .flat_map(|s| s.tools.iter())
+                    .filter(|t| t.enabled_for_prompt)
+                    .map(|t| t.name.clone()),
+            );
 
-            let all_tools_json: Vec<Value> = native_tools
+            let all_native_json: Vec<Value> = native_tools
                 .into_iter()
                 .map(|tool| {
                     json!({
@@ -202,12 +256,17 @@ impl MessageBuilder {
                 })
                 .collect();
 
+            // Combine ALL tools (unfiltered native + all MCP)
+            let mut all_tools: Vec<Value> = all_native_json;
+            all_tools.extend(mcp_tools);
+
             BuildToolsResult {
-                tools: all_tools_json,
+                tools: all_tools,
                 allowed_function_names: Some(allowed_function_names),
             }
         } else {
-            let tools_json: Vec<Value> = filtered_tools
+            // Default: return only filtered tools + MCP tools
+            let mut tools_json: Vec<Value> = filtered_tools
                 .into_iter()
                 .map(|tool| {
                     json!({
@@ -220,6 +279,7 @@ impl MessageBuilder {
                     })
                 })
                 .collect();
+            tools_json.extend(mcp_tools);
 
             BuildToolsResult {
                 tools: tools_json,
@@ -237,7 +297,7 @@ impl MessageBuilder {
     /// Takes the existing conversation history and optionally appends a new
     /// user message. The system prompt is handled separately by the provider.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`recursivelyMakeClineRequests` builds
+    /// Source: `src/core/task/Task.ts` — `recursivelyMakeClineRequests` builds
     /// messages from `apiConversationHistory` before each API call.
     pub fn build_api_messages(
         &self,
@@ -264,12 +324,163 @@ impl MessageBuilder {
     }
 
     // -----------------------------------------------------------------------
+    // Clean conversation history
+    // -----------------------------------------------------------------------
+
+    /// Build a clean conversation history suitable for sending to the API.
+    ///
+    /// Processes raw `ApiMessage`s and produces a cleaned list that:
+    /// - Strips plain-text reasoning blocks (stored for history, not sent to API)
+    /// - Preserves encrypted reasoning blocks (sent as separate reasoning items)
+    /// - Handles `reasoning_details` format (OpenRouter/Gemini 3 etc.)
+    /// - Converts content arrays to the appropriate format for the API
+    ///
+    /// Source: `src/core/task/Task.ts` — `buildCleanConversationHistory()`
+    pub fn build_clean_conversation_history(
+        messages: &[ApiMessage],
+        preserve_reasoning: bool,
+    ) -> Vec<CleanConversationItem> {
+        let mut clean: Vec<CleanConversationItem> = Vec::new();
+
+        for msg in messages {
+            // Standalone reasoning: send encrypted, skip plain text
+            // In the TS source, messages with type === "reasoning" are handled specially.
+            // In our Rust ApiMessage, reasoning is indicated by the `reasoning` field
+            // and `reasoning_details` field.
+            if let Some(ref reasoning) = msg.reasoning {
+                if !reasoning.is_empty() {
+                    // Check for encrypted reasoning content
+                    // The encrypted content is stored in the reasoning field
+                    if reasoning.starts_with("enc_") || reasoning.contains("encrypted_content") {
+                        clean.push(CleanConversationItem::Reasoning {
+                            item_type: "reasoning".to_string(),
+                            encrypted_content: reasoning.clone(),
+                            id: msg.truncation_id.clone(),
+                            summary: None,
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            // Handle assistant messages with potential reasoning content
+            if msg.role == MessageRole::Assistant {
+                let raw_content = &msg.content;
+
+                // Check if this message has reasoning_details (OpenRouter format)
+                if let Some(ref details) = msg.reasoning_details {
+                    if !details.is_empty() {
+                        // Build the assistant message with reasoning_details
+                        let content_value = content_blocks_to_api_value(raw_content);
+                        clean.push(CleanConversationItem::Message {
+                            role: "assistant".to_string(),
+                            content: content_value,
+                            reasoning_details: Some(serde_json::Value::Array(details.clone())),
+                        });
+                        continue;
+                    }
+                }
+
+                // Check for embedded reasoning as first content block
+                if let Some(first_block) = raw_content.first() {
+                    // Check for encrypted reasoning block
+                    if let ContentBlock::Text { text } = first_block {
+                        if text.starts_with("{\"type\":\"reasoning\"") {
+                            // Try to parse as encrypted reasoning
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+                                if parsed.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
+                                    if let Some(enc) = parsed.get("encrypted_content").and_then(|v| v.as_str()) {
+                                        // Send as separate reasoning item
+                                        clean.push(CleanConversationItem::Reasoning {
+                                            item_type: "reasoning".to_string(),
+                                            encrypted_content: enc.to_string(),
+                                            id: parsed.get("id").and_then(|v| v.as_str()).map(String::from),
+                                            summary: parsed.get("summary").cloned(),
+                                        });
+
+                                        // Send assistant message without reasoning
+                                        let rest: Vec<&ContentBlock> = raw_content.iter().skip(1).collect();
+                                        let assistant_content =
+                                            content_refs_to_api_value(&rest);
+                                        clean.push(CleanConversationItem::Message {
+                                            role: "assistant".to_string(),
+                                            content: assistant_content,
+                                            reasoning_details: None,
+                                        });
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check for plain text reasoning block
+                        if text.starts_with("{\"type\":\"reasoning\",\"text\":") {
+                            if !preserve_reasoning {
+                                // Strip reasoning out - stored for history only
+                                let rest: Vec<&ContentBlock> = raw_content.iter().skip(1).collect();
+                                let assistant_content = content_refs_to_api_value(&rest);
+                                clean.push(CleanConversationItem::Message {
+                                    role: "assistant".to_string(),
+                                    content: assistant_content,
+                                    reasoning_details: None,
+                                });
+                                continue;
+                            } else {
+                                // Include reasoning block in content sent to API
+                                let content_value = content_blocks_to_api_value(raw_content);
+                                clean.push(CleanConversationItem::Message {
+                                    role: "assistant".to_string(),
+                                    content: content_value,
+                                    reasoning_details: None,
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Default path for regular messages (no embedded reasoning)
+            if matches!(msg.role, MessageRole::User | MessageRole::Assistant) {
+                let content_value = content_blocks_to_api_value(&msg.content);
+                clean.push(CleanConversationItem::Message {
+                    role: match msg.role {
+                        MessageRole::User => "user".to_string(),
+                        MessageRole::Assistant => "assistant".to_string(),
+                    },
+                    content: content_value,
+                    reasoning_details: None,
+                });
+            }
+        }
+
+        clean
+    }
+
+    // -----------------------------------------------------------------------
+    // Image cleaning
+    // -----------------------------------------------------------------------
+
+    /// Remove image blocks from messages if the model does not support images.
+    ///
+    /// This is a convenience wrapper around
+    /// `roo_provider::transform::image_cleaning::maybe_remove_image_blocks`.
+    ///
+    /// Source: `src/api/transform/image-cleaning.ts` — `maybeRemoveImageBlocks`
+    pub fn maybe_remove_image_blocks(
+        messages: Vec<ApiMessage>,
+        model_info: &ModelInfo,
+    ) -> Vec<ApiMessage> {
+        roo_provider::transform::image_cleaning::maybe_remove_image_blocks(messages, model_info)
+    }
+
+    // -----------------------------------------------------------------------
     // Message constructors
     // -----------------------------------------------------------------------
 
     /// Create a user message with text and optional images.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?initial user message construction
+    /// Source: `src/core/task/Task.ts` — initial user message construction
     /// in `startTask` / `resumeTask`
     pub fn create_user_message(text: &str, images: &[String]) -> ApiMessage {
         let mut content: Vec<ContentBlock> = Vec::new();
@@ -311,7 +522,7 @@ impl MessageBuilder {
     /// Converts the accumulated `ParsedStreamContent` into an `ApiMessage`
     /// with the appropriate content blocks (thinking, text, tool_use).
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?`presentAssistantMessage` saves the
+    /// Source: `src/core/task/Task.ts` — `presentAssistantMessage` saves the
     /// assistant response to `apiConversationHistory`
     pub fn create_assistant_message(parsed: &ParsedStreamContent) -> ApiMessage {
         let content = parsed.to_content_blocks();
@@ -336,7 +547,7 @@ impl MessageBuilder {
     /// Converts a `ToolExecutionResult` into an `ApiMessage` with a
     /// `ToolResult` content block.
     ///
-    /// Source: `src/core/task/Task.ts` 鈥?tool result is added to
+    /// Source: `src/core/task/Task.ts` — tool result is added to
     /// `apiConversationHistory` after each tool execution
     pub fn create_tool_result_message(
         tool_use_id: &str,
@@ -382,6 +593,80 @@ impl MessageBuilder {
             reasoning_details: None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// MCP Tool Helpers
+// ---------------------------------------------------------------------------
+
+/// Get MCP tools from all connected servers as tool definition JSON values.
+///
+/// Source: `src/core/task/build-tools.ts` — `getMcpServerTools()`
+pub fn get_mcp_server_tools(mcp_servers: &[McpServerConnection]) -> Vec<Value> {
+    let mut tools = Vec::new();
+
+    for server in mcp_servers {
+        for tool in &server.tools {
+            // Skip tools that are not enabled for prompt
+            if !tool.enabled_for_prompt {
+                continue;
+            }
+
+            tools.push(json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description.clone().unwrap_or_default(),
+                    "parameters": tool.input_schema.clone().unwrap_or(json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    })),
+                }
+            }));
+        }
+    }
+
+    tools
+}
+
+// ---------------------------------------------------------------------------
+// Content Conversion Helpers
+// ---------------------------------------------------------------------------
+
+/// Convert content blocks to a value suitable for the API.
+///
+/// For a single text block, returns a string.
+/// For multiple blocks, returns an array.
+/// For empty content, returns an empty string.
+fn content_blocks_to_api_value(blocks: &[ContentBlock]) -> serde_json::Value {
+    if blocks.is_empty() {
+        return serde_json::Value::String(String::new());
+    }
+
+    if blocks.len() == 1 {
+        if let ContentBlock::Text { ref text } = blocks[0] {
+            return serde_json::Value::String(text.clone());
+        }
+    }
+
+    // Multiple blocks or non-text single block: return as array
+    serde_json::to_value(blocks).unwrap_or(serde_json::Value::Array(Vec::new()))
+}
+
+/// Convert content block references to a value suitable for the API.
+fn content_refs_to_api_value(blocks: &[&ContentBlock]) -> serde_json::Value {
+    if blocks.is_empty() {
+        return serde_json::Value::String(String::new());
+    }
+
+    if blocks.len() == 1 {
+        if let ContentBlock::Text { text } = blocks[0] {
+            return serde_json::Value::String(text.clone());
+        }
+    }
+
+    serde_json::to_value(blocks).unwrap_or(serde_json::Value::Array(Vec::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -653,5 +938,109 @@ mod tests {
         assert_eq!(guess_media_type("UklGRabc"), "image/webp");
         assert_eq!(guess_media_type("PHN2Zwabc"), "image/svg+xml");
         assert_eq!(guess_media_type("unknown"), "image/png");
+    }
+
+    #[test]
+    fn test_build_clean_conversation_history_basic() {
+        let messages = vec![
+            MessageBuilder::create_user_message("Hello", &[]),
+            MessageBuilder::create_assistant_message(&{
+                let mut p = crate::stream_parser::StreamParser::new();
+                p.feed_chunk(&roo_types::api::ApiStreamChunk::Text {
+                    text: "Hi there".into(),
+                });
+                p.finalize()
+            }),
+        ];
+
+        let clean = MessageBuilder::build_clean_conversation_history(&messages, false);
+        assert_eq!(clean.len(), 2);
+
+        // First should be user message
+        match &clean[0] {
+            CleanConversationItem::Message { role, .. } => {
+                assert_eq!(role, "user");
+            }
+            _ => panic!("Expected Message item"),
+        }
+
+        // Second should be assistant message
+        match &clean[1] {
+            CleanConversationItem::Message { role, .. } => {
+                assert_eq!(role, "assistant");
+            }
+            _ => panic!("Expected Message item"),
+        }
+    }
+
+    #[test]
+    fn test_build_clean_conversation_history_empty() {
+        let clean = MessageBuilder::build_clean_conversation_history(&[], false);
+        assert!(clean.is_empty());
+    }
+
+    #[test]
+    fn test_maybe_remove_image_blocks_no_support() {
+        let model_info = ModelInfo {
+            supports_images: Some(false),
+            ..Default::default()
+        };
+
+        let messages = vec![ApiMessage {
+            role: MessageRole::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "Look at this".to_string(),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::Url {
+                        url: "https://example.com/image.png".to_string(),
+                    },
+                },
+            ],
+            reasoning: None,
+            ts: None,
+            truncation_parent: None,
+            is_truncation_marker: None,
+            truncation_id: None,
+            condense_parent: None,
+            is_summary: None,
+            condense_id: None,
+            reasoning_details: None,
+        }];
+
+        let result = MessageBuilder::maybe_remove_image_blocks(messages, &model_info);
+        assert_eq!(result.len(), 1);
+        // Image should be replaced with text
+        assert_eq!(result[0].content.len(), 2);
+        match &result[0].content[1] {
+            ContentBlock::Text { text } => {
+                assert_eq!(text, "[Referenced image in conversation]");
+            }
+            _ => panic!("Expected Text block replacing image"),
+        }
+    }
+
+    #[test]
+    fn test_get_mcp_server_tools_empty() {
+        let tools = get_mcp_server_tools(&[]);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_build_tool_definitions_with_restrictions() {
+        let builder = MessageBuilder::new("test");
+
+        let result =
+            builder.build_tool_definitions_with_restrictions(None, &[], None, None, false, &[]);
+
+        assert!(!result.tools.is_empty());
+        assert!(result.allowed_function_names.is_none());
+
+        // With include_all flag
+        let result_all =
+            builder.build_tool_definitions_with_restrictions(None, &[], None, None, true, &[]);
+        assert!(!result_all.tools.is_empty());
+        assert!(result_all.allowed_function_names.is_some());
     }
 }

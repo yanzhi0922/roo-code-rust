@@ -17,6 +17,24 @@ use serde_json::Value;
 use roo_tools::ToolRepetitionDetector;
 
 // ---------------------------------------------------------------------------
+// FileContextTrackerOps — erased trait for file-context tracking
+// ---------------------------------------------------------------------------
+
+/// Trait for file-context tracking operations.
+///
+/// This trait erases the generic `MetadataStore` parameter from
+/// [`roo_context_tracking::FileContextTracker`] so that it can be stored
+/// in [`ToolContext`] without making the entire context generic.
+///
+/// Source: `src/core/task/Task.ts` — `this.fileContextTracker`
+pub trait FileContextTrackerOps: Send + Sync {
+    /// Record that a file was read by Roo.
+    fn track_file_read(&self, path: &str) -> Result<(), String>;
+    /// Record that a file was edited by Roo.
+    fn track_file_edit(&self, path: &str) -> Result<(), String>;
+}
+
+// ---------------------------------------------------------------------------
 // ToolExecutionResult
 // ---------------------------------------------------------------------------
 
@@ -68,7 +86,9 @@ impl ToolExecutionResult {
 ///
 /// Contains the working directory and other environment information
 /// needed by tools to perform their operations.
-#[derive(Debug, Clone)]
+///
+/// Source: `src/core/task/Task.ts` — fields accessed by tool handlers
+/// via `this.*` (e.g. `this.rooIgnoreController`, `this.diffViewProvider`).
 pub struct ToolContext {
     /// Current working directory for file operations.
     pub cwd: PathBuf,
@@ -77,6 +97,41 @@ pub struct ToolContext {
     /// Current model ID (e.g. "claude-3.5-sonnet") for model-dependent behavior.
     /// When `None`, defaults are used (e.g. HTML entity unescaping is always applied).
     pub model_id: Option<String>,
+    /// Optional RooIgnore controller for checking file access permissions.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.rooIgnoreController`
+    pub roo_ignore_controller: Option<roo_ignore::RooIgnoreController>,
+    /// Optional RooProtected controller for checking write-protection.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.rooProtectedController`
+    pub roo_protected_controller: Option<roo_protect::RooProtectedController>,
+    /// Optional diff-view provider for streaming file edits.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.diffViewProvider`
+    pub diff_view_provider: Option<Arc<tokio::sync::Mutex<roo_editor::DiffViewProvider>>>,
+    /// Optional file-context tracker for recording file reads/edits.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.fileContextTracker`
+    pub file_context_tracker: Option<Arc<dyn FileContextTrackerOps>>,
+    /// Optional reference to the currently running terminal process.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.terminalProcess`
+    pub terminal_process: Option<roo_terminal::SharedTerminalProcess>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("cwd", &self.cwd)
+            .field("task_id", &self.task_id)
+            .field("model_id", &self.model_id)
+            .field("roo_ignore_controller", &self.roo_ignore_controller.is_some())
+            .field("roo_protected_controller", &self.roo_protected_controller.is_some())
+            .field("diff_view_provider", &self.diff_view_provider.is_some())
+            .field("file_context_tracker", &self.file_context_tracker.is_some())
+            .field("terminal_process", &self.terminal_process.is_some())
+            .finish()
+    }
 }
 
 impl ToolContext {
@@ -86,12 +141,57 @@ impl ToolContext {
             cwd: cwd.into(),
             task_id: task_id.into(),
             model_id: None,
+            roo_ignore_controller: None,
+            roo_protected_controller: None,
+            diff_view_provider: None,
+            file_context_tracker: None,
+            terminal_process: None,
         }
     }
 
     /// Create a tool context with a model ID for model-dependent behavior.
     pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
         self.model_id = Some(model_id.into());
+        self
+    }
+
+    /// Set the RooIgnore controller.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.rooIgnoreController`
+    pub fn with_roo_ignore_controller(mut self, controller: roo_ignore::RooIgnoreController) -> Self {
+        self.roo_ignore_controller = Some(controller);
+        self
+    }
+
+    /// Set the RooProtected controller.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.rooProtectedController`
+    pub fn with_roo_protected_controller(mut self, controller: roo_protect::RooProtectedController) -> Self {
+        self.roo_protected_controller = Some(controller);
+        self
+    }
+
+    /// Set the diff-view provider.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.diffViewProvider`
+    pub fn with_diff_view_provider(mut self, provider: Arc<tokio::sync::Mutex<roo_editor::DiffViewProvider>>) -> Self {
+        self.diff_view_provider = Some(provider);
+        self
+    }
+
+    /// Set the file-context tracker.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.fileContextTracker`
+    pub fn with_file_context_tracker(mut self, tracker: Arc<dyn FileContextTrackerOps>) -> Self {
+        self.file_context_tracker = Some(tracker);
+        self
+    }
+
+    /// Set the terminal process reference.
+    ///
+    /// Source: `src/core/task/Task.ts` — `this.terminalProcess`
+    pub fn with_terminal_process(mut self, process: roo_terminal::SharedTerminalProcess) -> Self {
+        self.terminal_process = Some(process);
         self
     }
 }
@@ -1363,6 +1463,124 @@ impl ToolHandler for SlashCommandHandler {
 }
 
 // ---------------------------------------------------------------------------
+// Generate Image handler
+// ---------------------------------------------------------------------------
+// Source: `src/core/tools/GenerateImageTool.ts`
+
+/// Handler for the `generate_image` tool.
+///
+/// Validates parameters and returns a placeholder result.
+/// Actual image generation requires an external API provider.
+///
+/// Source: `src/core/tools/GenerateImageTool.ts`
+pub struct GenerateImageHandler;
+
+#[async_trait]
+impl ToolHandler for GenerateImageHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        let prompt = match params.get("prompt").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: prompt"),
+        };
+        let path = match params.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => return ToolExecutionResult::error("Missing required parameter: path"),
+        };
+
+        let image_params = roo_tools_misc::GenerateImageParams {
+            prompt,
+            path,
+            image: params.get("image").and_then(|v| v.as_str()).map(String::from),
+        };
+
+        // Validate parameters
+        if let Err(e) = roo_tools_misc::validate_generate_image_params(&image_params) {
+            return ToolExecutionResult::error(format!("generate_image validation error: {}", e));
+        }
+
+        // Actual image generation requires an external provider.
+        // Return a placeholder indicating the tool was called successfully.
+        ToolExecutionResult::success(format!(
+            "Image generation requested for '{}' at '{}' (provider not configured)",
+            image_params.prompt, image_params.path
+        ))
+    }
+
+    fn tool_name(&self) -> &str {
+        "generate_image"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom Tool handler
+// ---------------------------------------------------------------------------
+// Source: `src/core/assistant-message/presentAssistantMessage.ts` — default case
+
+/// Handler for custom tools registered via [`roo_custom_tools::CustomToolRegistry`].
+///
+/// Source: `src/core/assistant-message/presentAssistantMessage.ts` — `default` case
+/// in the tool switch, where `customToolRegistry.get(block.name)` is checked.
+pub struct CustomToolHandler {
+    /// Shared reference to the custom tool registry.
+    registry: Arc<std::sync::Mutex<roo_custom_tools::CustomToolRegistry>>,
+}
+
+impl CustomToolHandler {
+    /// Create a new custom tool handler backed by the given registry.
+    pub fn new(registry: Arc<std::sync::Mutex<roo_custom_tools::CustomToolRegistry>>) -> Self {
+        Self { registry }
+    }
+
+    /// Create a handler with an empty registry.
+    pub fn new_empty() -> Self {
+        Self {
+            registry: Arc::new(std::sync::Mutex::new(
+                roo_custom_tools::CustomToolRegistry::new(),
+            )),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for CustomToolHandler {
+    async fn execute(&self, params: Value, _context: &ToolContext) -> ToolExecutionResult {
+        // The tool name is passed via the `custom_tool_name` parameter or
+        // extracted from the params. Custom tools are dispatched by the
+        // present-assistant-message layer which sets the tool name.
+        let tool_name = params
+            .get("_custom_tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("custom_tool");
+
+        let registry = match self.registry.lock() {
+            Ok(r) => r,
+            Err(e) => {
+                return ToolExecutionResult::error(format!(
+                    "Failed to acquire custom tool registry lock: {}",
+                    e
+                ))
+            }
+        };
+
+        match registry.get(tool_name) {
+            Some(definition) => {
+                // Return the tool definition info; actual execution happens at a higher layer.
+                let msg = format!("Custom tool '{}': {}", definition.name, definition.description);
+                ToolExecutionResult::success(msg)
+            }
+            None => ToolExecutionResult::error(format!(
+                "Custom tool '{}' not found in registry",
+                tool_name
+            )),
+        }
+    }
+
+    fn tool_name(&self) -> &str {
+        "custom_tool"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Default dispatcher builders
 // ---------------------------------------------------------------------------
 
@@ -1448,6 +1666,12 @@ pub fn default_dispatcher_with_terminal(
     // Skill & Slash Command tools
     dispatcher.register("skill", Box::new(SkillHandler::new()));
     dispatcher.register("run_slash_command", Box::new(SlashCommandHandler));
+
+    // Image generation tool
+    dispatcher.register("generate_image", Box::new(GenerateImageHandler));
+
+    // Custom tool handler (with empty registry; can be replaced later)
+    dispatcher.register("custom_tool", Box::new(CustomToolHandler::new_empty()));
 
     dispatcher
 }
@@ -1630,6 +1854,17 @@ impl ToolCallValidator {
                     return Err("Missing required parameter: command".to_string());
                 }
             }
+            "generate_image" => {
+                if params.get("prompt").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: prompt".to_string());
+                }
+                if params.get("path").and_then(|v| v.as_str()).is_none() {
+                    return Err("Missing required parameter: path".to_string());
+                }
+            }
+            "custom_tool" => {
+                // Custom tools don't have fixed parameters; skip validation
+            }
             _ => {
                 // Unknown tools pass validation (they'll fail at dispatch time)
             }
@@ -1661,6 +1896,8 @@ impl ToolCallValidator {
                 | "update_todo_list"
                 | "skill"
                 | "run_slash_command"
+                | "generate_image"
+                | "custom_tool"
         )
     }
 }
@@ -1939,12 +2176,32 @@ impl PresentAssistantMessageProcessor {
                     return Ok(None);
                 }
 
-                // Validate the tool call
+                // Validate the tool call parameters
                 let args = tool_use.native_args.clone().unwrap_or(serde_json::Value::Null);
                 if let Err(e) = ToolCallValidator::validate(&tool_use.name, &args) {
                     let result = ToolExecutionResult::error(format!(
                         "Tool call validation failed: {}",
                         e
+                    ));
+                    self.result_collector.push_result(ToolResultEntry {
+                        tool_call_id: tool_use.id.clone(),
+                        tool_name: tool_use.name.clone(),
+                        result_text: result.text.clone(),
+                        is_error: true,
+                        images: None,
+                    });
+                    return Ok(Some(result));
+                }
+
+                // Validate tool is known and allowed (mirrors TS validateToolUse).
+                //
+                // Source: `src/core/tools/validateToolUse.ts` — `validateToolUse()`
+                if !ToolCallValidator::is_valid_tool_name(&tool_use.name)
+                    && !tool_use.name.starts_with("mcp_")
+                {
+                    let result = ToolExecutionResult::error(format!(
+                        "Unknown tool \"{}\". This tool does not exist. Please use one of the available tools.",
+                        tool_use.name
                     ));
                     self.result_collector.push_result(ToolResultEntry {
                         tool_call_id: tool_use.id.clone(),
@@ -2500,6 +2757,10 @@ mod tests {
         assert!(dispatcher.has_handler("skill"));
         assert!(dispatcher.has_handler("run_slash_command"));
 
+        // Image generation & custom tools
+        assert!(dispatcher.has_handler("generate_image"));
+        assert!(dispatcher.has_handler("custom_tool"));
+
         // MCP tools should NOT be registered
         assert!(!dispatcher.has_handler("use_mcp_tool"));
         assert!(!dispatcher.has_handler("access_mcp_resource"));
@@ -2546,6 +2807,10 @@ mod tests {
         // MCP tools
         assert!(dispatcher.has_handler("use_mcp_tool"));
         assert!(dispatcher.has_handler("access_mcp_resource"));
+
+        // Image generation & custom tools
+        assert!(dispatcher.has_handler("generate_image"));
+        assert!(dispatcher.has_handler("custom_tool"));
     }
 
     // ---- Skill & Slash Command handler tests ----
@@ -2625,6 +2890,68 @@ mod tests {
             .await;
         assert!(!result.is_error);
         assert!(result.text.contains("test"));
+    }
+
+    // ---- Generate Image handler tests ----
+
+    #[tokio::test]
+    async fn test_generate_image_handler_missing_prompt() {
+        let handler = GenerateImageHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"path": "output.png"}), &ctx)
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("prompt"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_image_handler_missing_path() {
+        let handler = GenerateImageHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(serde_json::json!({"prompt": "a cat"}), &ctx)
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("path"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_image_handler_valid() {
+        let handler = GenerateImageHandler;
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"prompt": "a sunset", "path": "sunset.png"}),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.text);
+        assert!(result.text.contains("sunset"));
+    }
+
+    // ---- Custom Tool handler tests ----
+
+    #[tokio::test]
+    async fn test_custom_tool_handler_not_found() {
+        let handler = CustomToolHandler::new_empty();
+        let ctx = make_context();
+        let result = handler
+            .execute(
+                serde_json::json!({"_custom_tool_name": "nonexistent"}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.text.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_tool_handler_default_name() {
+        let handler = CustomToolHandler::new_empty();
+        let ctx = make_context();
+        let result = handler.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_error); // "custom_tool" not in empty registry
     }
 
     // ---- Repetition detector integration tests ----

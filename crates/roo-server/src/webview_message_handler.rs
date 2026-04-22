@@ -33,6 +33,7 @@ pub enum WebviewMessageType {
     // History
     DeleteMessage,
     EditMessage,
+    SubmitEditedMessage,
 
     // Search
     SearchFiles,
@@ -45,6 +46,28 @@ pub enum WebviewMessageType {
     LoadApiConfig,
     DeleteApiConfig,
     ListApiConfigs,
+    UpsertApiConfig,
+    RenameApiConfig,
+    CustomInstructions,
+    UpdatePrompt,
+    CopySystemPrompt,
+    ResetState,
+    ImportSettings,
+    ExportSettings,
+    LockApiConfigAcrossModes,
+    ToggleApiConfigPin,
+    EnhancementApiConfigId,
+    AutoApprovalEnabled,
+    DebugSetting,
+    AllowedCommands,
+    DeniedCommands,
+    UpdateCondensingPrompt,
+    SetApiConfigPassword,
+    HasOpenedModeSelector,
+    TaskSyncEnabled,
+    UpdateSettings,
+    UpdateVSCodeSetting,
+    GetVSCodeSetting,
 
     // Skills
     RequestSkills,
@@ -59,6 +82,11 @@ pub enum WebviewMessageType {
     McpRestartServer,
     McpDeleteServer,
     McpUpdateTimeout,
+    McpRefreshAll,
+    McpToggleToolAlwaysAllow,
+    McpToggleToolEnabledForPrompt,
+    OpenMcpSettings,
+    OpenProjectMcpSettings,
 
     // Checkpoint
     CheckpointDiff,
@@ -71,10 +99,120 @@ pub enum WebviewMessageType {
     // Terminal
     TerminalOperation,
 
+    // Marketplace
+    InstallMarketplaceItem,
+    RemoveInstalledMarketplaceItem,
+    InstallMarketplaceItemWithParameters,
+    FetchMarketplaceData,
+    FilterMarketplaceItems,
+    MarketplaceButtonClicked,
+    CancelMarketplaceInstall,
+
+    // Worktree
+    ListWorktrees,
+    CreateWorktree,
+    DeleteWorktree,
+    SwitchWorktree,
+    GetAvailableBranches,
+    GetWorktreeDefaults,
+    GetWorktreeIncludeStatus,
+    CheckBranchWorktreeInclude,
+    CreateWorktreeInclude,
+    CheckoutBranch,
+    BrowseForWorktreePath,
+
+    // TTS
+    PlayTts,
+    StopTts,
+    TtsEnabled,
+    TtsSpeed,
+
+    // Image
+    SaveImage,
+    OpenImage,
+
+    // Model requests
+    FlushRouterModels,
+    RequestRouterModels,
+    RequestOpenAiModels,
+    RequestOllamaModels,
+    RequestLmStudioModels,
+    RequestRooModels,
+    RequestRooCreditBalance,
+    RequestVsCodeLmModels,
+
+    // Mentions
+    OpenMention,
+    ResolveMentions,
+
+    // Commands (slash)
+    RequestCommands,
+    OpenCommandFile,
+    DeleteCommand,
+    CreateCommand,
+
+    // Mode
+    UpdateCustomMode,
+    DeleteCustomMode,
+    ExportMode,
+    ImportMode,
+    SwitchMode,
+    CheckRulesDirectory,
+    OpenCustomModesSettings,
+    SetopenAiCustomModelInfo,
+
+    // UI / VS Code-specific
+    WebviewDidLaunch,
+    DidShowAnnouncement,
+    SelectImages,
+    DraggedImages,
+    PlaySound,
+    OpenFile,
+    OpenExternal,
+    OpenKeyboardShortcuts,
+    FocusPanelRequest,
+    SwitchTab,
+    InsertTextIntoTextarea,
+    OpenMarkdownPreview,
+
+    // Cloud
+    RooCloudSignIn,
+    RooCloudSignOut,
+    RooCloudManualUrl,
+    CloudButtonClicked,
+    ClearCloudAuthSkipModel,
+    SwitchOrganization,
+    OpenAiCodexSignIn,
+    OpenAiCodexSignOut,
+    RequestOpenAiCodexRateLimits,
+
+    // Codebase Index
+    CodebaseIndexEnabled,
+    RequestIndexingStatus,
+    StartIndexing,
+    StopIndexing,
+    ClearIndexData,
+    ToggleWorkspaceIndexing,
+    SetAutoEnableDefault,
+    SaveCodeIndexSettingsAtomic,
+    RequestCodeIndexSecretStatus,
+
+    // Upsell
+    DismissUpsell,
+    GetDismissedUpsells,
+
+    // Debug
+    OpenDebugApiHistory,
+    OpenDebugUiHistory,
+    DownloadErrorDiagnostics,
+
     // Other
     GetCommands,
     GetModes,
     GetModels,
+    ShowMdmAuthRequiredNotification,
+    ImageGenerationSettings,
+    ShareCurrentTask,
 
     // Telemetry
     Telemetry,
@@ -144,6 +282,7 @@ pub fn route_message(
         // History
         "deletemessage" => (handlers.handle_delete_message)(message),
         "editmessage" => (handlers.handle_edit_message)(message),
+        "submiteditedmessage" => noop_handler(message),
 
         // Search
         "searchfiles" => (handlers.handle_search_files)(message),
@@ -151,11 +290,32 @@ pub fn route_message(
         "codebasesearch" => (handlers.handle_codebase_search)(message),
 
         // Settings
-        "settingsupdate" => (handlers.handle_settings_update)(message),
-        "saveapiconfig" => (handlers.handle_save_api_config)(message),
-        "loadapiconfig" => (handlers.handle_load_api_config)(message),
-        "deleteapiconfig" => (handlers.handle_delete_api_config)(message),
-        "listapiconfigs" => (handlers.handle_list_api_configs)(message),
+        "settingsupdate" | "updatesettings" => (handlers.handle_settings_update)(message),
+        "saveapiconfig" | "saveapiconfiguration" => (handlers.handle_save_api_config)(message),
+        "loadapiconfig" | "loadapiconfiguration" => (handlers.handle_load_api_config)(message),
+        "deleteapiconfig" | "deleteapiconfiguration" => (handlers.handle_delete_api_config)(message),
+        "listapiconfigs" | "getlistapiconfiguration" => (handlers.handle_list_api_configs)(message),
+        "upsertapiconfiguration" => noop_handler(message),
+        "renameapiconfiguration" => noop_handler(message),
+        "custominstructions" => noop_handler(message),
+        "updateprompt" => noop_handler(message),
+        "copysystemprompt" => noop_handler(message),
+        "resetstate" => noop_handler(message),
+        "importsettings" => noop_handler(message),
+        "exportsettings" => noop_handler(message),
+        "lockapiconfigacrossmodes" => noop_handler(message),
+        "toggleapiconfigpin" => noop_handler(message),
+        "enhancementapiconfigid" => noop_handler(message),
+        "autoapprovalenabled" => noop_handler(message),
+        "debugsetting" => noop_handler(message),
+        "allowedcommands" => noop_handler(message),
+        "deniedcommands" => noop_handler(message),
+        "updatecondensingprompt" => noop_handler(message),
+        "setapiconfigpassword" => noop_handler(message),
+        "hasopenedmodeselector" => noop_handler(message),
+        "tasksyncenabled" => noop_handler(message),
+        "updatevscodesetting" => noop_handler(message),
+        "getvsCodesetting" => noop_handler(message),
 
         // Skills
         "requestskills" => (handlers.handle_request_skills)(message),
@@ -166,10 +326,15 @@ pub fn route_message(
         "openskillfile" => (handlers.handle_open_skill_file)(message),
 
         // MCP
-        "mcptoggleserver" => (handlers.handle_mcp_toggle_server)(message),
-        "mcprestartserver" => (handlers.handle_mcp_restart_server)(message),
-        "mcpdeleteserver" => (handlers.handle_mcp_delete_server)(message),
-        "mcpupdatetimeout" => (handlers.handle_mcp_update_timeout)(message),
+        "mcptoggleserver" | "togglemcpserver" => (handlers.handle_mcp_toggle_server)(message),
+        "mcprestartserver" | "restartmcpserver" => (handlers.handle_mcp_restart_server)(message),
+        "mcpdeleteserver" | "deletemcpserver" => (handlers.handle_mcp_delete_server)(message),
+        "mcpupdatetimeout" | "updatemcptimeout" => (handlers.handle_mcp_update_timeout)(message),
+        "refreshallmcpservers" => noop_handler(message),
+        "toggletoolalwaysallow" => noop_handler(message),
+        "toggletoolenabledforprompt" => noop_handler(message),
+        "openmcpsettings" => noop_handler(message),
+        "openprojectmcpsettings" => noop_handler(message),
 
         // Checkpoint
         "checkpointdiff" => (handlers.handle_checkpoint_diff)(message),
@@ -182,13 +347,122 @@ pub fn route_message(
         // Terminal
         "terminaloperation" => (handlers.handle_terminal_operation)(message),
 
+        // Marketplace
+        "installmarketplaceitem" => noop_handler(message),
+        "removeinstalledmarketplaceitem" => noop_handler(message),
+        "installmarketplaceitemwithparameters" => noop_handler(message),
+        "fetchmarketplacedata" => noop_handler(message),
+        "filtermarketplaceitems" => noop_handler(message),
+        "marketplacebuttonclicked" => noop_handler(message),
+        "cancelmarketplaceinstall" => noop_handler(message),
+
+        // Worktree
+        "listworktrees" => noop_handler(message),
+        "createworktree" => noop_handler(message),
+        "deleteworktree" => noop_handler(message),
+        "switchworktree" => noop_handler(message),
+        "getavailablebranches" => noop_handler(message),
+        "getworktreedefaults" => noop_handler(message),
+        "getworktreeincludstatus" => noop_handler(message),
+        "checkbranchworktreeinclude" => noop_handler(message),
+        "createworktreeinclude" => noop_handler(message),
+        "checkoutbranch" => noop_handler(message),
+        "browseforworktreepath" => noop_handler(message),
+
+        // TTS
+        "playtts" => noop_handler(message),
+        "stoptts" => noop_handler(message),
+        "ttsenabled" => noop_handler(message),
+        "ttsspeed" => noop_handler(message),
+
+        // Image
+        "saveimage" => noop_handler(message),
+        "openimage" => noop_handler(message),
+
+        // Model requests
+        "flushroutermodels" => noop_handler(message),
+        "requestroutermodels" => noop_handler(message),
+        "requestopenaimodels" => noop_handler(message),
+        "requestollamamodels" => noop_handler(message),
+        "requestlmstudiomodels" => noop_handler(message),
+        "requestroomodels" => noop_handler(message),
+        "requestroocreditbalance" => noop_handler(message),
+        "requestvscodelmmodels" => noop_handler(message),
+
+        // Mentions
+        "openmention" => noop_handler(message),
+
+        // Commands (slash)
+        "requestcommands" => (handlers.handle_get_commands)(message),
+        "opencommandfile" => noop_handler(message),
+        "deletecommand" => noop_handler(message),
+        "createcommand" => noop_handler(message),
+
+        // Mode
+        "updatecustommode" => noop_handler(message),
+        "deletecustommode" => noop_handler(message),
+        "exportmode" => noop_handler(message),
+        "importmode" => noop_handler(message),
+        "switchmode" => (handlers.handle_mode_change)(message),
+        "checkrulesdirectory" => noop_handler(message),
+        "opencustommodessettings" => noop_handler(message),
+        "setopenaicustommodelinfo" => noop_handler(message),
+
+        // UI / VS Code-specific
+        "webviewdidlaunch" => noop_handler(message),
+        "didshowannouncement" => noop_handler(message),
+        "selectimages" => noop_handler(message),
+        "draggedimages" => noop_handler(message),
+        "playsound" => noop_handler(message),
+        "openfile" => noop_handler(message),
+        "openexternal" => noop_handler(message),
+        "openkeyboardshortcuts" => noop_handler(message),
+        "focuspanelrequest" => noop_handler(message),
+        "switchtab" => noop_handler(message),
+        "inserttextintotextarea" => noop_handler(message),
+        "openmarkdownpreview" => noop_handler(message),
+
+        // Cloud
+        "roocloudsignin" => noop_handler(message),
+        "roocloudsignout" => noop_handler(message),
+        "roocloudmanualurl" => noop_handler(message),
+        "cloudbuttonclicked" => noop_handler(message),
+        "clearcloudauthskipmodel" => noop_handler(message),
+        "switchorganization" => noop_handler(message),
+        "openaicodexsignin" => noop_handler(message),
+        "openaicodexsignout" => noop_handler(message),
+        "requestopenaicodexratelimits" => noop_handler(message),
+
+        // Codebase Index
+        "codebaseindexenabled" => noop_handler(message),
+        "requestindexingstatus" => noop_handler(message),
+        "startindexing" => noop_handler(message),
+        "stopindexing" => noop_handler(message),
+        "clearindexdata" => noop_handler(message),
+        "toggleworkspaceindexing" => noop_handler(message),
+        "setautoenabledefault" => noop_handler(message),
+        "savecodeindexsettingsatomic" => noop_handler(message),
+        "requestcodeindexsecretstatus" => noop_handler(message),
+
+        // Upsell
+        "dismissupsell" => noop_handler(message),
+        "getdismissedupsells" => noop_handler(message),
+
+        // Debug
+        "opendebugapihistory" => noop_handler(message),
+        "opendebuguihistory" => noop_handler(message),
+        "downloaderrordiagnostics" => noop_handler(message),
+
         // Other
         "getcommands" => (handlers.handle_get_commands)(message),
         "getmodes" => (handlers.handle_get_modes)(message),
         "getmodels" => (handlers.handle_get_models)(message),
+        "showmdmauthrequirednotification" => noop_handler(message),
+        "imagegenerationsettings" => noop_handler(message),
+        "sharecurrenttask" => noop_handler(message),
 
         // Telemetry
-        "telemetry" => (handlers.handle_telemetry)(message),
+        "telemetry" | "telemetrysetting" => (handlers.handle_telemetry)(message),
 
         _ => {
             warn!("Unknown webview message type: {}", msg_type);

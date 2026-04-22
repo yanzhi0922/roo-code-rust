@@ -95,6 +95,31 @@ pub struct TaskLifecycle {
     ask_say: AskSayHandler,
     /// External service references (MCP Hub, Terminal, Message Queue, Telemetry).
     services: ServiceRefs,
+
+    // ── Controllers (Source: TS constructor lines 478–493) ──────────────
+    /// RooIgnoreController for .rooignore pattern filtering.
+    ///
+    /// Source: TS `this.rooIgnoreController = new RooIgnoreController(this.cwd)` (line 478)
+    roo_ignore_controller: Option<roo_ignore::RooIgnoreController>,
+    /// RooProtectedController for write-protected file detection.
+    ///
+    /// Source: TS `this.rooProtectedController = new RooProtectedController(this.cwd)` (line 479)
+    roo_protected_controller: Option<roo_protect::RooProtectedController>,
+    /// FileContextTracker for tracking file reads/edits.
+    ///
+    /// Source: TS `this.fileContextTracker = new FileContextTracker(provider, this.taskId)` (line 480)
+    file_context_tracker:
+        Option<roo_context_tracking::FileContextTracker<roo_context_tracking::InMemoryMetadataStore>>,
+    /// DiffViewProvider for managing diff editor state.
+    ///
+    /// Source: TS `this.diffViewProvider = new DiffViewProvider(this.cwd, this)` (line 493)
+    diff_view_provider: Option<roo_editor::DiffViewProvider>,
+    /// AutoApprovalHandler for tracking auto-approval limits.
+    ///
+    /// Source: TS `this.autoApprovalHandler = new AutoApprovalHandler()` (line 488)
+    auto_approval_handler: Option<roo_auto_approval::approval::AutoApprovalHandler>,
+
+    // ── Lifecycle state ─────────────────────────────────────────────────
     /// Whether the task has been started.
     ///
     /// Source: TS `this._started` (line 1925)
@@ -132,11 +157,47 @@ pub struct TaskLifecycle {
 
 impl TaskLifecycle {
     /// Create a new task lifecycle with the given engine.
+    ///
+    /// Source: `src/core/task/Task.ts` — constructor (lines 420–578)
+    ///
+    /// Initializes all controllers and handlers that the TS constructor creates:
+    /// - `rooIgnoreController` (line 478)
+    /// - `rooProtectedController` (line 479)
+    /// - `fileContextTracker` (line 480)
+    /// - `diffViewProvider` (line 493)
+    /// - `autoApprovalHandler` (line 488)
     pub fn new(engine: TaskEngine) -> Self {
+        let cwd = engine.config().cwd.clone();
+        let task_id = engine.config().task_id.clone();
+
+        // Source: TS line 478 — `this.rooIgnoreController = new RooIgnoreController(this.cwd)`
+        let roo_ignore_controller = Some(roo_ignore::RooIgnoreController::new(&cwd));
+
+        // Source: TS line 479 — `this.rooProtectedController = new RooProtectedController(this.cwd)`
+        let roo_protected_controller = Some(roo_protect::RooProtectedController::new(&cwd));
+
+        // Source: TS line 480 — `this.fileContextTracker = new FileContextTracker(provider, this.taskId)`
+        let store = roo_context_tracking::InMemoryMetadataStore::new();
+        let file_context_tracker =
+            Some(roo_context_tracking::FileContextTracker::new(&task_id, store));
+
+        // Source: TS line 493 — `this.diffViewProvider = new DiffViewProvider(this.cwd, this)`
+        let diff_view_provider = Some(roo_editor::DiffViewProvider::new(
+            roo_editor::DiffViewOptions::default(),
+        ));
+
+        // Source: TS line 488 — `this.autoApprovalHandler = new AutoApprovalHandler()`
+        let auto_approval_handler = Some(roo_auto_approval::approval::AutoApprovalHandler::new());
+
         Self {
             engine,
             ask_say: AskSayHandler::new(),
             services: ServiceRefs::default(),
+            roo_ignore_controller,
+            roo_protected_controller,
+            file_context_tracker,
+            diff_view_provider,
+            auto_approval_handler,
             started: false,
             disposed: false,
             child_task_id: None,
@@ -220,6 +281,71 @@ impl TaskLifecycle {
     /// Check if the task has been disposed.
     pub fn is_disposed(&self) -> bool {
         self.disposed
+    }
+
+    /// Get the RooIgnoreController.
+    ///
+    /// Source: TS `this.rooIgnoreController` (line 478)
+    pub fn roo_ignore_controller(&self) -> Option<&roo_ignore::RooIgnoreController> {
+        self.roo_ignore_controller.as_ref()
+    }
+
+    /// Get a mutable reference to the RooIgnoreController.
+    pub fn roo_ignore_controller_mut(&mut self) -> Option<&mut roo_ignore::RooIgnoreController> {
+        self.roo_ignore_controller.as_mut()
+    }
+
+    /// Get the RooProtectedController.
+    ///
+    /// Source: TS `this.rooProtectedController` (line 479)
+    pub fn roo_protected_controller(&self) -> Option<&roo_protect::RooProtectedController> {
+        self.roo_protected_controller.as_ref()
+    }
+
+    /// Get the FileContextTracker.
+    ///
+    /// Source: TS `this.fileContextTracker` (line 480)
+    pub fn file_context_tracker(
+        &self,
+    ) -> Option<&roo_context_tracking::FileContextTracker<roo_context_tracking::InMemoryMetadataStore>>
+    {
+        self.file_context_tracker.as_ref()
+    }
+
+    /// Get a mutable reference to the FileContextTracker.
+    pub fn file_context_tracker_mut(
+        &mut self,
+    ) -> Option<&mut roo_context_tracking::FileContextTracker<roo_context_tracking::InMemoryMetadataStore>>
+    {
+        self.file_context_tracker.as_mut()
+    }
+
+    /// Get the DiffViewProvider.
+    ///
+    /// Source: TS `this.diffViewProvider` (line 493)
+    pub fn diff_view_provider(&self) -> Option<&roo_editor::DiffViewProvider> {
+        self.diff_view_provider.as_ref()
+    }
+
+    /// Get a mutable reference to the DiffViewProvider.
+    pub fn diff_view_provider_mut(&mut self) -> Option<&mut roo_editor::DiffViewProvider> {
+        self.diff_view_provider.as_mut()
+    }
+
+    /// Get the AutoApprovalHandler.
+    ///
+    /// Source: TS `this.autoApprovalHandler` (line 488)
+    pub fn auto_approval_handler(
+        &self,
+    ) -> Option<&roo_auto_approval::approval::AutoApprovalHandler> {
+        self.auto_approval_handler.as_ref()
+    }
+
+    /// Get a mutable reference to the AutoApprovalHandler.
+    pub fn auto_approval_handler_mut(
+        &mut self,
+    ) -> Option<&mut roo_auto_approval::approval::AutoApprovalHandler> {
+        self.auto_approval_handler.as_mut()
     }
 
     /// Get the task status as reported to the UI.
@@ -653,22 +779,54 @@ impl TaskLifecycle {
 
         // Source: TS lines 2295–2299 — cancel current request
         self.engine.streaming_mut().is_streaming = false;
+        if let Some(ref token) = self.cancellation_token {
+            token.cancel();
+        }
 
-        // Source: TS lines 2315–2324 — dispose message queue
+        // Source: TS lines 2302–2312 — remove provider profile change listener
+        // (In Rust, this is handled by dropping the event emitter)
+
+        // Source: TS lines 2315–2324 — dispose message queue and remove listeners
         if let Some(ref queue) = self.services.message_queue {
             if let Ok(mut q) = queue.try_lock() {
-                // MessageQueueService doesn't have a dispose method in our impl,
-                // but we clear it
                 while q.dequeue_message().is_some() {}
             }
         }
 
-        // Source: TS lines 2334–2339 — release terminals
-        // TerminalRegistry doesn't have a release_terminals_for_task method,
-        // so we skip this in the Rust implementation.
-        // In the future, this could be implemented by tracking terminal IDs per task.
-        if let Some(ref _terminal_registry) = self.services.terminal_registry {
-            // TODO: Implement terminal release per task when TerminalRegistry supports it
+        // Source: TS lines 2327–2331 — remove all event listeners
+        // (In Rust, this is handled by dropping the event emitter)
+
+        // Source: TS lines 2334–2339 — release terminals for this task
+        // Note: release_terminals_for_task is async, but dispose() is sync.
+        // We spawn a background task to handle this.
+        if let Some(ref terminal_registry) = self.services.terminal_registry {
+            let reg = terminal_registry.clone();
+            let task_id = self.task_id().to_string();
+            tokio::spawn(async move {
+                reg.release_terminals_for_task(&task_id).await;
+            });
+        }
+
+        // Source: TS lines 2342–2349 — cleanup command output artifacts
+        // (In Rust, this is handled by the storage layer on task completion)
+
+        // Source: TS lines 2351–2359 — dispose RooIgnoreController
+        if self.roo_ignore_controller.is_some() {
+            self.roo_ignore_controller = None;
+        }
+
+        // Source: TS lines 2361–2365 — dispose file context tracker
+        if self.file_context_tracker.is_some() {
+            self.file_context_tracker = None;
+        }
+
+        // Source: TS lines 2367–2374 — revert diff changes if editing
+        if self.engine.streaming().is_streaming {
+            if let Some(ref _diff_view) = self.diff_view_provider {
+                // TODO: Implement DiffViewProvider::revert_changes() async method
+                // In TS: `this.diffViewProvider.revertChanges().catch(console.error)`
+                warn!("DiffViewProvider revert_changes not yet implemented in Rust");
+            }
         }
     }
 
@@ -729,7 +887,7 @@ impl TaskLifecycle {
         // Emit subtask created event
         self.engine
             .emitter()
-            .emit_subtask_created(self.task_id(), &subtask_id);
+            .emit_task_spawned(self.task_id(), &subtask_id);
 
         Ok(subtask_id)
     }
@@ -793,34 +951,42 @@ impl TaskLifecycle {
         &mut self,
         text: &str,
         images: Option<Vec<String>>,
+        _mode: Option<&str>,
+        provider_profile: Option<&str>,
     ) -> Result<(), TaskError> {
         // Source: TS lines 1592–1597 — trim and validate
-        let trimmed_text = text.trim().to_string();
+        let mut trimmed_text = text.trim().to_string();
         let images = images.unwrap_or_default();
 
         if trimmed_text.is_empty() && images.is_empty() {
             return Ok(());
         }
 
-        // Enqueue message if message queue is available
-        // Source: TS — `this.messageQueueService.addMessage(text, images)`
-        if let Some(ref queue) = self.services.message_queue {
-            let mut q = queue.lock().await;
-            q.add_message(&trimmed_text, if images.is_empty() { None } else { Some(images.clone()) });
-            debug!(text_len = trimmed_text.len(), "Message enqueued");
+        // Source: TS lines 1602–1604 — set mode if provided
+        // (Mode switching is handled at the TaskManager level)
+
+        // Source: TS lines 1606–1615 — set provider profile if provided
+        // This updates the API configuration to match the new profile.
+        // (Provider profile switching is handled at the TaskManager level)
+        let _ = provider_profile;
+
+        // Source: TS — @mentions processing
+        // In the TS version, @mentions are resolved in the webview message
+        // handler before submitUserMessage is called. Here we process them
+        // inline using the roo_mentions module.
+        if trimmed_text.contains('@') {
+            trimmed_text = self.resolve_mentions(&trimmed_text).await;
         }
 
-        // Add user feedback message
-        self.ask_say
-            .say_simple(
-                ClineSay::UserFeedback,
-                Some(trimmed_text.clone()),
-                if images.is_empty() { None } else { Some(images.clone()) },
-            )
-            .await?;
+        // Source: TS line 1617 — emit TaskUserMessage event
+        self.engine
+            .emitter()
+            .emit(&TaskEvent::UserMessage {
+                task_id: self.task_id().to_string(),
+            });
 
-        // Handle the ask response
-        // Source: TS line 1622 — `this.handleWebviewAskResponse("messageResponse", text, images)`
+        // Source: TS line 1622 — handle the message via handleWebviewAskResponse
+        // `this.handleWebviewAskResponse("messageResponse", text, images)`
         let _checkpoint_needed = self
             .ask_say
             .handle_response_full(
@@ -835,6 +1001,29 @@ impl TaskLifecycle {
 
         debug!(text_len = trimmed_text.len(), "User message submitted");
         Ok(())
+    }
+
+    /// Resolve @mentions in user message text.
+    ///
+    /// Source: `src/core/webview/ClineProvider.ts` — `handleWebviewMessage`
+    ///   `sendMessage` branch, where @mentions are parsed and replaced
+    ///   with file content before the message is sent to the task.
+    ///
+    /// Uses the `roo_mentions` module to parse @mentions and replace them
+    /// with the referenced file contents.
+    async fn resolve_mentions(&self, text: &str) -> String {
+        let cwd = std::path::PathBuf::from(&self.engine.config().cwd);
+        let content_blocks = vec![roo_mentions::types::ContentBlock::text(text)];
+        let result =
+            roo_mentions::processor::process_user_content_mentions(&content_blocks, &cwd).await;
+
+        // Extract the processed text from the result
+        result
+            .content
+            .iter()
+            .filter_map(|b: &roo_mentions::types::ContentBlock| b.as_text())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     // ===================================================================
@@ -863,15 +1052,44 @@ impl TaskLifecycle {
         // Source: TS line 1651 — flush pending tool results
         self.flush_pending_tool_results().await?;
 
-        // The actual condensation is handled by the agent loop's
-        // `try_condense_context()` method. Here we just emit a
-        // condense request event.
+        // Source: TS line 1660 — get previous context tokens
+        let _prev_context_tokens = self.engine.result().token_usage.context_tokens;
+
+        // Source: TS lines 1696–1697 — get files read by Roo safely
+        let _files_read_by_roo = self.get_files_read_by_roo_safely("condenseContext");
+
+        // Source: TS lines 1698–1718 — call summarizeConversation
+        //
+        // The actual condensation requires an API handler and system prompt,
+        // which are owned by the agent loop. The TaskLifecycle emits a
+        // condensation request event and the agent loop performs the actual
+        // condensation. This matches the TS architecture where condenseContext()
+        // calls summarizeConversation() which needs the API handler.
+        //
+        // For the manual trigger path, we emit the event and let the
+        // agent loop handle it. If we have an API handler available,
+        // we can perform the condensation directly.
+        if self.engine.api_handler().is_some() {
+            // Direct condensation path — requires API handler
+            // TODO: Implement direct condensation when API handler is available
+            // This would call summarize_conversation() with the proper options.
+            warn!("Direct condensation not yet implemented, falling back to event-based");
+        }
+
+        // Emit condensation request event for the agent loop to handle
         self.engine
             .emitter()
             .emit(&TaskEvent::ContextCondensationRequested {
                 task_id: self.task_id().to_string(),
             });
 
+        // Source: TS lines 1733–1749 — emit condense_context say message
+        // (This is done by the agent loop after successful condensation)
+
+        // Source: TS line 1752 — process queued messages
+        self.process_queued_messages().await;
+
+        info!(task_id = %self.task_id(), "Context condensation requested");
         Ok(())
     }
 
@@ -888,6 +1106,23 @@ impl TaskLifecycle {
         Ok(false) // No pending results in this simplified implementation
     }
 
+    /// Safely get files read by Roo, returning None on error.
+    ///
+    /// Source: `src/core/task/Task.ts` — `getFilesReadByRooSafely()` (lines 1639–1646)
+    fn get_files_read_by_roo_safely(&self, _context: &str) -> Option<Vec<String>> {
+        if let Some(ref tracker) = self.file_context_tracker {
+            match tracker.get_files_read_by_roo(None) {
+                Ok(files) => Some(files),
+                Err(e) => {
+                    warn!(error = %e, "Failed to get files read by Roo");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
     // ===================================================================
     // updateApiConfiguration()
     // Source: `src/core/task/Task.ts` — lines 1579–1583
@@ -899,16 +1134,27 @@ impl TaskLifecycle {
     ///
     /// Updates the API configuration and rebuilds the API handler.
     /// This is used when the user changes the model or provider mid-task.
+    /// Update the API configuration and rebuild the API handler.
+    ///
+    /// Source: `src/core/task/Task.ts` — `updateApiConfiguration()` (lines 1579–1583)
+    ///
+    /// TS implementation:
+    /// ```ts
+    /// this.apiConfiguration = newApiConfiguration
+    /// this.api = buildApiHandler(this.apiConfiguration)
+    /// ```
     pub fn update_api_configuration(
         &mut self,
-        _new_config: &roo_types::provider_settings::ProviderSettings,
+        new_config: roo_types::provider_settings::ProviderSettings,
     ) {
-        // Source: TS lines 1580–1582
-        // this.apiConfiguration = newApiConfiguration
-        // this.api = buildApiHandler(this.apiConfiguration)
-        warn!(
-            "updateApiConfiguration: API handler rebuild requires agent loop integration"
-        );
+        // Source: TS line 1581 — update the configuration
+        self.engine.set_api_configuration(new_config);
+
+        // Source: TS line 1582 — rebuild the API handler
+        // The actual handler rebuild requires the agent loop to call
+        // `buildApiHandler()` with the new configuration. We store the
+        // config and the agent loop will pick it up on the next iteration.
+        debug!("API configuration updated, handler rebuild pending next iteration");
     }
 
     // ===================================================================
@@ -919,6 +1165,15 @@ impl TaskLifecycle {
     /// Handle a terminal operation (continue or abort).
     ///
     /// Source: `src/core/task/Task.ts` — `handleTerminalOperation()` (lines 1631–1636)
+    ///
+    /// TS implementation:
+    /// ```ts
+    /// if (terminalOperation === "continue") {
+    ///     this.terminalProcess?.continue()
+    /// } else if (terminalOperation === "abort") {
+    ///     this.terminalProcess?.abort()
+    /// }
+    /// ```
     pub async fn handle_terminal_operation(
         &mut self,
         operation: &str,
@@ -926,14 +1181,27 @@ impl TaskLifecycle {
         match operation {
             // Source: TS line 1633 — `this.terminalProcess?.continue()`
             "continue" => {
-                // TerminalRegistry doesn't have continue_terminal in Rust.
-                // The actual terminal continue logic is handled by the agent loop.
+                // Source: TS line 1633 — `this.terminalProcess?.continue()`
+                // TerminalRegistry doesn't have continue_terminal directly.
+                // The actual terminal continue is handled via TerminalProcess
+                // which is managed by the agent loop.
+                // Here we emit an event that the agent loop can listen to.
+                self.engine
+                    .emitter()
+                    .emit(&TaskEvent::TaskUnpaused {
+                        task_id: self.task_id().to_string(),
+                    });
                 debug!("Continuing terminal operation");
             }
             // Source: TS line 1635 — `this.terminalProcess?.abort()`
             "abort" => {
-                // TerminalRegistry doesn't have abort_terminal in Rust.
-                // The actual terminal abort logic is handled by the agent loop.
+                // Source: TS line 1635 — `this.terminalProcess?.abort()`
+                // TerminalRegistry doesn't have abort_terminal directly.
+                // The actual terminal abort is handled via TerminalProcess
+                // which is managed by the agent loop.
+                if let Some(ref token) = self.cancellation_token {
+                    token.cancel();
+                }
                 debug!("Aborting terminal operation");
             }
             _ => {
@@ -1232,7 +1500,8 @@ mod tests {
     fn make_lifecycle() -> TaskLifecycle {
         let config = TaskConfig::new("test-task", "/tmp/work")
             .with_mode("code")
-            .with_max_iterations(100);
+            .with_max_iterations(100)
+            .with_start_task(false);
         let engine = TaskEngine::new(config).unwrap();
         TaskLifecycle::new(engine)
     }
@@ -1328,8 +1597,10 @@ mod tests {
         let mut lc = make_lifecycle();
         lc.engine.start().unwrap();
 
-        lc.submit_user_message("Hello", None).await.unwrap();
-        assert_eq!(lc.ask_say.cline_messages().len(), 1);
+        // submit_user_message sets the ask response and emits events;
+        // it does NOT directly add to cline_messages (that happens in the agent loop).
+        lc.submit_user_message("Hello", None, None, None).await.unwrap();
+        // Verify no error occurred — the response is set internally via handle_response_full.
     }
 
     #[tokio::test]
@@ -1337,7 +1608,7 @@ mod tests {
         let mut lc = make_lifecycle();
         lc.engine.start().unwrap();
 
-        lc.submit_user_message("", None).await.unwrap();
+        lc.submit_user_message("", None, None, None).await.unwrap();
         assert_eq!(lc.ask_say.cline_messages().len(), 0); // Empty text is ignored
     }
 
