@@ -207,6 +207,16 @@ fn parse_image_data_url(data_url: &str) -> Option<ContentBlock> {
     })
 }
 
+/// Convert an array of base64 data URLs into image content blocks.
+///
+/// Source: `src/core/prompts/responses.ts` — `formatResponse.imageBlocks` + `formatImagesIntoBlocks`
+pub fn image_blocks(images: &[String]) -> Vec<ContentBlock> {
+    images
+        .iter()
+        .filter_map(|data_url| parse_image_data_url(data_url))
+        .collect()
+}
+
 /// Result of a tool call.
 #[derive(Debug, Clone)]
 pub enum ToolResult {

@@ -17,6 +17,7 @@ pub use types::{FileEntry, SkillInfo, SystemPromptParams, SystemPromptSettings};
 pub use responses::{
     create_pretty_patch,
     format_files_list,
+    image_blocks,
     invalid_mcp_tool_argument_error,
     missing_tool_parameter_error,
     no_tools_used,

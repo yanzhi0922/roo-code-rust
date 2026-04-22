@@ -39,9 +39,10 @@ pub struct ParsedToolCall {
 impl ParsedToolCall {
     /// Parse the arguments string into a JSON value.
     ///
-    /// Returns `serde_json::Value::Null` if parsing fails.
+    /// Returns an empty JSON object `{}` if parsing fails, since the Anthropic
+    /// API requires `tool_use.input` to be a valid dictionary (not null).
     pub fn parse_arguments(&self) -> serde_json::Value {
-        serde_json::from_str(&self.arguments).unwrap_or(serde_json::Value::Null)
+        serde_json::from_str(&self.arguments).unwrap_or(serde_json::Value::Object(Default::default()))
     }
 }
 
@@ -1212,7 +1213,8 @@ mod tests {
             name: "test".into(),
             arguments: "not json".into(),
         };
-        assert_eq!(tc.parse_arguments(), serde_json::Value::Null);
+        // Should return empty object {} instead of null (P0-1 fix)
+        assert_eq!(tc.parse_arguments(), serde_json::json!({}));
     }
 
     // ===================================================================

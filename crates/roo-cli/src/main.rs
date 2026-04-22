@@ -133,6 +133,13 @@ struct CollectedToolCall {
     arguments: String,
 }
 
+/// A thinking/reasoning block accumulated from streaming chunks.
+#[derive(Debug, Clone)]
+struct CollectedThinkingBlock {
+    text: String,
+    signature: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -749,18 +756,32 @@ async fn run_single(
             .await
             .context("Failed to create message")?;
 
-        let (assistant_text, tool_calls) = collect_stream(stream).await?;
+        let (assistant_text, tool_calls, thinking_blocks) = collect_stream(stream).await?;
+
+        // P1-2 extended: Filter out tool calls with empty names before building messages
+        let tool_calls: Vec<CollectedToolCall> = tool_calls
+            .into_iter()
+            .filter(|tc| !tc.name.is_empty())
+            .collect();
 
         // Build assistant message content blocks.
         let mut assistant_content: Vec<ContentBlock> = Vec::new();
+        // P1-1: Include thinking blocks in assistant message
+        for tb in &thinking_blocks {
+            assistant_content.push(ContentBlock::Thinking {
+                thinking: tb.text.clone(),
+                signature: tb.signature.clone().unwrap_or_default(),
+            });
+        }
         if !assistant_text.is_empty() {
             assistant_content.push(ContentBlock::Text {
                 text: assistant_text.clone(),
             });
         }
         for tc in &tool_calls {
+            // P0-1 fix: Default to empty object {} instead of null
             let input: serde_json::Value =
-                serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+                serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
             assistant_content.push(ContentBlock::ToolUse {
                 id: tc.id.clone(),
                 name: tc.name.clone(),
@@ -874,18 +895,32 @@ async fn run_interactive(
             print!("ai> ");
             io::stdout().flush().ok();
 
-            let (assistant_text, tool_calls) = collect_stream(stream).await?;
+            let (assistant_text, tool_calls, thinking_blocks) = collect_stream(stream).await?;
+
+            // P1-2 extended: Filter out tool calls with empty names before building messages
+            let tool_calls: Vec<CollectedToolCall> = tool_calls
+                .into_iter()
+                .filter(|tc| !tc.name.is_empty())
+                .collect();
 
             // Build assistant message content blocks.
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
+            // P1-1: Include thinking blocks in assistant message
+            for tb in &thinking_blocks {
+                assistant_content.push(ContentBlock::Thinking {
+                    thinking: tb.text.clone(),
+                    signature: tb.signature.clone().unwrap_or_default(),
+                });
+            }
             if !assistant_text.is_empty() {
                 assistant_content.push(ContentBlock::Text {
                     text: assistant_text.clone(),
                 });
             }
             for tc in &tool_calls {
+                // P0-1 fix: Default to empty object {} instead of null
                 let input: serde_json::Value =
-                    serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+                    serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
                 assistant_content.push(ContentBlock::ToolUse {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
@@ -943,11 +978,16 @@ async fn run_interactive(
 /// and return the accumulated text and tool calls.
 async fn collect_stream(
     mut stream: roo_provider::handler::ApiStream,
-) -> Result<(String, Vec<CollectedToolCall>)> {
+) -> Result<(String, Vec<CollectedToolCall>, Vec<CollectedThinkingBlock>)> {
     let mut collected_text = String::new();
     let mut tool_calls: Vec<CollectedToolCall> = Vec::new();
     // Map from tool call id → index in tool_calls vec (for delta accumulation).
     let mut tool_call_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    // P1-1: Thinking/reasoning state
+    let mut thinking_blocks: Vec<CollectedThinkingBlock> = Vec::new();
+    let mut current_thinking_text: String = String::new();
+    let mut current_thinking_signature: Option<String> = None;
 
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
@@ -956,11 +996,22 @@ async fn collect_stream(
                 &mut collected_text,
                 &mut tool_calls,
                 &mut tool_call_index,
+                &mut thinking_blocks,
+                &mut current_thinking_text,
+                &mut current_thinking_signature,
             ),
             Err(e) => {
                 eprintln!("\n[stream error] {e}");
             }
         }
+    }
+
+    // P1-1: Flush any unfinished thinking block
+    if !current_thinking_text.is_empty() {
+        thinking_blocks.push(CollectedThinkingBlock {
+            text: current_thinking_text,
+            signature: current_thinking_signature,
+        });
     }
 
     // Deduplicate tool call IDs — some providers (e.g. MiniMax) may return
@@ -986,7 +1037,7 @@ async fn collect_stream(
         }
     }
 
-    Ok((collected_text, tool_calls))
+    Ok((collected_text, tool_calls, thinking_blocks))
 }
 
 /// Process a single stream chunk, printing text and accumulating tool calls.
@@ -995,6 +1046,9 @@ fn process_chunk(
     collected_text: &mut String,
     tool_calls: &mut Vec<CollectedToolCall>,
     tool_call_index: &mut std::collections::HashMap<String, usize>,
+    thinking_blocks: &mut Vec<CollectedThinkingBlock>,
+    current_thinking_text: &mut String,
+    _current_thinking_signature: &mut Option<String>,
 ) {
     match chunk {
         ApiStreamChunk::Text { text } => {
@@ -1005,12 +1059,22 @@ fn process_chunk(
         ApiStreamChunk::Reasoning { text, .. } => {
             print!("\x1b[90m{text}\x1b[0m");
             io::stdout().flush().ok();
+            // P1-1: Accumulate thinking/reasoning text for saving to assistant message
+            current_thinking_text.push_str(text);
         }
         ApiStreamChunk::ThinkingComplete { signature } => {
             print!(
                 "\x1b[90m[thinking complete: sig={}]\x1b[0m",
                 &signature[..signature.len().min(16)]
             );
+            // P1-1: Finalize the thinking block
+            let text = std::mem::take(current_thinking_text);
+            if !text.is_empty() {
+                thinking_blocks.push(CollectedThinkingBlock {
+                    text,
+                    signature: Some(signature.clone()),
+                });
+            }
         }
         ApiStreamChunk::Usage {
             input_tokens,
@@ -1049,16 +1113,27 @@ fn process_chunk(
             name,
             arguments,
         } => {
-            // Complete tool call in one shot.
-            print!("\n\x1b[36m[tool: {name}]\x1b[0m ");
-            io::stdout().flush().ok();
-            let idx = tool_calls.len();
-            tool_calls.push(CollectedToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-            });
-            tool_call_index.insert(id.clone(), idx);
+            // P0-2 fix: If a ToolCallPartial with the same ID was already collected
+            // (e.g. from Anthropic handler emitting both partial and complete events),
+            // replace it with the complete data instead of creating a duplicate.
+            if let Some(&existing_idx) = tool_call_index.get(id) {
+                tool_calls[existing_idx] = CollectedToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                };
+            } else {
+                // New tool call — not seen before as a partial
+                print!("\n\x1b[36m[tool: {name}]\x1b[0m ");
+                io::stdout().flush().ok();
+                let idx = tool_calls.len();
+                tool_calls.push(CollectedToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                });
+                tool_call_index.insert(id.clone(), idx);
+            }
         }
         ApiStreamChunk::ToolCallPartial {
             index,
@@ -1112,9 +1187,22 @@ async fn execute_tool_calls(
     let mut results: Vec<ContentBlock> = Vec::new();
 
     for tc in &tool_calls {
-        // Parse the arguments as JSON Value.
+        // P1-2: Skip tool calls with empty names
+        if tc.name.is_empty() {
+            eprintln!("\n\x1b[33m[warn] skipping tool call with empty name (id={})\x1b[0m", tc.id);
+            results.push(ContentBlock::ToolResult {
+                tool_use_id: tc.id.clone(),
+                content: vec![ToolResultContent::Text {
+                    text: "Error: tool name is empty".to_string(),
+                }],
+                is_error: Some(true),
+            });
+            continue;
+        }
+
+        // P0-1 fix: Default to empty object {} instead of null
         let params: serde_json::Value =
-            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
 
         // Display tool invocation.
         let args_preview = serde_json::to_string_pretty(&params)

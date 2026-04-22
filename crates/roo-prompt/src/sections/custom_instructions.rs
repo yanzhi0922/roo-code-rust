@@ -82,7 +82,8 @@ fn should_include_rule_file(filename: &str) -> bool {
         .unwrap_or_default();
 
     !CACHE_PATTERNS.iter().any(|pattern| {
-        if let Some(ext) = pattern.strip_prefix("*.") {
+        // TS uses pattern.slice(1) which preserves the leading dot (e.g. "*.lock" → ".lock")
+        if let Some(ext) = pattern.strip_prefix("*") {
             basename.ends_with(ext)
         } else {
             basename == *pattern
@@ -104,17 +105,22 @@ fn directory_exists(dir_path: &Path) -> bool {
     dir_path.is_dir()
 }
 
+/// Internal representation tracking both original path (for sorting) and resolved path (for reading).
+/// Matches TS `resolveDirectoryEntry` + `resolveSymLink` dual-path tracking.
+type FileInfo = (String, String, String); // (original_path, resolved_path, content)
+
 /// Read all text files from a directory in alphabetical order.
 ///
 /// Source: `src/core/prompts/sections/custom-instructions.ts` — `readTextFilesFromDirectory`
 fn read_text_files_from_directory(dir_path: &Path) -> Vec<(String, String)> {
-    let mut file_info: Vec<(String, String)> = Vec::new();
+    let mut file_info: Vec<FileInfo> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(dir_path) {
         collect_files_recursive(dir_path, entries, &mut file_info, 0);
     }
 
-    // Sort alphabetically by filename (case-insensitive)
+    // Sort alphabetically by original filename (case-insensitive).
+    // For symlinks, this uses the symlink name, not the target name — matching TS behavior.
     file_info.sort_by(|a, b| {
         let name_a = Path::new(&a.0)
             .file_name()
@@ -127,14 +133,22 @@ fn read_text_files_from_directory(dir_path: &Path) -> Vec<(String, String)> {
         name_a.cmp(&name_b)
     });
 
+    // Map to (resolved_path, content) for external use — display uses resolved path
     file_info
+        .into_iter()
+        .map(|(_, resolved, content)| (resolved, content))
+        .collect()
 }
 
 /// Recursively collect files from a directory.
+///
+/// Tracks both `original_path` (the entry/symlink path, used for sorting) and
+/// `resolved_path` (the actual file path, used for reading and display).
+/// Matches TS `resolveDirectoryEntry` + `resolveSymLink` dual-path tracking.
 fn collect_files_recursive(
     _dir_path: &Path,
     entries: fs::ReadDir,
-    file_info: &mut Vec<(String, String)>,
+    file_info: &mut Vec<FileInfo>,
     depth: usize,
 ) {
     if depth > MAX_DEPTH {
@@ -142,16 +156,16 @@ fn collect_files_recursive(
     }
 
     for entry in entries.flatten() {
-        let path = entry.path();
+        let original_path = entry.path();
 
-        // Handle symlinks
-        let resolved_path = if path.is_symlink() {
-            match fs::read_link(&path) {
+        // Handle symlinks — track both original and resolved paths
+        let resolved_path = if original_path.is_symlink() {
+            match fs::read_link(&original_path) {
                 Ok(target) => {
                     let resolved = if target.is_absolute() {
                         target
                     } else {
-                        path.parent().unwrap_or(Path::new(".")).join(target)
+                        original_path.parent().unwrap_or(Path::new(".")).join(target)
                     };
                     if resolved.is_dir() {
                         if let Ok(sub_entries) = fs::read_dir(&resolved) {
@@ -165,7 +179,7 @@ fn collect_files_recursive(
                 Err(_) => continue,
             }
         } else {
-            path.clone()
+            original_path.clone()
         };
 
         if resolved_path.is_file() {
@@ -175,7 +189,11 @@ fn collect_files_recursive(
             }
             let content = safe_read_file(&resolved_path);
             if !content.is_empty() {
-                file_info.push((resolved_path.to_string_lossy().to_string(), content));
+                file_info.push((
+                    original_path.to_string_lossy().to_string(),
+                    resolved_path.to_string_lossy().to_string(),
+                    content,
+                ));
             }
         } else if resolved_path.is_dir() {
             if let Ok(sub_entries) = fs::read_dir(&resolved_path) {
@@ -554,7 +572,9 @@ pub fn add_custom_instructions(
         if used_rule_file.contains(&roo_rules_mode_unix) || used_rule_file.contains(&roo_rules_mode_win) {
             rules.push(mode_rule_trimmed.to_string());
         } else {
-            rules.push(format!("# Rules from {}:\n{}", used_rule_file, mode_rule_trimmed));
+            // TS uses untrimmed modeRuleContent (which starts with \n for directory rules),
+            // preserving the leading newline for consistent formatting.
+            rules.push(format!("# Rules from {}:\n{}", used_rule_file, mode_rule_content));
         }
     }
 
