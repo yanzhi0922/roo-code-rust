@@ -3524,6 +3524,18 @@ fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Messag
             "interactionRequired",
             json!({"taskId": task_id}),
         ),
+        TaskEvent::ToolApprovalRequired { tool_name, tool_id, reason, .. } => (
+            "toolApprovalRequired",
+            json!({"taskId": task_id, "toolName": tool_name, "toolId": tool_id, "reason": reason}),
+        ),
+        TaskEvent::ApiRequestFailed { error, .. } => (
+            "apiRequestFailed",
+            json!({"taskId": task_id, "error": error}),
+        ),
+        TaskEvent::MistakeLimitReached { count, limit, .. } => (
+            "mistakeLimitReached",
+            json!({"taskId": task_id, "count": count, "limit": limit}),
+        ),
     };
 
     Some(Message::notification(

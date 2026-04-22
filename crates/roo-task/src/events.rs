@@ -260,6 +260,45 @@ pub enum TaskEvent {
     /// Source: TS `recursivelyMakeClineRequests()` — after stream ends
     StreamingCompleted { task_id: String },
 
+    // --- Tool approval events ---
+    /// A tool requires user approval before execution.
+    ///
+    /// Source: TS `presentAssistantMessage` → `askFollowupQuestion` → user approval flow.
+    /// In the TS implementation, when a tool needs approval, the UI presents a dialog
+    /// and the user can approve or deny. The Rust implementation uses a oneshot channel
+    /// pattern: the agent loop creates a channel, emits this event, and awaits the
+    /// receiver. External code calls `AgentLoop::set_approval_response()` to send
+    /// the user's decision through the channel.
+    ToolApprovalRequired {
+        task_id: String,
+        tool_name: String,
+        tool_id: String,
+        reason: String,
+    },
+
+    // --- User interaction events ---
+    /// API request failed and user is asked whether to retry.
+    ///
+    /// Source: TS `attemptApiRequest()` → `ask("api_req_failed")` — when API call
+    /// fails, the user can choose to retry or cancel. The Rust implementation uses
+    /// a oneshot channel pattern similar to tool approval.
+    ApiRequestFailed {
+        task_id: String,
+        error: String,
+    },
+
+    /// Consecutive mistake limit reached, asking user for guidance.
+    ///
+    /// Source: TS `recursivelyMakeClineRequests()` →
+    /// `ask("mistake_limit_reached")` — when the model makes too many
+    /// consecutive mistakes, the user is asked for feedback. The Rust
+    /// implementation uses a oneshot channel pattern similar to tool approval.
+    MistakeLimitReached {
+        task_id: String,
+        count: usize,
+        limit: usize,
+    },
+
     // --- Rate limit events ---
     /// Rate limit countdown tick.
     /// Source: TS `maybeWaitForProviderRateLimit()` → `say("api_req_rate_limit_wait")`
@@ -678,6 +717,51 @@ impl TaskEventEmitter {
             tool_name: tool_name.to_string(),
             tool_id: tool_id.to_string(),
             success,
+        });
+    }
+
+    /// Emit a tool approval required event.
+    ///
+    /// Source: TS `presentAssistantMessage` → `askFollowupQuestion` → user approval flow.
+    /// Emitted when a tool call requires user approval before execution.
+    pub fn emit_tool_approval_required(
+        &self,
+        task_id: &str,
+        tool_name: &str,
+        tool_id: &str,
+        reason: &str,
+    ) {
+        self.emit(&TaskEvent::ToolApprovalRequired {
+            task_id: task_id.to_string(),
+            tool_name: tool_name.to_string(),
+            tool_id: tool_id.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+
+    /// Emit an API request failed event.
+    ///
+    /// Source: TS `attemptApiRequest()` → `ask("api_req_failed")`.
+    /// Emitted when an API call fails and user interaction is needed
+    /// to decide whether to retry or cancel.
+    pub fn emit_api_request_failed(&self, task_id: &str, error: &str) {
+        self.emit(&TaskEvent::ApiRequestFailed {
+            task_id: task_id.to_string(),
+            error: error.to_string(),
+        });
+    }
+
+    /// Emit a mistake limit reached event.
+    ///
+    /// Source: TS `recursivelyMakeClineRequests()` →
+    /// `ask("mistake_limit_reached")`.
+    /// Emitted when the consecutive mistake limit is reached and
+    /// user interaction is needed to provide guidance.
+    pub fn emit_mistake_limit_reached(&self, task_id: &str, count: usize, limit: usize) {
+        self.emit(&TaskEvent::MistakeLimitReached {
+            task_id: task_id.to_string(),
+            count,
+            limit,
         });
     }
 

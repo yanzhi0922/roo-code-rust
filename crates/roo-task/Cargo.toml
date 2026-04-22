@@ -33,6 +33,10 @@ roo-editor = { path = "../roo-editor" }
 roo-ignore = { path = "../roo-ignore" }
 roo-protect = { path = "../roo-protect" }
 roo-custom-tools = { path = "../roo-custom-tools" }
+roo-prompt = { path = "../roo-prompt" }
+roo-environment = { path = "../roo-environment" }
+roo-config = { path = "../roo-config" }
+roo-modes = { path = "../roo-modes" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
