@@ -109,7 +109,76 @@ impl App {
         tracing::debug!("Terminal registry initialized");
 
         // ── Initialize MCP Hub ──────────────────────────────────────────
-        self.mcp_hub = Some(Arc::new(roo_mcp::McpHub::new()));
+        let workspace_path = self.config.cwd.clone();
+        let settings_path = self.config.global_storage_path.clone();
+        let hub = roo_mcp::McpHub::new_with_paths(
+            Some(workspace_path.clone()),
+            if settings_path.is_empty() { None } else { Some(settings_path) },
+        );
+
+        // Load project-level MCP config (.roo/mcp.json)
+        let project_mcp_path = std::path::Path::new(&self.config.cwd)
+            .join(".roo")
+            .join("mcp.json");
+        if project_mcp_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&project_mcp_path) {
+                match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(config) => {
+                        if let Some(servers) = config.get("mcpServers").and_then(|v| v.as_object()) {
+                            let server_map: std::collections::HashMap<String, serde_json::Value> =
+                                servers.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            if let Err(e) = hub.update_server_connections(
+                                &server_map,
+                                roo_mcp::McpSource::Project,
+                                true,
+                            ).await {
+                                tracing::warn!("Failed to load project MCP servers: {}", e);
+                            } else {
+                                tracing::info!("Loaded {} project MCP servers from {}",
+                                    server_map.len(), project_mcp_path.display());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse project MCP config {}: {}", project_mcp_path.display(), e);
+                    }
+                }
+            }
+        }
+
+        // Load global MCP config (<global_storage>/settings/mcp_settings.json)
+        if !self.config.global_storage_path.is_empty() {
+            let global_mcp_path = std::path::Path::new(&self.config.global_storage_path)
+                .join("settings")
+                .join("mcp_settings.json");
+            if global_mcp_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&global_mcp_path) {
+                    match serde_json::from_str::<serde_json::Value>(&content) {
+                        Ok(config) => {
+                            if let Some(servers) = config.get("mcpServers").and_then(|v| v.as_object()) {
+                                let server_map: std::collections::HashMap<String, serde_json::Value> =
+                                    servers.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                if let Err(e) = hub.update_server_connections(
+                                    &server_map,
+                                    roo_mcp::McpSource::Global,
+                                    true,
+                                ).await {
+                                    tracing::warn!("Failed to load global MCP servers: {}", e);
+                                } else {
+                                    tracing::info!("Loaded {} global MCP servers from {}",
+                                        server_map.len(), global_mcp_path.display());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse global MCP config {}: {}", global_mcp_path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.mcp_hub = Some(Arc::new(hub));
         tracing::debug!("MCP hub initialized");
 
         // ── Initialize Message Queue ────────────────────────────────────
@@ -125,13 +194,35 @@ impl App {
 
         // ── Initialize Skills Manager ───────────────────────────────────
         let mut skills = roo_skills::SkillsManager::new();
-        // Discover skills from project directory
-        let project_skills_dir = std::path::Path::new(&self.config.cwd).join(".roo");
-        let skills_dirs: Vec<(std::path::PathBuf, roo_skills::SkillSource, Option<String>)> = if project_skills_dir.exists() {
-            vec![(project_skills_dir, roo_skills::SkillSource::Project, None)]
-        } else {
-            vec![]
-        };
+        let mut skills_dirs: Vec<(std::path::PathBuf, roo_skills::SkillSource, Option<String>)> = Vec::new();
+
+        // Global skills directory: ~/.roo/skills/
+        if let Some(home) = dirs_home() {
+            let global_skills_dir = std::path::Path::new(&home).join(".roo").join("skills");
+            if global_skills_dir.exists() {
+                skills_dirs.push((global_skills_dir, roo_skills::SkillSource::Global, None));
+            }
+            // Also check ~/.agents/skills/
+            let global_agents_dir = std::path::Path::new(&home).join(".agents").join("skills");
+            if global_agents_dir.exists() {
+                skills_dirs.push((global_agents_dir, roo_skills::SkillSource::Global, None));
+            }
+        }
+
+        // Project skills directory: <cwd>/.roo/skills/
+        let project_skills_dir = std::path::Path::new(&self.config.cwd).join(".roo").join("skills");
+        if project_skills_dir.exists() {
+            skills_dirs.push((project_skills_dir, roo_skills::SkillSource::Project, None));
+        }
+
+        // Mode-specific project skills: <cwd>/.roo/skills-<mode>/
+        let mode_skills_dir = std::path::Path::new(&self.config.cwd)
+            .join(".roo")
+            .join(format!("skills-{}", self.config.mode));
+        if mode_skills_dir.exists() {
+            skills_dirs.push((mode_skills_dir, roo_skills::SkillSource::Project, Some(self.config.mode.clone())));
+        }
+
         if let Err(e) = skills.discover_skills(&skills_dirs).await {
             tracing::warn!("Failed to discover skills: {}", e);
         }
@@ -331,6 +422,13 @@ impl Drop for App {
             drop(state);
         }
     }
+}
+
+/// Get the user's home directory.
+fn dirs_home() -> Option<String> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
 }
 
 #[cfg(test)]

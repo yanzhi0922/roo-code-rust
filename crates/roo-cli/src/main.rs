@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
 
+use roo_app::{App, AppConfig};
 use roo_provider::handler::{CreateMessageMetadata, Provider};
 use roo_provider_anthropic::{AnthropicConfig, AnthropicHandler, AnthropicVertexConfig, AnthropicVertexHandler};
 use roo_provider_openai::{OpenAiConfig, OpenAiHandler};
@@ -162,6 +163,24 @@ async fn main() -> Result<()> {
             .with_context(|| format!("Failed to change working directory to: {dir}"))?;
     }
 
+    // ── Initialize through the App layer ────────────────────────────────
+    // This gives CLI users access to MCP tools, Skills, RooIgnore, etc.
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    let app_config = AppConfig {
+        cwd: cwd.clone(),
+        global_storage_path: home_roo_dir(),
+        mode: "code".to_string(),
+        ..Default::default()
+    };
+
+    let mut app = App::new(app_config);
+    app.initialize().await
+        .context("Failed to initialize App layer")?;
+    tracing::info!("App layer initialized for CLI");
+
     // Load optional config file and merge with CLI flags (CLI takes priority).
     let config = load_config(&cli)?;
 
@@ -170,26 +189,8 @@ async fn main() -> Result<()> {
     let handler = build_handler(provider_name, &config)
         .context("Failed to create provider handler")?;
 
-    // Build the system prompt.
-    let system_prompt = config.system_prompt.unwrap_or_else(|| {
-        roo_prompt::build_system_prompt(
-            &std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| ".".into()),
-            "code",
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            &[],
-            &os_info(),
-            &shell_name(),
-            &home_dir(),
-        )
-    });
+    // Build the system prompt using the App layer (includes MCP/Skills awareness).
+    let system_prompt = config.system_prompt.unwrap_or_else(|| app.build_system_prompt());
 
     // Build tool definitions (JSON values for the API).
     let tool_defs = get_native_tools(NativeToolsOptions::default());
@@ -198,15 +199,17 @@ async fn main() -> Result<()> {
         .map(|td| serde_json::to_value(td).unwrap_or_default())
         .collect();
 
-    // Build the terminal registry and tool dispatcher.
-    let registry = Arc::new(TerminalRegistry::new());
-    let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Use the terminal registry from the App layer.
+    let registry = app.terminal_registry()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(TerminalRegistry::new()));
+    let working_dir = PathBuf::from(app.cwd());
     let output_dir = std::env::temp_dir().join("roo-cli-output");
     std::fs::create_dir_all(&output_dir).ok();
 
     let dispatcher = default_dispatcher_with_terminal(registry, output_dir, "code");
 
-    if cli.interactive {
+    let result = if cli.interactive {
         run_interactive(&*handler, &system_prompt, &tools_json, &dispatcher, &working_dir).await
     } else if let Some(msg) = &cli.message {
         run_single(
@@ -222,7 +225,11 @@ async fn main() -> Result<()> {
         anyhow::bail!(
             "Provide --message <text> for single-shot mode or --interactive for REPL mode."
         )
-    }
+    };
+
+    // Clean up App resources.
+    let _ = app.dispose().await;
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,28 +1284,6 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
-/// Best-effort OS info string.
-fn os_info() -> String {
-    if cfg!(windows) {
-        "Windows".to_string()
-    } else if cfg!(target_os = "macos") {
-        "macOS".to_string()
-    } else if cfg!(target_os = "linux") {
-        "Linux".to_string()
-    } else {
-        "Unknown".to_string()
-    }
-}
-
-/// Best-effort shell name.
-fn shell_name() -> String {
-    if cfg!(windows) {
-        "cmd.exe".to_string()
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
-    }
-}
-
 /// Best-effort home directory.
 fn home_dir() -> String {
     if cfg!(windows) {
@@ -1306,4 +1291,12 @@ fn home_dir() -> String {
     } else {
         std::env::var("HOME").unwrap_or_else(|_| ".".into())
     }
+}
+
+/// Best-effort global .roo directory path for storage.
+fn home_roo_dir() -> String {
+    let home = home_dir();
+    let mut path = std::path::PathBuf::from(&home);
+    path.push(".roo");
+    path.to_string_lossy().to_string()
 }

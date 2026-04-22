@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 roo-types = { path = "../roo-types" }
+roo-app = { path = "../roo-app" }
 roo-provider = { path = "../roo-provider" }
 roo-provider-anthropic = { path = "../roo-provider-anthropic" }
 roo-provider-openai = { path = "../roo-provider-openai" }
