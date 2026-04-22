@@ -543,6 +543,30 @@ impl TaskEngine {
         self.assistant_message_content.clear();
     }
 
+    /// Replace an assistant message content block at the given index.
+    ///
+    /// Source: `src/core/task/Task.ts` — streaming tool call finalization
+    /// replaces partial tool_use blocks with complete ones at tracked indices.
+    pub fn update_assistant_message_content(&mut self, index: usize, content: AssistantMessageContent) {
+        if index < self.assistant_message_content.len() {
+            self.assistant_message_content[index] = content;
+        }
+    }
+
+    /// Mark the assistant message content block at the given index as not partial.
+    ///
+    /// Source: `src/core/task/Task.ts` L2968-2971 — when finalizeStreamingToolCall
+    /// returns null (malformed JSON), the existing tool_use is marked non-partial.
+    pub fn mark_assistant_content_not_partial(&mut self, index: usize) {
+        if index < self.assistant_message_content.len() {
+            match &mut self.assistant_message_content[index] {
+                AssistantMessageContent::Text { partial, .. } => *partial = false,
+                AssistantMessageContent::ToolUse(tu) => tu.partial = false,
+                AssistantMessageContent::McpToolUse(mcp) => mcp.partial = false,
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // User message content
     // -----------------------------------------------------------------------

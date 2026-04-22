@@ -545,7 +545,13 @@ pub fn add_custom_instructions(
     // Add mode-specific rules first if they exist
     let mode_rule_trimmed = mode_rule_content.trim();
     if !mode_rule_trimmed.is_empty() {
-        if used_rule_file.contains(&format!("rules-{}", mode)) {
+        // Match TS: usedRuleFile.includes(path.join(".roo", `rules-${mode}`))
+        // path.join(".roo", "rules-{mode}") produces ".roo/rules-{mode}" on Unix,
+        // ".roo\rules-{mode}" on Windows. None of the possible usedRuleFile values
+        // contain this substring, so this check always fails (matching TS behavior).
+        let roo_rules_mode_unix = format!(".roo/rules-{}", mode);
+        let roo_rules_mode_win = format!(".roo\\rules-{}", mode);
+        if used_rule_file.contains(&roo_rules_mode_unix) || used_rule_file.contains(&roo_rules_mode_win) {
             rules.push(mode_rule_trimmed.to_string());
         } else {
             rules.push(format!("# Rules from {}:\n{}", used_rule_file, mode_rule_trimmed));

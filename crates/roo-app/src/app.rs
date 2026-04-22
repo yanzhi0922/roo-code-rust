@@ -300,6 +300,28 @@ impl App {
                 .unwrap_or_else(|_| "~".to_string()),
         )
     }
+
+    /// Set custom instructions for the current session.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `customInstructions`
+    pub async fn set_custom_instructions(&self, text: &str) {
+        let mut state = self.state.write().await;
+        state.custom_instructions = if text.is_empty() { None } else { Some(text.to_string()) };
+    }
+
+    /// Reset all application state.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `resetState`
+    pub async fn reset_state(&self) -> AppResult<()> {
+        let mut state = self.state.write().await;
+        state.current_mode = "code".to_string();
+        state.initialized = false;
+        state.task_running = false;
+        state.disposed = false;
+        state.custom_instructions = None;
+        tracing::info!("App state reset");
+        Ok(())
+    }
 }
 
 impl Drop for App {

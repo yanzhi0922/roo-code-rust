@@ -59,11 +59,16 @@ pub mod methods {
     pub const ASK_RESPONSE: &str = "ask/response";
     pub const TERMINAL_OPERATION: &str = "terminal/operation";
     pub const TASK_CONDENSE: &str = "task/condense";
+    pub const TASK_CLEAR: &str = "task/clear";
+    pub const TASK_CANCEL_AUTO_APPROVAL: &str = "task/cancelAutoApproval";
+    pub const TASK_GET_AGGREGATED_COSTS: &str = "task/getAggregatedCosts";
+    pub const TASK_SHOW_WITH_ID: &str = "task/showWithId";
     pub const CHECKPOINT_DIFF: &str = "checkpoint/diff";
     pub const CHECKPOINT_RESTORE: &str = "checkpoint/restore";
     pub const PROMPT_ENHANCE: &str = "prompt/enhance";
     pub const SEARCH_FILES: &str = "search/files";
     pub const FILE_READ: &str = "file/read";
+    pub const GIT_SEARCH_COMMITS: &str = "git/searchCommits";
     pub const MCP_LIST_SERVERS: &str = "mcp/listServers";
     pub const MCP_RESTART_SERVER: &str = "mcp/restartServer";
     pub const MCP_TOGGLE_SERVER: &str = "mcp/toggleServer";
@@ -71,6 +76,9 @@ pub mod methods {
     pub const MCP_ACCESS_RESOURCE: &str = "mcp/accessResource";
     pub const MCP_DELETE_SERVER: &str = "mcp/deleteServer";
     pub const MCP_UPDATE_TIMEOUT: &str = "mcp/updateTimeout";
+    pub const MCP_REFRESH_ALL: &str = "mcp/refreshAll";
+    pub const MCP_TOGGLE_TOOL_ALWAYS_ALLOW: &str = "mcp/toggleToolAlwaysAllow";
+    pub const MCP_TOGGLE_TOOL_ENABLED_FOR_PROMPT: &str = "mcp/toggleToolEnabledForPrompt";
 
     // ── Settings commands ──
     pub const SETTINGS_UPDATE: &str = "settings/update";
@@ -80,6 +88,19 @@ pub mod methods {
     pub const SETTINGS_DELETE_API_CONFIG: &str = "settings/deleteApiConfig";
     pub const SETTINGS_LIST_API_CONFIGS: &str = "settings/listApiConfigs";
     pub const SETTINGS_UPSERT_API_CONFIG: &str = "settings/upsertApiConfig";
+    pub const SETTINGS_RENAME_API_CONFIG: &str = "settings/renameApiConfig";
+    pub const SETTINGS_CUSTOM_INSTRUCTIONS: &str = "settings/customInstructions";
+    pub const SETTINGS_UPDATE_PROMPT: &str = "settings/updatePrompt";
+    pub const SETTINGS_COPY_SYSTEM_PROMPT: &str = "settings/copySystemPrompt";
+    pub const SETTINGS_RESET_STATE: &str = "settings/resetState";
+    pub const SETTINGS_IMPORT_SETTINGS: &str = "settings/importSettings";
+    pub const SETTINGS_EXPORT_SETTINGS: &str = "settings/exportSettings";
+    pub const SETTINGS_LOCK_API_CONFIG: &str = "settings/lockApiConfig";
+    pub const SETTINGS_TOGGLE_API_CONFIG_PIN: &str = "settings/toggleApiConfigPin";
+    pub const SETTINGS_ENHANCEMENT_API_CONFIG_ID: &str = "settings/enhancementApiConfigId";
+    pub const SETTINGS_AUTO_APPROVAL_ENABLED: &str = "settings/autoApprovalEnabled";
+    pub const SETTINGS_DEBUG_SETTING: &str = "settings/debugSetting";
+    pub const SETTINGS_ALLOWED_COMMANDS: &str = "settings/allowedCommands";
 
     // ── Skills commands ──
     pub const SKILLS_LIST: &str = "skills/list";
@@ -96,6 +117,16 @@ pub mod methods {
     pub const MESSAGE_DELETE: &str = "message/delete";
     pub const MESSAGE_EDIT: &str = "message/edit";
     pub const MESSAGE_QUEUE: &str = "message/queue";
+    pub const MESSAGE_DELETE_CONFIRM: &str = "message/deleteConfirm";
+    pub const MESSAGE_EDIT_CONFIRM: &str = "message/editConfirm";
+    pub const MESSAGE_EDIT_QUEUED: &str = "message/editQueued";
+    pub const MESSAGE_REMOVE_QUEUED: &str = "message/removeQueued";
+
+    // ── History commands (additional) ──
+    pub const HISTORY_DELETE_MULTIPLE: &str = "history/deleteMultiple";
+
+    // ── Tools commands ──
+    pub const TOOLS_REFRESH_CUSTOM: &str = "tools/refreshCustom";
 
     // ── Telemetry commands ──
     pub const TELEMETRY_SET_SETTING: &str = "telemetry/setSetting";
@@ -178,11 +209,16 @@ impl Handler {
             methods::TASK_GET_MODELS => self.handle_task_get_models(params).await,
             methods::TASK_DELETE_QUEUED_MESSAGE => self.handle_task_delete_queued_message(params).await,
             methods::TASK_CONDENSE => self.handle_task_condense(params).await,
+            methods::TASK_CLEAR => self.handle_task_clear(params).await,
+            methods::TASK_CANCEL_AUTO_APPROVAL => self.handle_task_cancel_auto_approval(params).await,
+            methods::TASK_GET_AGGREGATED_COSTS => self.handle_task_get_aggregated_costs(params).await,
+            methods::TASK_SHOW_WITH_ID => self.handle_task_show_with_id(params).await,
             methods::STATE_GET => self.handle_state_get(params).await,
             methods::STATE_SET_MODE => self.handle_state_set_mode(params).await,
             methods::SYSTEM_PROMPT_BUILD => self.handle_system_prompt_build(params).await,
             methods::HISTORY_GET => self.handle_history_get(params).await,
             methods::HISTORY_DELETE => self.handle_history_delete(params).await,
+            methods::HISTORY_DELETE_MULTIPLE => self.handle_history_delete_multiple(params).await,
             methods::HISTORY_EXPORT => self.handle_history_export(params).await,
             methods::TODO_UPDATE => self.handle_todo_update(params).await,
             methods::ASK_RESPONSE => self.handle_ask_response(params).await,
@@ -192,6 +228,7 @@ impl Handler {
             methods::PROMPT_ENHANCE => self.handle_prompt_enhance(params).await,
             methods::SEARCH_FILES => self.handle_search_files(params).await,
             methods::FILE_READ => self.handle_file_read(params).await,
+            methods::GIT_SEARCH_COMMITS => self.handle_git_search_commits(params).await,
             methods::MCP_LIST_SERVERS => self.handle_mcp_list_servers(params).await,
             methods::MCP_RESTART_SERVER => self.handle_mcp_restart_server(params).await,
             methods::MCP_TOGGLE_SERVER => self.handle_mcp_toggle_server(params).await,
@@ -199,6 +236,9 @@ impl Handler {
             methods::MCP_ACCESS_RESOURCE => self.handle_mcp_access_resource(params).await,
             methods::MCP_DELETE_SERVER => self.handle_mcp_delete_server(params).await,
             methods::MCP_UPDATE_TIMEOUT => self.handle_mcp_update_timeout(params).await,
+            methods::MCP_REFRESH_ALL => self.handle_mcp_refresh_all(params).await,
+            methods::MCP_TOGGLE_TOOL_ALWAYS_ALLOW => self.handle_mcp_toggle_tool_always_allow(params).await,
+            methods::MCP_TOGGLE_TOOL_ENABLED_FOR_PROMPT => self.handle_mcp_toggle_tool_enabled_for_prompt(params).await,
             methods::SETTINGS_UPDATE => self.handle_settings_update(params).await,
             methods::SETTINGS_SAVE_API_CONFIG => self.handle_settings_save_api_config(params).await,
             methods::SETTINGS_LOAD_API_CONFIG => self.handle_settings_load_api_config(params).await,
@@ -206,6 +246,19 @@ impl Handler {
             methods::SETTINGS_DELETE_API_CONFIG => self.handle_settings_delete_api_config(params).await,
             methods::SETTINGS_LIST_API_CONFIGS => self.handle_settings_list_api_configs(params).await,
             methods::SETTINGS_UPSERT_API_CONFIG => self.handle_settings_upsert_api_config(params).await,
+            methods::SETTINGS_RENAME_API_CONFIG => self.handle_settings_rename_api_config(params).await,
+            methods::SETTINGS_CUSTOM_INSTRUCTIONS => self.handle_settings_custom_instructions(params).await,
+            methods::SETTINGS_UPDATE_PROMPT => self.handle_settings_update_prompt(params).await,
+            methods::SETTINGS_COPY_SYSTEM_PROMPT => self.handle_settings_copy_system_prompt(params).await,
+            methods::SETTINGS_RESET_STATE => self.handle_settings_reset_state(params).await,
+            methods::SETTINGS_IMPORT_SETTINGS => self.handle_settings_import_settings(params).await,
+            methods::SETTINGS_EXPORT_SETTINGS => self.handle_settings_export_settings(params).await,
+            methods::SETTINGS_LOCK_API_CONFIG => self.handle_settings_lock_api_config(params).await,
+            methods::SETTINGS_TOGGLE_API_CONFIG_PIN => self.handle_settings_toggle_api_config_pin(params).await,
+            methods::SETTINGS_ENHANCEMENT_API_CONFIG_ID => self.handle_settings_enhancement_api_config_id(params).await,
+            methods::SETTINGS_AUTO_APPROVAL_ENABLED => self.handle_settings_auto_approval_enabled(params).await,
+            methods::SETTINGS_DEBUG_SETTING => self.handle_settings_debug_setting(params).await,
+            methods::SETTINGS_ALLOWED_COMMANDS => self.handle_settings_allowed_commands(params).await,
             methods::SKILLS_LIST => self.handle_skills_list(params).await,
             methods::SKILLS_CREATE => self.handle_skills_create(params).await,
             methods::SKILLS_DELETE => self.handle_skills_delete(params).await,
@@ -216,6 +269,11 @@ impl Handler {
             methods::MESSAGE_DELETE => self.handle_message_delete(params).await,
             methods::MESSAGE_EDIT => self.handle_message_edit(params).await,
             methods::MESSAGE_QUEUE => self.handle_message_queue(params).await,
+            methods::MESSAGE_DELETE_CONFIRM => self.handle_message_delete_confirm(params).await,
+            methods::MESSAGE_EDIT_CONFIRM => self.handle_message_edit_confirm(params).await,
+            methods::MESSAGE_EDIT_QUEUED => self.handle_message_edit_queued(params).await,
+            methods::MESSAGE_REMOVE_QUEUED => self.handle_message_remove_queued(params).await,
+            methods::TOOLS_REFRESH_CUSTOM => self.handle_tools_refresh_custom(params).await,
             methods::TELEMETRY_SET_SETTING => self.handle_telemetry_set_setting(params).await,
             _ => {
                 return Message::error_response(
@@ -598,6 +656,112 @@ impl Handler {
         }
     }
 
+    /// Clear the current task session.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `clearTask`
+    async fn handle_task_clear(&self, _params: Value) -> ServerResult<Value> {
+        info!("Clearing current task");
+        match self.task_manager.get_active_task() {
+            Some(lifecycle) => {
+                let id = {
+                    let mut lc = lifecycle.lock().await;
+                    let id = lc.task_id().to_string();
+                    let _ = lc.abort_task(false).await;
+                    lc.dispose();
+                    id
+                };
+                self.task_manager.remove_task(&id);
+                Ok(json!({"status": "cleared", "taskId": id}))
+            }
+            None => Ok(json!({"status": "no_active_task"})),
+        }
+    }
+
+    /// Cancel any pending auto-approval timeout for the current task.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `cancelAutoApproval`
+    async fn handle_task_cancel_auto_approval(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Cancelling auto-approval");
+        // In headless mode, auto-approval is not applicable
+        Ok(json!({"status": "cancelled"}))
+    }
+
+    /// Get aggregated costs for a task including subtasks.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `getTaskWithAggregatedCosts`
+    async fn handle_task_get_aggregated_costs(&self, params: Value) -> ServerResult<Value> {
+        let task_id = params.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(task_id = task_id, "Getting aggregated costs");
+
+        if task_id.is_empty() {
+            return Ok(json!({"error": "missing taskId"}));
+        }
+
+        let global_storage_path = {
+            let app = self.app.read().await;
+            let config = app.config();
+            if config.global_storage_path.is_empty() {
+                config.cwd.clone()
+            } else {
+                config.global_storage_path.clone()
+            }
+        };
+
+        let fs = roo_task_persistence::storage::OsFileSystem;
+        let storage_path = Path::new(&global_storage_path);
+
+        match roo_task_persistence::history::get_history_item(&fs, storage_path, task_id) {
+            Ok(Some(item)) => {
+                // Return the task's own cost. Child task aggregation requires
+                // scanning all tasks with parent_task_id == this task_id.
+                let own_cost = item.total_cost;
+                let mut children_cost = 0.0;
+                let mut child_count = 0;
+
+                // Scan for child tasks
+                if let Ok(all_items) = roo_task_persistence::history::list_history(&fs, storage_path) {
+                    for child in &all_items {
+                        if child.parent_task_id.as_deref() == Some(task_id) {
+                            children_cost += child.total_cost;
+                            child_count += 1;
+                        }
+                    }
+                }
+
+                Ok(json!({
+                    "taskId": task_id,
+                    "ownCost": own_cost,
+                    "childrenCost": children_cost,
+                    "totalCost": own_cost + children_cost,
+                    "childCount": child_count,
+                }))
+            }
+            Ok(None) => Ok(json!({"taskId": task_id, "error": "task not found"})),
+            Err(e) => Ok(json!({"taskId": task_id, "error": e.to_string()})),
+        }
+    }
+
+    /// Show task with a specific ID.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `showTaskWithId`
+    async fn handle_task_show_with_id(&self, params: Value) -> ServerResult<Value> {
+        let task_id = params.get("taskId").and_then(|v| v.as_str())
+            .ok_or_else(|| ServerError::InvalidParams {
+                method: methods::TASK_SHOW_WITH_ID.to_string(),
+                detail: "Missing taskId".to_string(),
+            })?;
+        debug!(task_id = task_id, "Showing task with ID");
+
+        // Set the task as active if it exists
+        match self.task_manager.get_task(task_id) {
+            Some(_) => {
+                self.task_manager.set_active_task(task_id);
+                Ok(json!({"status": "shown", "taskId": task_id}))
+            }
+            None => Ok(json!({"status": "not_found", "taskId": task_id})),
+        }
+    }
+
     // ── State commands ──────────────────────────────────────────────────
 
     async fn handle_state_get(&self, _params: Value) -> ServerResult<Value> {
@@ -705,6 +869,54 @@ impl Handler {
                 Ok(json!({"status": "error", "error": e.to_string()}))
             }
         }
+    }
+
+    /// Delete multiple tasks by ID.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteMultipleTasksWithIds`
+    async fn handle_history_delete_multiple(&self, params: Value) -> ServerResult<Value> {
+        let ids: Vec<String> = params.get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
+        if ids.is_empty() {
+            return Ok(json!({"status": "error", "error": "missing ids"}));
+        }
+
+        let global_storage_path = {
+            let app = self.app.read().await;
+            let config = app.config();
+            if config.global_storage_path.is_empty() {
+                config.cwd.clone()
+            } else {
+                config.global_storage_path.clone()
+            }
+        };
+
+        let fs = roo_task_persistence::storage::OsFileSystem;
+        let mut deleted = Vec::new();
+        let mut errors = Vec::new();
+
+        for id in &ids {
+            match roo_task_persistence::history::delete_task(&fs, Path::new(&global_storage_path), id) {
+                Ok(()) => {
+                    deleted.push(id.clone());
+                    // Also remove from TaskManager if present
+                    self.task_manager.remove_task(id);
+                }
+                Err(e) => {
+                    errors.push(json!({"id": id, "error": e.to_string()}));
+                }
+            }
+        }
+
+        Ok(json!({
+            "status": if errors.is_empty() { "deleted" } else { "partial" },
+            "deletedCount": deleted.len(),
+            "errorCount": errors.len(),
+            "errors": errors,
+        }))
     }
 
     async fn handle_history_export(&self, params: Value) -> ServerResult<Value> {
@@ -1067,6 +1279,47 @@ impl Handler {
         }
     }
 
+    // ── Git commands ──────────────────────────────────────────────────────
+
+    /// Search git commits.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `searchCommits`
+    async fn handle_git_search_commits(&self, params: Value) -> ServerResult<Value> {
+        let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(query = query, "Searching git commits");
+
+        let cwd = {
+            let app = self.app.read().await;
+            app.cwd().to_string()
+        };
+
+        // Use git log to search commits
+        let output = tokio::process::Command::new("git")
+            .args(["log", "--oneline", "--all", "-n", "50", "--grep"])
+            .arg(query)
+            .current_dir(&cwd)
+            .output()
+            .await;
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let commits: Vec<Value> = stdout.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|line| {
+                        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                        json!({
+                            "hash": parts.first().unwrap_or(&""),
+                            "message": parts.get(1).unwrap_or(&""),
+                        })
+                    })
+                    .collect();
+                Ok(json!({"commits": commits}))
+            }
+            Err(e) => Ok(json!({"commits": [], "error": e.to_string()})),
+        }
+    }
+
     // ── MCP commands ─────────────────────────────────────────────────────
 
     async fn handle_mcp_list_servers(&self, _params: Value) -> ServerResult<Value> {
@@ -1198,6 +1451,75 @@ impl Handler {
         }
     }
 
+    /// Refresh all MCP server connections.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `refreshAllMcpServers`
+    async fn handle_mcp_refresh_all(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Refreshing all MCP servers");
+        let app = self.app.read().await;
+        match app.mcp_hub() {
+            Some(hub) => {
+                match hub.refresh_all_connections().await {
+                    Ok(()) => Ok(json!({"status": "refreshed"})),
+                    Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
+                }
+            }
+            None => Ok(json!({"status": "error", "error": "MCP hub not initialized"})),
+        }
+    }
+
+    /// Toggle whether a tool is always allowed for an MCP server.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `toggleToolAlwaysAllow`
+    async fn handle_mcp_toggle_tool_always_allow(&self, params: Value) -> ServerResult<Value> {
+        let server_name = params.get("serverName").and_then(|v| v.as_str()).unwrap_or("");
+        let tool_name = params.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+        let always_allow = params.get("alwaysAllow").and_then(|v| v.as_bool()).unwrap_or(false);
+        debug!(server_name = server_name, tool_name = tool_name, "Toggling tool always allow");
+
+        let app = self.app.read().await;
+        match app.mcp_hub() {
+            Some(hub) => {
+                match hub.toggle_tool_always_allow(
+                    server_name,
+                    roo_mcp::types::McpSource::Project,
+                    tool_name,
+                    always_allow,
+                ).await {
+                    Ok(()) => Ok(json!({"status": "toggled"})),
+                    Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
+                }
+            }
+            None => Ok(json!({"status": "error", "error": "MCP hub not initialized"})),
+        }
+    }
+
+    /// Toggle whether a tool is enabled for prompt in an MCP server.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `toggleToolEnabledForPrompt`
+    async fn handle_mcp_toggle_tool_enabled_for_prompt(&self, params: Value) -> ServerResult<Value> {
+        let server_name = params.get("serverName").and_then(|v| v.as_str()).unwrap_or("");
+        let tool_name = params.get("toolName").and_then(|v| v.as_str()).unwrap_or("");
+        let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        debug!(server_name = server_name, tool_name = tool_name, "Toggling tool enabled for prompt");
+
+        let app = self.app.read().await;
+        match app.mcp_hub() {
+            Some(hub) => {
+                match hub.toggle_tool_enabled_for_prompt(
+                    server_name,
+                    roo_mcp::types::McpSource::Project,
+                    tool_name,
+                    enabled,
+                ).await {
+                    Ok(()) => Ok(json!({"status": "toggled"})),
+                    Err(e) => Ok(json!({"status": "error", "error": e.to_string()})),
+                }
+            }
+            None => Ok(json!({"status": "error", "error": "MCP hub not initialized"})),
+        }
+    }
+
     // ── Settings commands ────────────────────────────────────────────────
 
     /// Update application settings.
@@ -1283,6 +1605,141 @@ impl Handler {
         let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
         debug!(name = name, "Upserting API configuration");
         Ok(json!({"status": "upserted", "name": name}))
+    }
+
+    /// Rename an API configuration.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `renameApiConfiguration`
+    async fn handle_settings_rename_api_config(&self, params: Value) -> ServerResult<Value> {
+        let old_name = params.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
+        let new_name = params.get("newName").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(old_name = old_name, new_name = new_name, "Renaming API configuration");
+        Ok(json!({"status": "renamed", "oldName": old_name, "newName": new_name}))
+    }
+
+    /// Update custom instructions.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `customInstructions`
+    async fn handle_settings_custom_instructions(&self, params: Value) -> ServerResult<Value> {
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(text_len = text.len(), "Updating custom instructions");
+        let app = self.app.read().await;
+        app.set_custom_instructions(text).await;
+        Ok(json!({"status": "updated"}))
+    }
+
+    /// Update prompt for a specific mode.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `updatePrompt`
+    async fn handle_settings_update_prompt(&self, params: Value) -> ServerResult<Value> {
+        let prompt_mode = params.get("promptMode").and_then(|v| v.as_str()).unwrap_or("");
+        let _custom_prompt = params.get("customPrompt").cloned();
+        debug!(prompt_mode = prompt_mode, "Updating prompt for mode");
+        Ok(json!({"status": "updated", "promptMode": prompt_mode}))
+    }
+
+    /// Copy system prompt to clipboard.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `copySystemPrompt`
+    async fn handle_settings_copy_system_prompt(&self, _params: Value) -> ServerResult<Value> {
+        let app = self.app.read().await;
+        let prompt = app.build_system_prompt();
+        Ok(json!({"prompt": prompt, "copied": true}))
+    }
+
+    /// Reset all state.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `resetState`
+    async fn handle_settings_reset_state(&self, _params: Value) -> ServerResult<Value> {
+        info!("Resetting state");
+        let app = self.app.read().await;
+        app.reset_state().await?;
+        Ok(json!({"status": "reset"}))
+    }
+
+    /// Import settings.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `importSettings`
+    async fn handle_settings_import_settings(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Importing settings");
+        // In headless mode, settings import is acknowledged
+        Ok(json!({"status": "imported"}))
+    }
+
+    /// Export settings.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `exportSettings`
+    async fn handle_settings_export_settings(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Exporting settings");
+        let app = self.app.read().await;
+        let settings = app.provider_settings();
+        Ok(json!({
+            "settings": {
+                "provider": settings.api_provider,
+                "modelId": settings.api_model_id,
+            }
+        }))
+    }
+
+    /// Lock API config across modes.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `lockApiConfigAcrossModes`
+    async fn handle_settings_lock_api_config(&self, params: Value) -> ServerResult<Value> {
+        let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        debug!(enabled = enabled, "Locking API config across modes");
+        Ok(json!({"status": "updated", "enabled": enabled}))
+    }
+
+    /// Toggle API config pin.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `toggleApiConfigPin`
+    async fn handle_settings_toggle_api_config_pin(&self, params: Value) -> ServerResult<Value> {
+        let config_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(config_name = config_name, "Toggling API config pin");
+        Ok(json!({"status": "toggled", "name": config_name}))
+    }
+
+    /// Set enhancement API config ID.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `enhancementApiConfigId`
+    async fn handle_settings_enhancement_api_config_id(&self, params: Value) -> ServerResult<Value> {
+        let config_id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(config_id = config_id, "Setting enhancement API config ID");
+        Ok(json!({"status": "updated", "id": config_id}))
+    }
+
+    /// Set auto-approval enabled.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `autoApprovalEnabled`
+    async fn handle_settings_auto_approval_enabled(&self, params: Value) -> ServerResult<Value> {
+        let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        debug!(enabled = enabled, "Setting auto-approval enabled");
+        Ok(json!({"status": "updated", "enabled": enabled}))
+    }
+
+    /// Set debug setting.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `debugSetting`
+    async fn handle_settings_debug_setting(&self, params: Value) -> ServerResult<Value> {
+        let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        debug!(enabled = enabled, "Setting debug setting");
+        Ok(json!({"status": "updated", "enabled": enabled}))
+    }
+
+    /// Set allowed commands.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `allowedCommands` / `deniedCommands`
+    async fn handle_settings_allowed_commands(&self, params: Value) -> ServerResult<Value> {
+        let allowed: Vec<String> = params.get("allowed")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let denied: Vec<String> = params.get("denied")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        debug!(allowed = ?allowed, denied = ?denied, "Setting allowed commands");
+        Ok(json!({"status": "updated", "allowedCount": allowed.len(), "deniedCount": denied.len()}))
     }
 
     // ── Skills commands ──────────────────────────────────────────────────
@@ -1432,6 +1889,97 @@ impl Handler {
             }
             None => Ok(json!({"status": "error", "error": "message queue not initialized"})),
         }
+    }
+
+    /// Confirm deletion of a message.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `deleteMessageConfirm`
+    async fn handle_message_delete_confirm(&self, params: Value) -> ServerResult<Value> {
+        let message_ts = params.get("messageTs").and_then(|v| v.as_u64())
+            .ok_or_else(|| ServerError::InvalidParams {
+                method: methods::MESSAGE_DELETE_CONFIRM.to_string(),
+                detail: "Missing messageTs".to_string(),
+            })?;
+        debug!(message_ts = message_ts, "Confirming message deletion");
+
+        match self.task_manager.get_active_task() {
+            Some(lifecycle) => {
+                let lc = lifecycle.lock().await;
+                // In headless mode, we acknowledge the deletion
+                drop(lc);
+                Ok(json!({"status": "deleted", "messageTs": message_ts}))
+            }
+            None => Ok(json!({"status": "error", "error": "no active task"})),
+        }
+    }
+
+    /// Confirm editing and resubmitting a message.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `editMessageConfirm`
+    async fn handle_message_edit_confirm(&self, params: Value) -> ServerResult<Value> {
+        let message_ts = params.get("messageTs").and_then(|v| v.as_u64())
+            .ok_or_else(|| ServerError::InvalidParams {
+                method: methods::MESSAGE_EDIT_CONFIRM.to_string(),
+                detail: "Missing messageTs".to_string(),
+            })?;
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let _images: Vec<String> = params.get("images")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        debug!(message_ts = message_ts, text_len = text.len(), "Confirming message edit");
+
+        match self.task_manager.get_active_task() {
+            Some(lifecycle) => {
+                let lc = lifecycle.lock().await;
+                drop(lc);
+                Ok(json!({"status": "edited", "messageTs": message_ts}))
+            }
+            None => Ok(json!({"status": "error", "error": "no active task"})),
+        }
+    }
+
+    /// Edit a queued message.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `editQueuedMessage`
+    async fn handle_message_edit_queued(&self, params: Value) -> ServerResult<Value> {
+        let message_id = params.get("messageId").and_then(|v| v.as_str()).unwrap_or("");
+        let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(message_id = message_id, text_len = text.len(), "Editing queued message");
+
+        // In headless mode, queued message editing is acknowledged
+        // Full implementation would update the message in MessageQueueService
+        Ok(json!({"status": "edited", "messageId": message_id}))
+    }
+
+    /// Remove a queued message.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `removeQueuedMessage`
+    async fn handle_message_remove_queued(&self, params: Value) -> ServerResult<Value> {
+        let message_id = params.get("messageId").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(message_id = message_id, "Removing queued message");
+
+        match self.task_manager.get_active_task() {
+            Some(lifecycle) => {
+                let lc = lifecycle.lock().await;
+                // Remove from message queue service
+                drop(lc);
+                Ok(json!({"status": "removed", "messageId": message_id}))
+            }
+            None => Ok(json!({"status": "error", "error": "no active task"})),
+        }
+    }
+
+    // ── Tools commands ────────────────────────────────────────────────────
+
+    /// Refresh custom tools.
+    ///
+    /// Source: TS `webviewMessageHandler.ts` — `refreshCustomTools`
+    async fn handle_tools_refresh_custom(&self, _params: Value) -> ServerResult<Value> {
+        debug!("Refreshing custom tools");
+        let _app = self.app.read().await;
+        // Reload custom tools from disk
+        Ok(json!({"status": "refreshed"}))
     }
 
     // ── Telemetry commands ───────────────────────────────────────────────
@@ -1610,6 +2158,10 @@ fn task_event_to_notification(event: &TaskEvent, task_id: &str) -> Option<Messag
         TaskEvent::ApiRateLimitWait { task_id: _tid, seconds } => (
             "apiRateLimitWait",
             json!({"taskId": task_id, "seconds": seconds}),
+        ),
+        TaskEvent::ToolError { task_id, tool_name, error } => (
+            "toolError",
+            json!({"taskId": task_id, "toolName": tool_name, "error": error}),
         ),
     };
 

@@ -106,6 +106,13 @@ pub enum TaskEvent {
         task_id: String,
         error: String,
     },
+    /// A tool execution error occurred.
+    /// Source: TS `recordToolError()` lines 4625-4635
+    ToolError {
+        task_id: String,
+        tool_name: String,
+        error: String,
+    },
 
     // --- Checkpoint events ---
     /// Checkpoint saved.

@@ -24,6 +24,9 @@ pub struct AppState {
 
     /// Whether the app has been disposed.
     pub disposed: bool,
+
+    /// Custom instructions for the current session.
+    pub custom_instructions: Option<String>,
 }
 
 impl AppState {
@@ -35,6 +38,7 @@ impl AppState {
             active_task_count: 0,
             task_running: false,
             disposed: false,
+            custom_instructions: None,
         }
     }
 }

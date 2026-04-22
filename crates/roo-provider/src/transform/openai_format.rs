@@ -497,12 +497,23 @@ pub fn convert_to_openai_messages(
                     })
                     .collect();
 
-                // Build message
+                // Build message with reasoning_details BEFORE tool_calls to preserve
+                // the order expected by providers like Roo. Property order matters
+                // when sending messages back to some APIs.
                 let mut base_message = json!({
                     "role": "assistant",
                     // Use empty string instead of undefined for providers like Gemini
+                    // that require every message to have content in the "parts" field
                     "content": content.unwrap_or_default()
                 });
+
+                // Pass through reasoning_details to preserve the original shape from the API.
+                // The `id` field is stripped from openai-responses-v1 blocks (see map_reasoning_details).
+                if let Some(ref details) = anthropic_message.reasoning_details {
+                    if let Some(mapped) = map_reasoning_details(details) {
+                        base_message["reasoning_details"] = Value::Array(mapped);
+                    }
+                }
 
                 // Cannot be an empty array. API expects minimum length 1
                 if !tool_calls.is_empty() {
