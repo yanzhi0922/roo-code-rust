@@ -1,4 +1,4 @@
-//! Shared Responses API logic for OpenAI Native and Codex providers.
+﻿//! Shared Responses API logic for OpenAI Native and Codex providers.
 //!
 //! This module contains the common functionality used by both
 //! [`crate::handler::OpenAiNativeHandler`] and [`crate::codex_handler::OpenAiCodexHandler`]:
@@ -567,6 +567,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

@@ -1,4 +1,4 @@
-#![allow(unused_assignments)]
+﻿#![allow(unused_assignments)]
 //! Core agent loop implementation — rewritten to faithfully replicate
 //! `.research/Roo-Code/src/core/task/Task.ts`.
 //!
@@ -13,7 +13,7 @@
 //! | `maybe_wait_for_rate_limit()`     | `maybeWaitForProviderRateLimit()` | 3959–3985   |
 //! | `handle_context_window_exceeded_error()` | `handleContextWindowExceededError()` | 3828–3951 |
 //! | `get_system_prompt()`             | `getSystemPrompt()`               | 3744–3819   |
-//! | `build_clean_conversation_history()` | `buildCleanConversationHistory()` | 4458–4598 |
+//! | `build_clean_conversation_history_from(&agent.engine.api_conversation_history())` | `buildCleanConversationHistory()` | 4458–4598 |
 //!
 //! ## Key design decisions
 //!
@@ -47,6 +47,77 @@ use crate::present_assistant_message::PresentAssistantMessage;
 use crate::stream_parser::{ParsedStreamContent, ParsedToolCall, StreamParser};
 use crate::tool_dispatcher::{ToolContext, ToolDispatcher, ToolExecutionResult};
 use crate::types::{StreamEvent, TaskError, TaskResult, TaskState};
+
+// ===========================================================================
+// merge_consecutive_api_messages — TS line 4198
+// ===========================================================================
+
+/// Merge consecutive messages with the same role into a single message.
+///
+/// Source: `src/core/task/Task.ts` — `mergeConsecutiveApiMessages()`
+///
+/// This is used for API-only message preparation. Consecutive user messages
+/// are merged by combining their content blocks, reducing the number of
+/// messages sent to the API. Summary messages are never merged.
+///
+/// # Arguments
+/// * `messages` - The conversation history messages
+/// * `roles` - Which roles should be merged when consecutive (typically just "user")
+fn merge_consecutive_api_messages(
+    messages: &[roo_types::api::ApiMessage],
+    roles: &[roo_types::api::MessageRole],
+) -> Vec<roo_types::api::ApiMessage> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+
+    let mut result: Vec<roo_types::api::ApiMessage> = Vec::with_capacity(messages.len());
+
+    for msg in messages {
+        // Never merge summary messages
+        if msg.is_summary.unwrap_or(false) {
+            result.push(msg.clone());
+            continue;
+        }
+
+        // Check if this message should be merged with the previous one
+        if let Some(last) = result.last_mut() {
+            if last.role == msg.role
+                && roles.contains(&msg.role)
+                && !last.is_summary.unwrap_or(false)
+            {
+                // Merge content blocks
+                last.content.extend(msg.content.iter().cloned());
+                continue;
+            }
+        }
+
+        result.push(msg.clone());
+    }
+
+    result
+}
+
+// ===========================================================================
+// format_reasoning_text — TS line 2834-2848
+// ===========================================================================
+
+/// Format reasoning text by adding line breaks before `**Title**` patterns.
+///
+/// Source: `src/core/task/Task.ts` L2834-2848
+///
+/// Detects patterns like `...end of sentence.**Title Here**` and adds
+/// line breaks before the `**Title**` to improve readability.
+fn format_reasoning_text(reasoning: &str) -> String {
+    if !reasoning.contains("**") {
+        return reasoning.to_string();
+    }
+
+    // Add line breaks before **Title** patterns that appear after sentence endings
+    // Regex: ([.!?])\*\*([^\*\n]+)\*\* → $1\n\n**$2**
+    let re = regex::Regex::new(r"([.!?])\*\*([^\*\n]+)\*\*").unwrap();
+    re.replace_all(reasoning, "$1\n\n**$2**").to_string()
+}
 
 // ===========================================================================
 // ApprovalDecision
@@ -704,8 +775,18 @@ impl AgentLoop {
             // ---------------------------------------------------------------
             // Step 7: Build messages and tools
             // TS: build messages from apiConversationHistory
+            // TS L4198: mergeConsecutiveApiMessages (merge consecutive user messages)
+            // TS L4199: maybeRemoveImageBlocks (remove images if model doesn't support)
             // ---------------------------------------------------------------
-            let clean_history = self.build_clean_conversation_history();
+            let clean_history = {
+                let history = self.engine.api_conversation_history();
+                // TS: merge consecutive user messages for API only
+                let merged = merge_consecutive_api_messages(history, &[roo_types::api::MessageRole::User]);
+                // TS: remove image blocks if model doesn't support images
+                let (_, model_info) = self.provider.get_model();
+                let without_images = roo_provider::transform::maybe_remove_image_blocks(merged, &model_info);
+                self.build_clean_conversation_history_from(&without_images)
+            };
             let messages = self.message_builder.build_api_messages(
                 &clean_history,
                 None,
@@ -803,6 +884,7 @@ impl AgentLoop {
             let mut stream_rx = stream_rx;
             let mut parser = StreamParser::new();
             let mut assistant_text = String::new();
+            let mut reasoning_message = String::new(); // TS: reasoningMessage accumulator
             let mut tool_calls_from_stream: Vec<ParsedToolCall> = Vec::new();
             let mut stream_error_message: Option<String> = None;
             let mut did_retry_push = false;
@@ -822,8 +904,13 @@ impl AgentLoop {
                         parser.feed_chunk(&roo_types::api::ApiStreamChunk::Text { text });
                     }
 
+                    // TS L2834-2848: Reasoning with **Title** formatting
                     StreamEvent::ReasoningDelta { text } => {
-                        self.engine.emitter().emit_streaming_reasoning_delta(&task_id, &text);
+                        reasoning_message.push_str(&text);
+                        // Apply **Title** formatting: add line breaks before
+                        // **Title** patterns that appear after sentence endings
+                        let formatted_reasoning = format_reasoning_text(&reasoning_message);
+                        self.engine.emitter().emit_streaming_reasoning_delta(&task_id, &formatted_reasoning);
                         parser.feed_chunk(&roo_types::api::ApiStreamChunk::Reasoning {
                             text,
                             signature: None,
@@ -2045,7 +2132,7 @@ impl AgentLoop {
     }
 
     // ===================================================================
-    // 8. build_clean_conversation_history() — TS line 4458-4598
+    // 8. build_clean_conversation_history_from() — TS line 4458-4598
     // ===================================================================
 
     /// Build a clean copy of the conversation history for the API.
@@ -2060,33 +2147,29 @@ impl AgentLoop {
     ///    are processed: if the reasoning looks like encrypted content (starts with
     ///    a non-text pattern), it is preserved; plain-text reasoning is stripped
     ///    unless the model's `preserveReasoning` flag is set.
-    /// 2. **Assistant messages with embedded reasoning** — If the first content
+    /// 2. **Assistant messages with reasoning_details** — OpenRouter format for
+    ///    Gemini 3 etc.: if `reasoning_details` is present, preserve it on the
+    ///    assistant message and skip further reasoning block processing.
+    /// 3. **Assistant messages with embedded reasoning** — If the first content
     ///    block of an assistant message is a Thinking/RedactedThinking block, it
     ///    is separated into a reasoning item + clean assistant message.
-    /// 3. **Default path** — Regular messages (user, tool_result) are passed
+    /// 4. **Default path** — Regular messages (user, tool_result) are passed
     ///    through with their content intact.
-    /// 4. **Image stripping** — Images are removed if the model doesn't support them.
-    /// 5. **Empty message filtering** — Messages with no content are removed.
-    /// Build a clean conversation history for API requests.
-    ///
-    /// Source: `src/core/task/Task.ts` — `buildCleanConversationHistory` (L4458-4598)
-    ///
-    /// Handles:
-    /// - Standalone reasoning messages (skip — stored for history, not sent to API)
-    /// - Encrypted reasoning (Thinking/RedactedThinking blocks with signature)
-    /// - Plain text reasoning (Thinking blocks without signature) with preserveReasoning flag
-    /// - Default assistant and user messages
-    fn build_clean_conversation_history(&self) -> Vec<roo_types::api::ApiMessage> {
-        let history = self.engine.api_conversation_history();
+    /// 5. **Image stripping** — Images are removed if the model doesn't support them.
+    /// 6. **Empty message filtering** — Messages with no content are removed.
+    fn build_clean_conversation_history_from(
+        &self,
+        messages: &[roo_types::api::ApiMessage],
+    ) -> Vec<roo_types::api::ApiMessage> {
         let supports_images = self.message_builder.supports_images();
 
         // TS L4562: this.api.getModel().info.preserveReasoning === true
         let (_, model_info) = self.provider.get_model();
         let preserve_reasoning = model_info.preserve_reasoning.unwrap_or(false);
 
-        let mut clean: Vec<roo_types::api::ApiMessage> = Vec::with_capacity(history.len());
+        let mut clean: Vec<roo_types::api::ApiMessage> = Vec::with_capacity(messages.len());
 
-        for msg in history {
+        for msg in messages {
             // --- Standalone reasoning message ---
             // TS L4474-4484: if (msg.type === "reasoning") { ... continue }
             // In Rust, standalone reasoning is detected by reasoning field + empty content.
@@ -2100,6 +2183,42 @@ impl AgentLoop {
             // --- Assistant message with content ---
             // TS L4487-4586: if (msg.role === "assistant") { ... }
             if msg.role == roo_types::api::MessageRole::Assistant && !msg.content.is_empty() {
+                // TS L4500-4522: Check for reasoning_details (OpenRouter format for Gemini 3, etc.)
+                // If the message has reasoning_details, preserve them and skip further
+                // reasoning block processing.
+                if let Some(ref details) = msg.reasoning_details {
+                    if !details.is_empty() {
+                        // Check if there's a summary type without encrypted content
+                        let has_summary = details.iter().any(|d| {
+                            d.get("type").and_then(|t| t.as_str())
+                                .map(|t| t == "summary")
+                                .unwrap_or(false)
+                        });
+                        let has_encrypted = details.iter().any(|d| {
+                            d.get("encrypted_content").is_some()
+                        });
+
+                        // If model supports preserveReasoning, or has summary without encrypted,
+                        // preserve the reasoning_details on the assistant message
+                        if preserve_reasoning || (has_summary && !has_encrypted) {
+                            clean.push(roo_types::api::ApiMessage {
+                                role: msg.role.clone(),
+                                content: msg.content.clone(),
+                                reasoning: None,
+                                ts: msg.ts,
+                                truncation_parent: msg.truncation_parent.clone(),
+                                is_truncation_marker: msg.is_truncation_marker,
+                                truncation_id: msg.truncation_id.clone(),
+                                condense_parent: msg.condense_parent.clone(),
+                                is_summary: msg.is_summary,
+                                condense_id: msg.condense_id.clone(),
+                                reasoning_details: Some(details.clone()),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
                 let raw_content = &msg.content;
                 let first = &raw_content[0];
                 let rest = &raw_content[1..];
@@ -2140,6 +2259,7 @@ impl AgentLoop {
                         role: msg.role.clone(),
                         content: final_content,
                         reasoning: None,
+                        reasoning_details: None,
                         ts: msg.ts,
                         truncation_parent: msg.truncation_parent.clone(),
                         is_truncation_marker: msg.is_truncation_marker,
@@ -2164,6 +2284,7 @@ impl AgentLoop {
                         role: msg.role.clone(),
                         content: final_content,
                         reasoning: None,
+                        reasoning_details: None,
                         ts: msg.ts,
                         truncation_parent: msg.truncation_parent.clone(),
                         is_truncation_marker: msg.is_truncation_marker,
@@ -2182,6 +2303,7 @@ impl AgentLoop {
                         role: msg.role.clone(),
                         content: clean_content,
                         reasoning: msg.reasoning.clone(),
+                        reasoning_details: msg.reasoning_details.clone(),
                         ts: msg.ts,
                         truncation_parent: msg.truncation_parent.clone(),
                         is_truncation_marker: msg.is_truncation_marker,
@@ -2202,6 +2324,7 @@ impl AgentLoop {
                     role: msg.role.clone(),
                     content: clean_content,
                     reasoning: msg.reasoning.clone(),
+                    reasoning_details: msg.reasoning_details.clone(),
                     ts: msg.ts,
                     truncation_parent: msg.truncation_parent.clone(),
                     is_truncation_marker: msg.is_truncation_marker,
@@ -2659,6 +2782,8 @@ impl AgentLoop {
         let system_prompt = self.message_builder.system_prompt().to_string();
         let task_id = self.engine.config().task_id.clone();
         let provider_ref = Arc::clone(&self.provider);
+        // TS: state?.customSupportPrompts?.CONDENSE
+        let custom_condensing_prompt = self.engine.config().custom_condensing_prompt.clone();
 
         let options = roo_condense::summarize::SummarizeConversationOptions {
             messages: history,
@@ -2666,7 +2791,7 @@ impl AgentLoop {
             system_prompt,
             task_id,
             is_automatic_trigger: true,
-            custom_condensing_prompt: None,
+            custom_condensing_prompt,
             metadata: None,
             environment_details: Some(self.get_environment_details()),
             files_read_by_roo: None,
@@ -2734,6 +2859,7 @@ impl AgentLoop {
                 condense_parent: None,
                 is_summary: None,
                 condense_id: None,
+            reasoning_details: None,
             };
 
             self.engine.truncate_history(to_remove, marker);
@@ -3840,6 +3966,7 @@ mod tests {
                 condense_parent: None,
                 is_summary: None,
                 condense_id: None,
+            reasoning_details: None,
             });
         }
 
@@ -3867,7 +3994,7 @@ mod tests {
     // --- build_clean_conversation_history tests ---
 
     #[test]
-    fn test_build_clean_conversation_history() {
+    fn test_build_clean_conversation_history_from() {
         let engine = TaskEngine::new(make_config()).unwrap();
         let provider = MockProvider::new("test");
         let builder = MessageBuilder::new("test");
@@ -3888,9 +4015,10 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
 
-        let history = agent.build_clean_conversation_history();
+        let history = agent.build_clean_conversation_history_from(&agent.engine.api_conversation_history());
         assert_eq!(history.len(), 1);
     }
 
@@ -3964,6 +4092,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
 
         // Add a regular user message
@@ -3980,9 +4109,10 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
 
-        let history = agent.build_clean_conversation_history();
+        let history = agent.build_clean_conversation_history_from(&agent.engine.api_conversation_history());
         // Plain text standalone reasoning should be skipped, only user message remains
         // But the empty-content assistant message with reasoning also enters the
         // "standalone reasoning" path and is skipped.
@@ -4027,9 +4157,10 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
 
-        let history = agent.build_clean_conversation_history();
+        let history = agent.build_clean_conversation_history_from(&agent.engine.api_conversation_history());
         // Should have one message (thinking stripped, text preserved)
         assert_eq!(history.len(), 1);
         // The thinking block should be stripped (preserve_reasoning defaults to false)

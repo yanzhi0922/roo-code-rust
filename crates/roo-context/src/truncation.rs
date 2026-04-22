@@ -1,4 +1,4 @@
-//! Sliding window truncation.
+﻿//! Sliding window truncation.
 //!
 //! Truncates a conversation by tagging messages as hidden instead of removing them,
 //! implementing non-destructive sliding window truncation that allows messages to be
@@ -132,6 +132,7 @@ pub fn truncate_conversation(
         condense_parent: None,
         is_summary: None,
         condense_id: None,
+            reasoning_details: None,
     };
 
     // Insert marker at the boundary position
@@ -167,6 +168,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

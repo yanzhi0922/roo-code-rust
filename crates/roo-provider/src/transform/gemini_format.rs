@@ -1,4 +1,4 @@
-//! Converts Anthropic content blocks to Gemini Part format.
+﻿//! Converts Anthropic content blocks to Gemini Part format.
 //!
 //! Derived from `src/api/transform/gemini-format.ts`.
 
@@ -385,6 +385,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

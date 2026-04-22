@@ -1,4 +1,4 @@
-//! Core types for message management.
+﻿//! Core types for message management.
 //!
 //! Defines the data structures used throughout the message manager:
 //! - [`ClineMessage`] — UI-facing conversation message

@@ -1,4 +1,4 @@
-//! Roo CLI — command-line interface for Roo Code Rust.
+﻿//! Roo CLI — command-line interface for Roo Code Rust.
 //!
 //! Supports sending messages to AI providers and streaming responses.
 //! Implements a full tool-call execution loop: user input → API call →
@@ -737,6 +737,7 @@ async fn run_single(
         condense_parent: None,
         is_summary: None,
         condense_id: None,
+            reasoning_details: None,
     }];
 
     loop {
@@ -777,6 +778,7 @@ async fn run_single(
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
 
         // If no tool calls, we're done.
@@ -799,6 +801,7 @@ async fn run_single(
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
 
         // Continue loop — let the model process tool results.
@@ -850,6 +853,7 @@ async fn run_interactive(
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
 
         // Tool-call loop: keep calling the API until we get a text-only response.
@@ -899,6 +903,7 @@ async fn run_interactive(
                 condense_parent: None,
                 is_summary: None,
                 condense_id: None,
+            reasoning_details: None,
             });
 
             // If no tool calls, we're done — wait for next user input.
@@ -921,6 +926,7 @@ async fn run_interactive(
                 condense_parent: None,
                 is_summary: None,
                 condense_id: None,
+            reasoning_details: None,
             });
 
             // Continue loop — let the model process tool results.

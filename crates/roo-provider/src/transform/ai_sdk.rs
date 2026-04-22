@@ -1,4 +1,4 @@
-//! Vercel AI SDK format conversion utilities.
+﻿//! Vercel AI SDK format conversion utilities.
 //!
 //! Derived from `src/api/transform/ai-sdk.ts`.
 //! Transforms between Anthropic/OpenAI formats and Vercel AI SDK `ModelMessage`
@@ -398,6 +398,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -413,6 +414,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

@@ -1,4 +1,4 @@
-//! DeepSeek R1 / Z.ai GLM message format conversion (merged module).
+﻿//! DeepSeek R1 / Z.ai GLM message format conversion (merged module).
 //!
 //! Derived from `src/api/transform/r1-format.ts` and
 //! `src/api/transform/zai-format.ts`.  The two TypeScript modules are
@@ -383,6 +383,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

@@ -1,4 +1,4 @@
-//! AWS Bedrock provider handler.
+﻿//! AWS Bedrock provider handler.
 //!
 //! Uses the Bedrock Converse API with AWS SigV4 signing.
 //! Supports cross-region inference and custom model IDs.
@@ -469,6 +469,7 @@ impl Provider for AwsBedrockHandler {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }], None);
 
         let body_bytes = serde_json::to_vec(&body).map_err(ProviderError::Json)?;

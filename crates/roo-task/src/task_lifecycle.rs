@@ -1,4 +1,4 @@
-//! Task lifecycle management.
+﻿//! Task lifecycle management.
 //!
 //! Faithfully replicates the lifecycle methods from
 //! `src/core/task/Task.ts` (lines 1579–2470, 4454–4632).
@@ -1455,6 +1455,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }];
 
         lc.overwrite_api_conversation_history(history);

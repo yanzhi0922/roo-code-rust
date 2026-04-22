@@ -1,4 +1,4 @@
-//! API message builder for constructing conversation history and tool definitions.
+﻿//! API message builder for constructing conversation history and tool definitions.
 //!
 //! Builds the messages array and tool definitions sent to the Provider API.
 //!
@@ -302,6 +302,7 @@ impl MessageBuilder {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -326,6 +327,7 @@ impl MessageBuilder {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -377,6 +379,7 @@ impl MessageBuilder {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 }

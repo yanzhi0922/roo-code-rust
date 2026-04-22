@@ -1,4 +1,4 @@
-//! Message transformation for condensing.
+﻿//! Message transformation for condensing.
 //!
 //! Transforms messages by converting tool blocks to text and injecting synthetic
 //! tool results for orphan tool calls.
@@ -100,6 +100,7 @@ pub fn inject_synthetic_tool_results(messages: &[ApiMessage]) -> Vec<ApiMessage>
         condense_parent: None,
         is_summary: None,
         condense_id: None,
+            reasoning_details: None,
     };
 
     let mut result = messages.to_vec();
@@ -128,6 +129,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -149,6 +151,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -194,6 +197,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }];
         let result = transform_messages_for_condensing(&messages);
         assert_eq!(result.len(), 1);

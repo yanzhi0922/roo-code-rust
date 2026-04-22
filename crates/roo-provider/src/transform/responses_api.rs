@@ -1,4 +1,4 @@
-//! OpenAI Responses API format conversion (input + stream parsing).
+﻿//! OpenAI Responses API format conversion (input + stream parsing).
 //!
 //! Derived from `src/api/transform/responses-api-input.ts` and
 //! `src/api/transform/responses-api-stream.ts`.
@@ -445,6 +445,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

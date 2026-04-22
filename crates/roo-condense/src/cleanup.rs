@@ -1,4 +1,4 @@
-//! Post-truncation cleanup utilities.
+﻿//! Post-truncation cleanup utilities.
 //!
 //! Cleans up orphaned `condense_parent` and `truncation_parent` references
 //! after a truncation operation (rewind/delete).
@@ -103,6 +103,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

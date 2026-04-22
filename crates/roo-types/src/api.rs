@@ -246,6 +246,14 @@ pub struct ApiMessage {
     /// The condense ID for a summary message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condense_id: Option<String>,
+
+    // --- Reasoning details (OpenRouter/Gemini format) ---
+
+    /// Reasoning details array for models that report structured reasoning
+    /// (e.g., OpenRouter format for Gemini 3).
+    /// Source: `src/core/task/Task.ts` — `reasoning_details` on ApiMessage
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 /// Message role.

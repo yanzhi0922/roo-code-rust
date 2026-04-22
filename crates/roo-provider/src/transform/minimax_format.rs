@@ -1,4 +1,4 @@
-//! MiniMax message format conversion.
+﻿//! MiniMax message format conversion.
 //!
 //! Derived from `src/api/transform/minimax-format.ts`.
 //! MiniMax thinking models error when they receive a standalone user message
@@ -157,6 +157,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -172,6 +173,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

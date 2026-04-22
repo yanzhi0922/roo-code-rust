@@ -73,6 +73,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }];
 
         let result = maybe_remove_image_blocks(messages, &model_info);
@@ -111,6 +112,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }];
 
         let result = maybe_remove_image_blocks(messages, &model_info);

@@ -1,4 +1,4 @@
-//! API conversation history persistence.
+﻿//! API conversation history persistence.
 //!
 //! Provides read/write operations for API messages (the raw conversation history
 //! sent to/from the LLM API) stored as JSON files.
@@ -107,6 +107,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

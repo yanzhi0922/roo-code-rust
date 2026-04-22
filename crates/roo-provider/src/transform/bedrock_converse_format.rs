@@ -1,4 +1,4 @@
-//! AWS Bedrock Converse message format conversion.
+﻿//! AWS Bedrock Converse message format conversion.
 //!
 //! Derived from `src/api/transform/bedrock-converse-format.ts`.
 //! Converts Anthropic-style [`ApiMessage`] into AWS Bedrock Converse format,
@@ -236,6 +236,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -251,6 +252,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 

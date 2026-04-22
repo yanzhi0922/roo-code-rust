@@ -187,6 +187,13 @@ pub struct TaskConfig {
     /// When set, the engine will persist messages and metadata to disk.
     /// When `None`, persistence methods are no-ops.
     pub storage_path: Option<String>,
+    /// Custom condensing prompt for context compression.
+    ///
+    /// Source: `src/core/task/Task.ts` — `customSupportPrompts?.CONDENSE`
+    /// When set, this prompt is used instead of the default for LLM-based
+    /// context condensation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_condensing_prompt: Option<String>,
 }
 
 impl TaskConfig {
@@ -210,6 +217,7 @@ impl TaskConfig {
             images: Vec::new(),
             history_item_id: None,
             storage_path: None,
+            custom_condensing_prompt: None,
         }
     }
 

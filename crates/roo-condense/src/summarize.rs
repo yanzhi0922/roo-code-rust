@@ -1,4 +1,4 @@
-//! Conversation summarization.
+﻿//! Conversation summarization.
 //!
 //! Summarizes conversation messages using an LLM call, implementing the "fresh start"
 //! model where the summary becomes a user message and all previous messages are tagged
@@ -169,6 +169,7 @@ pub async fn summarize_conversation(
         condense_parent: None,
         is_summary: None,
         condense_id: None,
+            reasoning_details: None,
     };
 
     // Inject synthetic tool_results for orphan tool_calls to prevent API rejections
@@ -358,6 +359,7 @@ pub async fn summarize_conversation(
         content: summary_content,
         ts: Some(last_msg_ts + 1.0), // Unique timestamp after last message
         reasoning: None,
+        reasoning_details: None,
         truncation_parent: None,
         is_truncation_marker: None,
         truncation_id: None,

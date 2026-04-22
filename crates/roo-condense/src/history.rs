@@ -1,4 +1,4 @@
-//! History management utilities.
+﻿//! History management utilities.
 //!
 //! Functions for filtering and retrieving conversation history,
 //! including messages since last summary and effective API history.
@@ -178,6 +178,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -188,6 +189,7 @@ mod tests {
                 text: text.to_string(),
             }],
             reasoning: None,
+            reasoning_details: None,
             ts: Some(2000.0),
             truncation_parent: None,
             is_truncation_marker: None,

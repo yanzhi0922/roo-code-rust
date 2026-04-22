@@ -1,4 +1,4 @@
-//! Filters non-Anthropic content blocks from messages.
+﻿//! Filters non-Anthropic content blocks from messages.
 //!
 //! Derived from `src/api/transform/anthropic-filter.ts`.
 //! Uses an allowlist approach — only blocks with recognized Anthropic types are kept.
@@ -81,6 +81,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }
     }
 
@@ -194,6 +195,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }];
         let result = filter_non_anthropic_blocks(messages);
         assert_eq!(result[0].reasoning, Some("some reasoning".to_string()));

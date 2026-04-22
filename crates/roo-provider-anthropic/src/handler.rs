@@ -1,4 +1,4 @@
-//! Anthropic provider handler.
+﻿//! Anthropic provider handler.
 //!
 //! Implements the Provider trait for the Anthropic Messages API.
 //! Handles SSE streaming with Anthropic-specific event types:
@@ -1435,6 +1435,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }];
 
         let result = convert_to_anthropic_messages(&messages);
@@ -1837,6 +1838,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }];
 
         let body = handler.build_request_body("You are helpful", &messages, None);

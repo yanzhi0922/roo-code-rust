@@ -1,4 +1,4 @@
-//! DeepSeek provider handler.
+﻿//! DeepSeek provider handler.
 //!
 //! Uses the OpenAI-compatible chat completions API.
 //! Supports extended thinking mode via `deepseek-reasoner`.
@@ -120,6 +120,7 @@ impl DeepSeekHandler {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         }];
         all_messages.extend(messages.iter().cloned());
 
@@ -427,6 +428,7 @@ mod tests {
                 condense_parent: None,
                 is_summary: None,
                 condense_id: None,
+            reasoning_details: None,
             },
             roo_types::api::ApiMessage {
                 role: roo_types::api::MessageRole::User,
@@ -441,6 +443,7 @@ mod tests {
                 condense_parent: None,
                 is_summary: None,
                 condense_id: None,
+            reasoning_details: None,
             },
         ];
 

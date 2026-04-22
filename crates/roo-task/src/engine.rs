@@ -1,4 +1,4 @@
-//! Task engine core logic.
+﻿//! Task engine core logic.
 //!
 //! Provides [`TaskEngine`] which orchestrates the task lifecycle including
 //! state management, loop control, event emission, streaming state, and
@@ -858,6 +858,7 @@ impl TaskEngine {
                 condense_parent: None,
                 is_summary: None,
                 condense_id: None,
+            reasoning_details: None,
             };
             self.api_conversation_history.insert(1, marker);
         }
@@ -892,6 +893,7 @@ impl TaskEngine {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
     }
 
@@ -1348,6 +1350,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         };
 
         engine.add_api_message(msg.clone());
@@ -1676,6 +1679,7 @@ mod tests {
             condense_parent: None,
             is_summary: None,
             condense_id: None,
+            reasoning_details: None,
         });
 
         // Save
