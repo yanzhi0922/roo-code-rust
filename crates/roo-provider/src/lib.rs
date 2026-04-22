@@ -26,7 +26,7 @@ pub mod vertex_auth;
 
 // Re-export key types
 pub use error::{ProviderError, Result};
-pub use handler::{ApiStream, CreateMessageMetadata, Provider, build_api_handler};
+pub use handler::{ApiStream, CreateMessageMetadata, Provider, build_api_handler, register_provider, ProviderFactoryFn};
 pub use base_provider::{
     BaseProvider,
     convert_tools_for_openai,

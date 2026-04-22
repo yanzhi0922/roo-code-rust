@@ -88,6 +88,10 @@ impl Server {
     pub async fn serve_stdio(&self) -> ServerResult<()> {
         info!("Starting Roo Code server (stdio transport)");
 
+        // Register all known provider factories (idempotent — safe to call
+        // multiple times, though the first call is the one that matters).
+        crate::register_providers();
+
         let handler = Handler::from_arc(self.app.clone());
         let router = Router::new(handler);
         let mut transport = crate::transport::StdioTransport::new();

@@ -2,7 +2,9 @@
 //!
 //! Derived from `src/api/index.ts`.
 
+use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -93,12 +95,69 @@ pub trait Provider: Send + Sync {
     fn provider_name(&self) -> ProviderName;
 }
 
+/// Type alias for a provider factory function.
+///
+/// Each provider crate registers one of these via [`register_provider`].
+pub type ProviderFactoryFn =
+    fn(&ProviderSettings) -> std::result::Result<Box<dyn Provider>, ProviderError>;
+
+/// Global provider registry (lazy-initialized).
+static PROVIDER_REGISTRY: RwLock<Option<HashMap<ProviderName, ProviderFactoryFn>>> =
+    RwLock::new(None);
+
+/// Register a provider factory function.
+///
+/// Call this during application startup (before any [`build_api_handler`] call)
+/// to make a provider available through the factory.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use roo_provider::{register_provider, Provider, ProviderError};
+/// use roo_types::api::ProviderName;
+/// use roo_types::provider_settings::ProviderSettings;
+///
+/// fn my_factory(settings: &ProviderSettings) -> Result<Box<dyn Provider>, ProviderError> {
+///     // ... construct provider ...
+/// }
+///
+/// roo_provider::register_provider(ProviderName::Anthropic, my_factory);
+/// ```
+pub fn register_provider(name: ProviderName, factory: ProviderFactoryFn) {
+    let mut registry = PROVIDER_REGISTRY.write().unwrap();
+    let map = registry.get_or_insert_with(HashMap::new);
+    map.insert(name, factory);
+}
+
+/// Register all built-in providers.
+///
+/// This is a convenience function that calls [`register_provider`] for each
+/// known provider crate. Individual provider crates should each expose an
+/// `init()` function that registers themselves.
+///
+/// # Note
+///
+/// This function is intentionally a no-op in the `roo-provider` crate itself,
+/// because `roo-provider` cannot depend on individual provider crates (that
+/// would create circular dependencies). The actual registration happens in
+/// the application crate (e.g. `roo-server`) which depends on all providers.
+pub fn register_default_providers() {
+    // No-op here — registration is done by the application crate.
+    // See `roo-server::register_providers()`.
+}
+
 /// Builds an API handler for the given configuration.
 ///
 /// Source: `src/api/index.ts` — `buildApiHandler`
 ///
-/// Individual provider implementations live in their own crates.
-/// This factory validates configuration and delegates construction.
+/// Looks up the provider in the global registry and delegates construction
+/// to the registered factory function.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::Other`] if:
+/// - No `api_provider` is specified in the configuration
+/// - No factory has been registered for the requested provider
 pub fn build_api_handler(
     configuration: &ProviderSettings,
 ) -> std::result::Result<Box<dyn Provider>, ProviderError> {
@@ -106,8 +165,17 @@ pub fn build_api_handler(
         .api_provider
         .ok_or_else(|| ProviderError::Other("No API provider specified".to_string()))?;
 
-    Err(ProviderError::Other(format!(
-        "Provider '{}' must be constructed through its dedicated crate",
-        provider_name.as_str()
-    )))
+    let registry = PROVIDER_REGISTRY.read().unwrap();
+    let map = registry
+        .as_ref()
+        .ok_or_else(|| ProviderError::Other("No providers registered — call register_provider() first".to_string()))?;
+
+    let factory = map.get(&provider_name).ok_or_else(|| {
+        ProviderError::Other(format!(
+            "Provider '{}' is not registered — add the provider crate dependency and call register_provider() during startup",
+            provider_name.as_str()
+        ))
+    })?;
+
+    factory(configuration)
 }

@@ -60,3 +60,57 @@ pub use error::ServerResult;
 pub use router::Router;
 pub use server::Server;
 pub use transport::Transport;
+
+use roo_provider::{Provider, register_provider};
+use roo_types::api::ProviderName;
+
+/// Register all built-in provider factories.
+///
+/// Must be called once during application startup, before any
+/// [`roo_provider::build_api_handler`] calls.
+///
+/// Each provider crate's `Handler::from_settings()` is wrapped in a
+/// factory closure and registered under its [`ProviderName`] variant.
+pub fn register_providers() {
+    // Anthropic
+    register_provider(ProviderName::Anthropic, |settings| {
+        roo_provider_anthropic::AnthropicHandler::from_settings(settings)
+            .map(|h| Box::new(h) as Box<dyn Provider>)
+    });
+
+    // OpenAI
+    register_provider(ProviderName::Openai, |settings| {
+        roo_provider_openai::OpenAiHandler::from_settings(settings)
+            .map(|h| Box::new(h) as Box<dyn Provider>)
+    });
+
+    // MiniMax (uses Anthropic protocol)
+    register_provider(ProviderName::MiniMax, |settings| {
+        roo_provider_minimax::MiniMaxHandler::from_settings(settings)
+            .map(|h| Box::new(h) as Box<dyn Provider>)
+    });
+
+    // DeepSeek
+    register_provider(ProviderName::DeepSeek, |settings| {
+        roo_provider_deepseek::DeepSeekHandler::from_settings(settings)
+            .map(|h| Box::new(h) as Box<dyn Provider>)
+    });
+
+    // OpenRouter
+    register_provider(ProviderName::OpenRouter, |settings| {
+        roo_provider_openrouter::OpenRouterHandler::from_settings(settings)
+            .map(|h| Box::new(h) as Box<dyn Provider>)
+    });
+
+    // Google Gemini
+    register_provider(ProviderName::Gemini, |settings| {
+        roo_provider_google::GoogleHandler::from_settings(settings)
+            .map(|h| Box::new(h) as Box<dyn Provider>)
+    });
+
+    // Ollama
+    register_provider(ProviderName::Ollama, |settings| {
+        roo_provider_ollama::OllamaHandler::from_settings(settings)
+            .map(|h| Box::new(h) as Box<dyn Provider>)
+    });
+}

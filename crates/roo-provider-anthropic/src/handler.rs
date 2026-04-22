@@ -32,6 +32,75 @@ use crate::types::{
 use roo_provider::vertex_auth::VertexTokenProvider;
 
 // =========================================================================
+// Tool choice conversion
+// =========================================================================
+
+/// Convert an OpenAI-style `tool_choice` value to Anthropic's format.
+///
+/// Mirrors the TS `convertOpenAIToolChoiceToAnthropic` function:
+/// - `"auto"`    → `{ "type": "auto" }`
+/// - `"required"` → `{ "type": "any" }`
+/// - `"none"`    → `None` (don't set `tool_choice`; caller may omit `tools`)
+/// - `{ "type": "function", "function": { "name": "…" } }`
+///               → `{ "type": "tool", "name": "…" }`
+///
+/// When `parallel_tool_calls` is `Some(false)`, the result is wrapped with
+/// `"disable_parallel_tool_use": true`.
+fn convert_tool_choice_for_anthropic(
+    tool_choice: &serde_json::Value,
+    parallel_tool_calls: Option<bool>,
+) -> Option<serde_json::Value> {
+    let disable_parallel = parallel_tool_calls == Some(false);
+
+    // String variants: "auto", "required", "none"
+    if let Some(s) = tool_choice.as_str() {
+        return match s {
+            "auto" => {
+                if disable_parallel {
+                    Some(json!({
+                        "type": "auto",
+                        "disable_parallel_tool_use": true
+                    }))
+                } else {
+                    Some(json!({ "type": "auto" }))
+                }
+            }
+            "required" => {
+                if disable_parallel {
+                    Some(json!({
+                        "type": "any",
+                        "disable_parallel_tool_use": true
+                    }))
+                } else {
+                    Some(json!({ "type": "any" }))
+                }
+            }
+            "none" => None, // Don't set tool_choice
+            _ => None,
+        };
+    }
+
+    // Object variant: { "type": "function", "function": { "name": "…" } }
+    if let Some(obj) = tool_choice.as_object() {
+        if obj.get("type").and_then(|v| v.as_str()) == Some("function") {
+            if let Some(name) = obj
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                return Some(json!({
+                    "type": "tool",
+                    "name": name,
+                    "disable_parallel_tool_use": disable_parallel,
+                }));
+            }
+        }
+    }
+
+    None
+}
+
+// =========================================================================
 // AnthropicHandler
 // =========================================================================
 
@@ -138,6 +207,7 @@ impl AnthropicHandler {
         system_prompt: &str,
         messages: &[ApiMessage],
         tools: Option<&Vec<Value>>,
+        metadata: &CreateMessageMetadata,
     ) -> Value {
         let max_tokens = self.model_info.max_tokens.unwrap_or(8192);
         // Strip :thinking suffix for the actual API call
@@ -215,6 +285,16 @@ impl AnthropicHandler {
                 }
 
                 body["tools"] = json!(anthropic_tools);
+            }
+        }
+
+        // Add tool_choice if specified in metadata
+        if let Some(ref tool_choice) = metadata.tool_choice {
+            if let Some(anthropic_choice) = convert_tool_choice_for_anthropic(
+                tool_choice,
+                metadata.parallel_tool_calls,
+            ) {
+                body["tool_choice"] = anthropic_choice;
             }
         }
 
@@ -667,9 +747,9 @@ impl Provider for AnthropicHandler {
         system_prompt: &str,
         messages: Vec<ApiMessage>,
         tools: Option<Vec<Value>>,
-        _metadata: CreateMessageMetadata,
+        metadata: CreateMessageMetadata,
     ) -> Result<ApiStream> {
-        let body = self.build_request_body(system_prompt, &messages, tools.as_ref());
+        let body = self.build_request_body(system_prompt, &messages, tools.as_ref(), &metadata);
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
         let mut request = self
@@ -983,6 +1063,7 @@ impl AnthropicVertexHandler {
         system_prompt: &str,
         messages: &[ApiMessage],
         tools: Option<&Vec<Value>>,
+        metadata: &CreateMessageMetadata,
     ) -> Value {
         let max_tokens = self.model_info.max_tokens.unwrap_or(8192);
 
@@ -1043,6 +1124,16 @@ impl AnthropicVertexHandler {
             }
         }
 
+        // Add tool_choice if specified in metadata
+        if let Some(ref tool_choice) = metadata.tool_choice {
+            if let Some(anthropic_choice) = convert_tool_choice_for_anthropic(
+                tool_choice,
+                metadata.parallel_tool_calls,
+            ) {
+                body["tool_choice"] = anthropic_choice;
+            }
+        }
+
         body
     }
 }
@@ -1054,9 +1145,9 @@ impl Provider for AnthropicVertexHandler {
         system_prompt: &str,
         messages: Vec<ApiMessage>,
         tools: Option<Vec<Value>>,
-        _metadata: CreateMessageMetadata,
+        metadata: CreateMessageMetadata,
     ) -> Result<ApiStream> {
-        let body = self.build_request_body(system_prompt, &messages, tools.as_ref());
+        let body = self.build_request_body(system_prompt, &messages, tools.as_ref(), &metadata);
         let url = self.config.stream_url(&self.model_id);
         let access_token = self.get_access_token().await?;
 
@@ -1841,7 +1932,7 @@ mod tests {
             reasoning_details: None,
         }];
 
-        let body = handler.build_request_body("You are helpful", &messages, None);
+        let body = handler.build_request_body("You are helpful", &messages, None, &CreateMessageMetadata::default());
 
         // Verify basic structure
         assert_eq!(body["model"], "claude-sonnet-4@20250514");
@@ -1882,7 +1973,7 @@ mod tests {
             }
         })]);
 
-        let body = handler.build_request_body("system", &messages, tools.as_ref());
+        let body = handler.build_request_body("system", &messages, tools.as_ref(), &CreateMessageMetadata::default());
 
         let tools_arr = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools_arr.len(), 1);

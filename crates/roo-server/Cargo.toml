@@ -21,6 +21,13 @@ roo-command = { path = "../roo-command" }
 roo-terminal = { path = "../roo-terminal" }
 roo-telemetry = { path = "../roo-telemetry" }
 roo-provider = { path = "../roo-provider" }
+roo-provider-anthropic = { path = "../roo-provider-anthropic" }
+roo-provider-openai = { path = "../roo-provider-openai" }
+roo-provider-minimax = { path = "../roo-provider-minimax" }
+roo-provider-deepseek = { path = "../roo-provider-deepseek" }
+roo-provider-openrouter = { path = "../roo-provider-openrouter" }
+roo-provider-google = { path = "../roo-provider-google" }
+roo-provider-ollama = { path = "../roo-provider-ollama" }
 roo-message-queue = { path = "../roo-message-queue" }
 roo-skills = { path = "../roo-skills" }
 tokio = { workspace = true, features = ["full"] }
